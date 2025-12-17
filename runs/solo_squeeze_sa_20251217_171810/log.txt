@@ -1,0 +1,12 @@
+Submission blend+repair gerada em runs/solo_squeeze_sa_20251217_171810/submission.csv
+Inputs: 1
+n range: [1, 200]
+TopK per n: 1
+Blend iters: 0
+Repair passes: 0
+Squeeze: on (tries=18, alpha=[0.915,0.9992], aniso=0.75, repair_passes=240)
+SA: on (iters=600, restarts=1)
+Final rigid: on
+Output decimals: 15
+Improved n vs best parent: 6
+Score (local): 93.451923352

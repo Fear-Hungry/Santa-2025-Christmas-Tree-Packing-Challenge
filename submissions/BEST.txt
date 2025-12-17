@@ -1,0 +1,2 @@
+best_file	submissions/submission_best.csv
+best_score	93.457947624000
