@@ -1,0 +1,14 @@
+Submission blend+repair gerada em runs/newpool/br_target30.csv
+Inputs: 1
+n range: [1, 200]
+TopK per n: 1
+Blend iters: 0
+Repair passes: 200
+Repair MTV: on (passes=400, damping=1, split=0.5)
+Squeeze: on (tries=80, alpha=[0.9,0.9995], mode=control, aniso=0.7, repair_passes=250)
+SA: on (iters=2000, restarts=1)
+Final rigid: on
+Output decimals: 9
+Improved n vs best parent: 0
+Score (local): 92.044037533
+TIME 0.94 s

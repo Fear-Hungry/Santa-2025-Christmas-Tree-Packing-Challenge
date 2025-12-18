@@ -29,7 +29,7 @@ Você sobe score com 3 coisas (ordem de importância):
    Tipicamente: algum **tiling/lattice** (triangular/hex) + padrão de rotações (ex.: alternar rotações por linha/coluna) e depois ajuste fino.
 
 3. **Metaheurística para refino** (quase sempre necessário para “score alto”)
-   O espaço de busca é contínuo e grande (≈ `3n` variáveis por instância: `x,y,deg`). Abordagens comuns: **Simulated Annealing (SA)**, hill-climb, mutações estilo GA, etc. ([LinkedIn][3])
+   O espaço de busca é contínuo e grande (≈ `3n` variáveis por instância: `x,y,deg`). Abordagens comuns: **Simulated Annealing (SA)**, hill-climb, mutações estilo GA, etc.
 
 ---
 
@@ -153,19 +153,20 @@ Cole aqui:
 Neste repo vamos usar **C++** como linguagem principal do solver:
 
 * Código em C++ dividido em módulos:
-  * `geom.hpp` / `geom.cpp`: tipos (`Point`, `Polygon`, `TreePose`), transformação de polígonos, bounding box / bounding square (`s_n`), formatação `s...`.
-  * `collision.hpp` / `collision.cpp`: checagem de colisão (broad-phase por círculo envolvente + narrow-phase por interseção de segmentos).
-  * `baseline.hpp` / `baseline.cpp`: baseline em grade que gera posições sem overlap.
-  * `solver_baseline.cpp`: `main` que usa os módulos acima e escreve um `submission_baseline_cpp.csv` válido.
+  * `include/geom.hpp` / `src/geom.cpp`: tipos (`Point`, `Polygon`, `TreePose`), transformação de polígonos, bounding box / bounding square (`s_n`), formatação `s...`.
+  * `include/collision.hpp` / `src/collision.cpp`: checagem de colisão (broad-phase por círculo envolvente + narrow-phase por interseção de segmentos).
+  * `include/baseline.hpp` / `src/baseline.cpp`: baseline em grade que gera posições sem overlap.
+  * `apps/solver_baseline.cpp`: `main` que usa os módulos acima e escreve um `submission_baseline_cpp.csv` válido (use `--output` para mudar o caminho).
 
 Para compilar e gerar o submission baseline:
 
 ```bash
-g++ -std=c++17 -O2 solver_baseline.cpp geom.cpp collision.cpp baseline.cpp -o solver_baseline
-./solver_baseline
+mkdir -p bin
+g++ -std=c++17 -O2 apps/solver_baseline.cpp src/baseline.cpp src/submission_io.cpp src/geom.cpp src/collision.cpp -Iinclude -o bin/solver_baseline
+./bin/solver_baseline --output runs/tmp/submission_baseline_cpp.csv
 ```
 
-Saída: `submission_baseline_cpp.csv` (+ score local no terminal).
+Saída padrão: `submission_baseline_cpp.csv` (+ score local no terminal). No exemplo acima: `runs/tmp/submission_baseline_cpp.csv`.
 
 ### Solver de tesselação (lattice hexagonal)
 
@@ -174,11 +175,12 @@ Este solver gera uma solução “estrutural” baseada em **tesselação hexago
 Compilar e rodar:
 
 ```bash
-g++ -std=c++17 -O2 solver_tessellation.cpp ga.cpp geom.cpp collision.cpp -o solver_tessellation
-./solver_tessellation
+mkdir -p bin
+g++ -std=c++17 -O2 apps/solver_tessellation.cpp src/ga.cpp src/submission_io.cpp src/sa.cpp src/geom.cpp src/collision.cpp -Iinclude -o bin/solver_tessellation
+./bin/solver_tessellation --output runs/tmp/submission_tessellation_cpp.csv
 ```
 
-Saída: `submission_tessellation_cpp.csv`.
+Saída padrão: `submission_tessellation_cpp.csv`. No exemplo acima: `runs/tmp/submission_tessellation_cpp.csv`.
 
 Opções úteis (SA é opcional; padrão = desligado):
 
@@ -191,9 +193,12 @@ Opções úteis (SA é opcional; padrão = desligado):
 * `--sa-iters-per-n 20`
 * `--sa-w-micro 1.0` / `--sa-w-swap-rot 0.25` / `--sa-w-relocate 0.15` (pesos do portfólio)
 * `--sa-w-block-translate 0.05` / `--sa-w-block-rotate 0.02` / `--sa-w-lns 0.001` (vizinhanças grandes; `lns` é caro)
+* `--sa-w-push-contact 0.2` (macro determinístico: empurra árvore da casca até contato no eixo dominante)
+* `--sa-w-squeeze 0.05` / `--sa-squeeze-pushes 6` (repete `push-contact` algumas vezes; tende a igualar width≈height)
 * `--sa-block-size 6` (tamanho do bloco nos macro-movimentos)
-* `--sa-lns-remove 6` (quantas árvores remover no LNS)
+* `--sa-lns-remove 6` (quantas árvores remover no LNS; o remove mira a **casca**/extremos)
 * `--sa-hh-segment 50` / `--sa-hh-reaction 0.20` (controlador adaptativo de vizinhanças)
+  * Dica prática: pra reduzir `s_n`, normalmente vale **subir macro** (`block-translate`, `lns`) e **baixar micro**.
 * `--no-final-rigid` (desliga o pós-processamento “final rigid” por `n`)
 * `--seed 1` (reprodutibilidade)
 * `--angles 0,15,30,45,60,75`
@@ -207,34 +212,48 @@ Este solver implementa a ideia de **“tile pequeno + translação”**:
 
 * define um **motif** com `k` árvores dentro de uma célula fundamental (tile),
 * acha o menor `spacing` seguro para o tile via checagem periódica,
-* replica o tile em uma lattice hexagonal e pega as **200 árvores mais centrais**,
-* gera `n=1..200` via **prefixo** dessa ordem,
-* opcionalmente faz um **refino local** nos pontos de fronteira para reduzir o quadrado final.
+* replica o tile em uma lattice (default: hex/triangular) e gera um **pool de candidatos** (`--pool-size`, default: 600),
+* gera `n=1..200` via uma **ordem de prefixo** (`--prefix-order`):
+  * `central`: ordem por centralidade (primeiro `max(|x|,|y|)`, depois distância),
+  * `greedy`: ordem gulosa que adiciona a próxima árvore que minimiza o novo `s_n` (bounding square),
+* se `prune` estiver ligado (padrão), também tenta um **pruning guloso da borda** e escolhe o melhor (prefixo vs. prune) por `n`,
+* opcionalmente faz um **refino local de fronteira**: compaction “puxa a casca pra dentro” com backtracking + um SA leve.
 
 Compilar e rodar:
 
 ```bash
-g++ -std=c++17 -O2 solver_tile.cpp geom.cpp collision.cpp -o solver_tile
-./solver_tile
+mkdir -p bin
+g++ -std=c++17 -O2 apps/solver_tile.cpp src/boundary_refine.cpp src/prefix_prune.cpp src/tiling_pool.cpp src/submission_io.cpp src/sa.cpp src/geom.cpp src/collision.cpp -Iinclude -o bin/solver_tile
+./bin/solver_tile --output runs/tmp/submission_tile_cpp.csv
 ```
 
 Opções úteis:
 
 * `--k 4` (tamanho do tile / motif)
+* `--pool-size 800` (tamanho do pool de candidatos para o prefixo/prune)
+* `--prefix-order greedy` (prefixo “score-aware” por minimização incremental de `s_n`)
 * `--tile-iters 5000` (busca aleatória simples para “apertar” o tile; offline)
+* `--lattice-v-ratio 1.0` / `--lattice-theta 60` (reticulado geral: |v|/|u| e ângulo(u,v); default é hex)
+* `--no-tile-opt-lattice` (otimiza só o motif, não mexe no reticulado durante `--tile-iters`)
 * `--refine-iters 20000` (refino local nas fronteiras; offline)
 * `--sa-restarts 3` / `--sa-base-iters 500` / `--sa-iters-per-n 20` (SA opcional)
 * `--sa-w-micro 1.0` / `--sa-w-swap-rot 0.25` / `--sa-w-relocate 0.15` (pesos do portfólio)
 * `--sa-w-block-translate 0.05` / `--sa-w-block-rotate 0.02` / `--sa-w-lns 0.001` (vizinhanças grandes; `lns` é caro)
 * `--sa-block-size 6` (tamanho do bloco nos macro-movimentos)
-* `--sa-lns-remove 6` (quantas árvores remover no LNS)
+* `--sa-lns-remove 6` (quantas árvores remover no LNS; o remove mira a **casca**/extremos)
 * `--sa-hh-segment 50` / `--sa-hh-reaction 0.20` (controlador adaptativo de vizinhanças)
+  * Dica prática: pra reduzir `s_n`, normalmente vale **subir macro** (`block-translate`, `lns`) e **baixar micro**.
+* `--sa-chain` (modo “encadeado”: começa em `n=200`, remove 1 árvore e roda um SA curtíssimo na **casca**; repete para `n` menores)
+  * `--sa-chain-base-iters 40` / `--sa-chain-iters-per-n 0` (iters por `n` no chain; usa os mesmos pesos do SA)
+  * `--sa-chain-band-layers 2.5` (espessura da boundary-layer em “camadas” do spacing; interior fica congelado)
+  * `--sa-chain-min-n 1` (até qual `n` aplicar SA; abaixo disso só faz as remoções)
 * `--no-final-rigid` (desliga o pós-processamento “final rigid” por `n`; alias: `--no-sa-rigid`)
+* `--no-prune` (desliga o pruning guloso e usa apenas o prefixo)
 * `--seed 1` (reprodutibilidade)
 * `--shift-a 0.0` / `--shift-b 0.0` / `--shift a,b` (offset do tile; ótimo pra sweeps/ensembling)
 * `--output submission_tile_cpp.csv`
 
-Saída padrão: `submission_tile_cpp.csv`.
+Saída padrão: `submission_tile_cpp.csv`. No exemplo acima: `runs/tmp/submission_tile_cpp.csv`.
 
 ### Simulador local de score
 
@@ -249,11 +268,12 @@ onde `s_n` é o lado do quadrado axis-aligned que contém todas as árvores da i
 Compilar e rodar o simulador:
 
 ```bash
-g++ -std=c++17 -O2 score_submission.cpp geom.cpp collision.cpp -o score_submission
-./score_submission submission.csv
+mkdir -p bin
+g++ -std=c++17 -O2 apps/score_submission.cpp src/submission_io.cpp src/geom.cpp src/collision.cpp -Iinclude -o bin/score_submission
+./bin/score_submission submission.csv
 ```
 
-Observação: a forma da árvore é definida em `get_tree_polygon()` (`geom.cpp`). Atualmente já usamos o polígono oficial (15 vértices) da árvore; se o Kaggle atualizar a geometria, ajuste aqui.
+Observação: a forma da árvore é definida em `get_tree_polygon()` (`src/geom.cpp`). Atualmente já usamos o polígono oficial (15 vértices) da árvore; se o Kaggle atualizar a geometria, ajuste aqui.
 
 Depois, vamos evoluir esse baseline em C++ com heurísticas (SA, hill-climb, etc.) em cima das `TreePose`.
 
@@ -264,22 +284,24 @@ Como cada `n` é uma instância independente, dá para combinar vários `submiss
 Compilar e rodar:
 
 ```bash
-g++ -std=c++17 -O2 ensemble_submissions.cpp geom.cpp collision.cpp -o ensemble_submissions
-./ensemble_submissions submission_ensemble.csv run1.csv run2.csv run3.csv
-./score_submission submission_ensemble.csv
+mkdir -p bin
+g++ -std=c++17 -O2 apps/ensemble_submissions.cpp src/submission_io.cpp src/geom.cpp src/collision.cpp -Iinclude -o bin/ensemble_submissions
+./bin/ensemble_submissions submission_ensemble.csv run1.csv run2.csv run3.csv
+./bin/score_submission submission_ensemble.csv
 ```
 
 Observação: `ensemble_submissions` aplica por padrão um pós-processamento “final rigid” por `n` (rotação global que pode reduzir o quadrado axis-aligned). Para desligar: `--no-final-rigid`.
+Detalhe: o “final rigid” é implementado em `src/geom.cpp` usando **convex hull + rotating calipers** (minimum bounding square), evitando depender de ângulos discretos.
 
 ### Sweep + blend (modo simples para ganhar score)
 
-Se você quer rodar M variantes e fazer o blend por `n` automaticamente, use `sweep_blend.py`.
+Se você quer rodar M variantes e fazer o blend por `n` automaticamente, use `scripts/sweep_blend.py`.
 
 Placeholders do `--cmd`: `{seed} {shift_a} {shift_b} {out} {run}` + quaisquer variáveis definidas por `--set/--choice/--uniform/--randint`.
 
 ```bash
-./sweep_blend.py --runs 10 --seed0 1 \
-  --cmd './solver_tessellation --seed {seed} --shift {shift_a},{shift_b} --output {out}' \
+./scripts/sweep_blend.py --runs 10 --seed0 1 \
+  --cmd './bin/solver_tessellation --seed {seed} --shift {shift_a},{shift_b} --output {out}' \
   --runs-dir runs_tess \
   --out submission_blended.csv
 ```
@@ -287,11 +309,11 @@ Placeholders do `--cmd`: `{seed} {shift_a} {shift_b} {out} {run}` + quaisquer va
 Exemplo variando parâmetros (tesselação + offsets + blocos de SA):
 
 ```bash
-./sweep_blend.py --runs 20 --seed0 1 \
+./scripts/sweep_blend.py --runs 20 --seed0 1 \
   --choice 'sa_block_size=4|6|8' \
   --choice 'angles=0,15,30,45,60,75|0,10,20,30,40,50,60' \
   --uniform spacing_safety=1.000,1.010 \
-  --cmd './solver_tessellation --seed {seed} --shift {shift_a},{shift_b} --sa-block-size {sa_block_size} --angles {angles} --spacing-safety {spacing_safety} --output {out}' \
+  --cmd './bin/solver_tessellation --seed {seed} --shift {shift_a},{shift_b} --sa-block-size {sa_block_size} --angles {angles} --spacing-safety {spacing_safety} --output {out}' \
   --runs-dir runs_tess \
   --out submission_blended.csv
 ```
@@ -310,20 +332,20 @@ Depois do ensemble simples, dá para tentar um salto extra misturando **mais gra
 Compilar e rodar:
 
 ```bash
-g++ -std=c++17 -O2 blend_repair.cpp geom.cpp collision.cpp -o blend_repair
-./blend_repair submission_repair.csv runs_tess/run_*.csv \
+mkdir -p bin
+g++ -std=c++17 -O2 apps/blend_repair.cpp src/submission_io.cpp src/sa.cpp src/geom.cpp src/collision.cpp -Iinclude -o bin/blend_repair
+./bin/blend_repair submission_repair.csv runs_tess/run_*.csv \
   --topk-per-n 30 --blend-iters 200 \
   --boundary-topk 20 --replace-min 3 --replace-max 16 \
   --repair-passes 400 --repair-attempts 60 \
   --sa-iters 200 --sa-restarts 1
-./score_submission submission_repair.csv
+./bin/score_submission submission_repair.csv
 ```
 
 Principais knobs: `--topk-per-n`, `--blend-iters`, `--repair-passes`, `--repair-attempts`, `--replace-min/--replace-max` e `--boundary-topk`.
 
 [1]: https://www.competehub.dev/en/competitions/kagglesanta-2025 "Santa 2025 - Christmas Tree Packing Challenge - CompeteHub"
 [2]: https://www.kaggle.com/code/jekiwantaufik/santa-2025-christmas-tree-packing-challenge?utm_source=chatgpt.com "Santa 2025 - Christmas Tree Packing Challenge"
-[3]: https://www.linkedin.com/posts/shan-wan-65015060_santa-2025-christmas-tree-packing-challenge-activity-7397258249777098752-R7De?utm_source=chatgpt.com "Santa 2025 - Christmas Tree Packing Challenge | Shan WAN"
 [4]: https://www.kaggle.com/code/jekiwantaufik/santa-2025-christmas-tree-packing-challenge-2?utm_source=chatgpt.com "Santa 2025 - Christmas Tree Packing Challenge 2"
 [5]: https://www.kaggle.com/code/koushikkumardinda/santa-2025-christmas-tree-packing-challenge?utm_source=chatgpt.com "Santa 2025 - Christmas Tree Packing Challenge"
 [6]: https://www.kaggle.com/code/muhammadibrahim3093/ensembling-santa-2025?utm_source=chatgpt.com "Ensembling_Santa_2025"

@@ -1,0 +1,17 @@
+Shift search: a=0.255208333 b=0.192708333 (score=101.134550829, angle=0.000)
+Submission gerada em runs/newpool/tile_k4_density1.csv
+k (tile): 4
+Pool size: 3000
+Prefix order: greedy
+Tile iters: 20000
+Refine iters: 50000
+Lattice v_ratio: 1.843044
+Lattice theta: 122.566
+Min spacing: 1.039856550
+Spacing (safety): 1.040376478
+Best angle: 0.000
+Score (local): 100.434739843
+Prune: on
+Final rigid: on
+SA chain: off
+TIME 29.36 s

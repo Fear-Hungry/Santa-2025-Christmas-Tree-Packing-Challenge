@@ -1,0 +1,10 @@
+[tess run 1] qui 18 dez 2025 18:16:43 -03
+GA (n_max=200) best_side: 11.224725020 (spacing=0.793833940, angle=0.000000000, shift=0.899622164,0.767939358)
+Submission gerada em runs/ai_full_cpp_20251218_180054/tess/tess_seed4001.csv
+Score (local): 128.256725178
+Hex spacing: 0.794588487
+Angles: 6
+SA restarts: 2
+SA base iters: 400
+SA iters per n: 20
+Final rigid: on

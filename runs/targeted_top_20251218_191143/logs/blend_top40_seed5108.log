@@ -1,0 +1,14 @@
+[seed 5108] qui 18 dez 2025 19:18:50 -03
+Submission blend+repair gerada em runs/targeted_top_20251218_191143/variants/blend_top40_seed5108.csv
+Inputs: 11
+n range: [1, 200]
+TopK per n: 30
+Blend iters: 220
+Repair passes: 350
+Repair MTV: on (passes=200, damping=1, split=0.5)
+Squeeze: on (tries=12, alpha=[0.99,0.9995], mode=control, aniso=0.7, repair_passes=200)
+SA: on (iters=150, restarts=1)
+Final rigid: on
+Output decimals: 9
+Improved n vs best parent: 12
+Score (local): 86.202186586

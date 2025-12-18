@@ -1,0 +1,14 @@
+Submission blend+repair gerada em runs/newpool/tile_k4_density_chain1_br.csv
+Inputs: 1
+n range: [1, 200]
+TopK per n: 1
+Blend iters: 0
+Repair passes: 400
+Repair MTV: on (passes=400, damping=1, split=0.5)
+Squeeze: on (tries=80, alpha=[0.8,0.9995], mode=control, aniso=0.7, repair_passes=400)
+SA: on (iters=3000, restarts=1)
+Final rigid: on
+Output decimals: 9
+Improved n vs best parent: 7
+Score (local): 99.565435897
+TIME 11.60 s

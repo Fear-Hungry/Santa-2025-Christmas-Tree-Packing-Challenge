@@ -1,0 +1,17 @@
+[tile run 1] qui 18 dez 2025 18:01:27 -03
+Shift search: a=0.462500000 b=0.050000000 (score=105.795780390, angle=0.000)
+Submission gerada em runs/ai_full_cpp_20251218_180054/tile/tile_k3_seed3001.csv
+k (tile): 3
+Pool size: 1200
+Prefix order: greedy
+Tile iters: 2000
+Refine iters: 12000
+Lattice v_ratio: 1.978691
+Lattice theta: 85.101
+Min spacing: 0.808995315
+Spacing (safety): 0.809804310
+Best angle: 0.000
+Score (local): 102.762627783
+Prune: on
+Final rigid: on
+SA chain: off

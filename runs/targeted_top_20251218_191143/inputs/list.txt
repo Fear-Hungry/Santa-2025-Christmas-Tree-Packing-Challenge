@@ -1,0 +1,11 @@
+runs/ai_full_cpp_20251218_180054/blend_repair.csv
+runs/ai_full_cpp_20251218_180054/tile/tile_k2_seed3005.csv
+runs/ai_full_cpp_20251218_180054/tile/tile_k2_seed3006.csv
+runs/ai_full_cpp_20251218_180054/tile/tile_k2_seed3007.csv
+runs/ai_full_cpp_20251218_180054/tile/tile_k2_seed3008.csv
+runs/ai_full_cpp_20251218_180054/tile/tile_k3_seed3001.csv
+runs/ai_full_cpp_20251218_180054/tile/tile_k3_seed3002.csv
+runs/ai_full_cpp_20251218_180054/tile/tile_k4_seed3003.csv
+runs/ai_full_cpp_20251218_180054/tile/tile_k4_seed3004.csv
+runs/ai_full_cpp_20251218_180054/tess/tess_seed4001.csv
+runs/ai_full_cpp_20251218_180054/tess/tess_seed4002.csv

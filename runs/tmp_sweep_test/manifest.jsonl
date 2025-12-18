@@ -1,0 +1,1 @@
+{"run": 0, "seed": 1, "shift_a": 0.26879, "shift_b": 0.425336, "out": "runs/tmp_sweep_test/run_000.csv", "cmd": "./bin/solver_tile --seed 1 --shift 0.268790,0.425336 --output runs/tmp_sweep_test/run_000.csv", "resumed": false, "vars": {}}

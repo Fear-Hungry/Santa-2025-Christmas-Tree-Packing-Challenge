@@ -1,0 +1,158 @@
+[tess sweep] qui 18 dez 2025 17:58:28 -03
+[001/016] ./bin/solver_tessellation --seed 2001 --shift 0.099869,0.682538 --angles 0,15,30,45,60,75 --spacing-safety 1.007978 --output runs/ai_full_20251218_174820/tess_runs/run_000.csv
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_000.csv
+Score (local): 132.533047769
+Hex spacing: 0.800127587
+Angles: 6
+SA restarts: 0
+SA base iters: 0
+SA iters per n: 0
+Final rigid: on
+[002/016] ./bin/solver_tessellation --seed 2002 --shift 0.701329,0.839171 --angles 0,15,30,45,60,75 --spacing-safety 1.006867 --use-ga --ga-pop 30 --ga-gens 40 --ga-elite 2 --ga-tournament 3 --ga-spacing-min 1.000 --ga-spacing-max 1.010 --ga-rots 0,180 --sa-restarts 2 --sa-base-iters 300 --sa-iters-per-n 20 --sa-w-block-translate 0.06 --sa-w-lns 0.002 --sa-w-push-contact 0.2 --sa-w-squeeze 0.05 --sa-squeeze-pushes 6 --output runs/ai_full_20251218_174820/tess_runs/run_001.csv
+GA (n_max=200) best_side: 11.225438963 (spacing=0.793892825, angle=0.000000000, shift=0.914428458,0.324187981)
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_001.csv
+Score (local): 126.798067216
+Hex spacing: 0.799245681
+Angles: 6
+SA restarts: 2
+SA base iters: 300
+SA iters per n: 20
+Final rigid: on
+[003/016] ./bin/solver_tessellation --seed 2003 --shift 0.005361,0.437876 --angles 0,15,30,45,60,75 --spacing-safety 1.004118 --output runs/ai_full_20251218_174820/tess_runs/run_002.csv
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_002.csv
+Score (local): 133.522570433
+Hex spacing: 0.797063539
+Angles: 6
+SA restarts: 0
+SA base iters: 0
+SA iters per n: 0
+Final rigid: on
+[004/016] ./bin/solver_tessellation --seed 2004 --shift 0.974704,0.288947 --angles 0,15,30,45,60,75 --spacing-safety 1.008884 --use-ga --ga-pop 30 --ga-gens 40 --ga-elite 2 --ga-tournament 3 --ga-spacing-min 1.000 --ga-spacing-max 1.010 --ga-rots 0,180 --sa-restarts 2 --sa-base-iters 300 --sa-iters-per-n 20 --sa-w-block-translate 0.06 --sa-w-lns 0.002 --sa-w-push-contact 0.2 --sa-w-squeeze 0.05 --sa-squeeze-pushes 6 --output runs/ai_full_20251218_174820/tess_runs/run_003.csv
+GA (n_max=200) best_side: 11.224596721 (spacing=0.793823358, angle=0.000000000, shift=0.175120214,0.775031644)
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_003.csv
+Score (local): 127.618152651
+Hex spacing: 0.800846764
+Angles: 6
+SA restarts: 2
+SA base iters: 300
+SA iters per n: 20
+Final rigid: on
+[005/016] ./bin/solver_tessellation --seed 2005 --shift 0.035172,0.720436 --angles 0,10,20,30,40,50,60 --spacing-safety 1.004548 --output runs/ai_full_20251218_174820/tess_runs/run_004.csv
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_004.csv
+Score (local): 131.669003053
+Hex spacing: 0.797404871
+Angles: 7
+SA restarts: 0
+SA base iters: 0
+SA iters per n: 0
+Final rigid: on
+[006/016] ./bin/solver_tessellation --seed 2006 --shift 0.770598,0.238819 --angles 0,15,30,45,60,75 --spacing-safety 1.002056 --use-ga --ga-pop 50 --ga-gens 60 --ga-elite 2 --ga-tournament 3 --ga-spacing-min 1.000 --ga-spacing-max 1.010 --ga-rots 0,90,180 --sa-restarts 2 --sa-base-iters 300 --sa-iters-per-n 20 --sa-w-block-translate 0.06 --sa-w-lns 0.002 --sa-w-push-contact 0.2 --sa-w-squeeze 0.05 --sa-squeeze-pushes 6 --output runs/ai_full_20251218_174820/tess_runs/run_005.csv
+GA (n_max=200) best_side: 11.912854068 (spacing=0.793883876, angle=0.000000000, shift=0.388412652,0.310988972)
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_005.csv
+Score (local): 125.297240952
+Hex spacing: 0.795426734
+Angles: 6
+SA restarts: 2
+SA base iters: 300
+SA iters per n: 20
+Final rigid: on
+[007/016] ./bin/solver_tessellation --seed 2007 --shift 0.810790,0.029798 --angles 0,10,20,30,40,50,60 --spacing-safety 1.009703 --output runs/ai_full_20251218_174820/tess_runs/run_006.csv
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_006.csv
+Score (local): 133.588126313
+Hex spacing: 0.801496882
+Angles: 7
+SA restarts: 0
+SA base iters: 0
+SA iters per n: 0
+Final rigid: on
+[008/016] ./bin/solver_tessellation --seed 2008 --shift 0.096686,0.908657 --angles 0,15,30,45,60,75 --spacing-safety 1.005535 --use-ga --ga-pop 30 --ga-gens 60 --ga-elite 2 --ga-tournament 3 --ga-spacing-min 1.000 --ga-spacing-max 1.010 --ga-rots 0,180 --sa-restarts 2 --sa-base-iters 300 --sa-iters-per-n 20 --sa-w-block-translate 0.06 --sa-w-lns 0.002 --sa-w-push-contact 0.2 --sa-w-squeeze 0.05 --sa-squeeze-pushes 6 --output runs/ai_full_20251218_174820/tess_runs/run_007.csv
+GA (n_max=200) best_side: 11.224369995 (spacing=0.793804658, angle=0.000000000, shift=0.336415981,0.769553810)
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_007.csv
+Score (local): 127.758249639
+Hex spacing: 0.798188346
+Angles: 6
+SA restarts: 2
+SA base iters: 300
+SA iters per n: 20
+Final rigid: on
+[009/016] ./bin/solver_tessellation --seed 2009 --shift 0.734812,0.497780 --angles 0,10,20,30,40,50,60 --spacing-safety 1.001784 --output runs/ai_full_20251218_174820/tess_runs/run_008.csv
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_008.csv
+Score (local): 130.755490815
+Hex spacing: 0.795210822
+Angles: 7
+SA restarts: 0
+SA base iters: 0
+SA iters per n: 0
+Final rigid: on
+[010/016] ./bin/solver_tessellation --seed 2010 --shift 0.948885,0.747451 --angles 0,10,20,30,40,50,60 --spacing-safety 1.004841 --use-ga --ga-pop 30 --ga-gens 60 --ga-elite 2 --ga-tournament 3 --ga-spacing-min 1.000 --ga-spacing-max 1.010 --ga-rots 0,90,180 --sa-restarts 2 --sa-base-iters 300 --sa-iters-per-n 20 --sa-w-block-translate 0.06 --sa-w-lns 0.002 --sa-w-push-contact 0.2 --sa-w-squeeze 0.05 --sa-squeeze-pushes 6 --output runs/ai_full_20251218_174820/tess_runs/run_009.csv
+GA (n_max=200) best_side: 12.150152159 (spacing=0.793867601, angle=0.000000000, shift=0.094530360,0.220860833)
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_009.csv
+Score (local): 126.625773695
+Hex spacing: 0.797637453
+Angles: 7
+SA restarts: 2
+SA base iters: 300
+SA iters per n: 20
+Final rigid: on
+[011/016] ./bin/solver_tessellation --seed 2011 --shift 0.995202,0.802817 --angles 0,15,30,45,60,75 --spacing-safety 1.002288 --output runs/ai_full_20251218_174820/tess_runs/run_010.csv
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_010.csv
+Score (local): 131.516255414
+Hex spacing: 0.795610895
+Angles: 6
+SA restarts: 0
+SA base iters: 0
+SA iters per n: 0
+Final rigid: on
+[012/016] ./bin/solver_tessellation --seed 2012 --shift 0.039035,0.854801 --angles 0,10,20,30,40,50,60 --spacing-safety 1.001837 --use-ga --ga-pop 50 --ga-gens 40 --ga-elite 2 --ga-tournament 3 --ga-spacing-min 1.000 --ga-spacing-max 1.010 --ga-rots 0,180 --sa-restarts 2 --sa-base-iters 300 --sa-iters-per-n 20 --sa-w-block-translate 0.06 --sa-w-lns 0.002 --sa-w-push-contact 0.2 --sa-w-squeeze 0.05 --sa-squeeze-pushes 6 --output runs/ai_full_20251218_174820/tess_runs/run_011.csv
+GA (n_max=200) best_side: 11.225344273 (spacing=0.793885015, angle=0.000000000, shift=0.742431854,0.190935813)
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_011.csv
+Score (local): 126.735411443
+Hex spacing: 0.795252893
+Angles: 7
+SA restarts: 2
+SA base iters: 300
+SA iters per n: 20
+Final rigid: on
+[013/016] ./bin/solver_tessellation --seed 2013 --shift 0.360154,0.239588 --angles 0,10,20,30,40,50,60 --spacing-safety 1.001975 --output runs/ai_full_20251218_174820/tess_runs/run_012.csv
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_012.csv
+Score (local): 131.527140478
+Hex spacing: 0.795362437
+Angles: 7
+SA restarts: 0
+SA base iters: 0
+SA iters per n: 0
+Final rigid: on
+[014/016] ./bin/solver_tessellation --seed 2014 --shift 0.974308,0.277449 --angles 0,10,20,30,40,50,60 --spacing-safety 1.007984 --use-ga --ga-pop 30 --ga-gens 40 --ga-elite 2 --ga-tournament 3 --ga-spacing-min 1.000 --ga-spacing-max 1.010 --ga-rots 0,90,180 --sa-restarts 2 --sa-base-iters 300 --sa-iters-per-n 20 --sa-w-block-translate 0.06 --sa-w-lns 0.002 --sa-w-push-contact 0.2 --sa-w-squeeze 0.05 --sa-squeeze-pushes 6 --output runs/ai_full_20251218_174820/tess_runs/run_013.csv
+GA (n_max=200) best_side: 11.912584192 (spacing=0.793863101, angle=0.000000000, shift=0.181872968,0.421182701)
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_013.csv
+Score (local): 127.189647982
+Hex spacing: 0.800132349
+Angles: 7
+SA restarts: 2
+SA base iters: 300
+SA iters per n: 20
+Final rigid: on
+[015/016] ./bin/solver_tessellation --seed 2015 --shift 0.907582,0.527425 --angles 0,15,30,45,60,75 --spacing-safety 1.009978 --output runs/ai_full_20251218_174820/tess_runs/run_014.csv
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_014.csv
+Score (local): 134.640981414
+Hex spacing: 0.801715176
+Angles: 6
+SA restarts: 0
+SA base iters: 0
+SA iters per n: 0
+Final rigid: on
+[016/016] ./bin/solver_tessellation --seed 2016 --shift 0.036256,0.004189 --angles 0,10,20,30,40,50,60 --spacing-safety 1.002959 --use-ga --ga-pop 50 --ga-gens 40 --ga-elite 2 --ga-tournament 3 --ga-spacing-min 1.000 --ga-spacing-max 1.010 --ga-rots 0,180 --sa-restarts 2 --sa-base-iters 300 --sa-iters-per-n 20 --sa-w-block-translate 0.06 --sa-w-lns 0.002 --sa-w-push-contact 0.2 --sa-w-squeeze 0.05 --sa-squeeze-pushes 6 --output runs/ai_full_20251218_174820/tess_runs/run_015.csv
+GA (n_max=200) best_side: 11.224583464 (spacing=0.793822265, angle=0.000000000, shift=0.075113667,0.255421629)
+Submission gerada em runs/ai_full_20251218_174820/tess_runs/run_015.csv
+Score (local): 126.641096611
+Hex spacing: 0.796143531
+Angles: 7
+SA restarts: 2
+SA base iters: 300
+SA iters per n: 20
+Final rigid: on
+Submission ensembling gerada em runs/ai_full_20251218_174820/ensemble_tess.csv
+Inputs: 16
+Score (local): 121.899102694
+Final rigid: on
+Score: 121.899102694
