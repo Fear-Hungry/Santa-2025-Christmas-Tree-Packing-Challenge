@@ -29,6 +29,8 @@ __pycache__/
 /submissions/
 
 # Scratch / temporary outputs
+/runs/*
+!/runs/tmp/
 /runs/tmp/*
 !/runs/tmp/.gitkeep
 !/runs/tmp/README.md
