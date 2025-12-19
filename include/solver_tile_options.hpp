@@ -52,6 +52,8 @@ struct Options {
     double sa_w_lns = 0.001;
     int sa_block_size = 6;
     int sa_lns_remove = 6;
+    int sa_lns_candidates = 1;
+    int sa_lns_eval_attempts_per_tree = 0;
     int sa_hh_segment = 50;
     double sa_hh_reaction = 0.20;
     SARefiner::OverlapMetric sa_overlap_metric = SARefiner::OverlapMetric::kArea;
@@ -59,6 +61,7 @@ struct Options {
     double sa_overlap_weight_start = -1.0;
     double sa_overlap_weight_end = -1.0;
     double sa_overlap_weight_power = 1.0;
+    bool sa_overlap_weight_geometric = false;
     double sa_overlap_eps_area = 1e-12;
     double sa_overlap_cost_cap = 0.0;
     double sa_plateau_eps = 0.0;
@@ -93,6 +96,28 @@ struct Options {
     int ils_repair_mtv_passes = 300;
     double ils_repair_mtv_damping = 1.0;
     double ils_repair_mtv_split = 0.5;
+
+    // Milenkovic-Zeng (soft overlap) + ILS (shift + tabu).
+    // Aplica um SA em 2 fases (liquefação -> solidificação) com soft overlap,
+    // e em volta executa um ILS estilo paper (shift perturb + tabu em swap-rot).
+    int mz_its_iters = 0;
+    int mz_perturb_depth = -1;      // <0 => 10*n
+    int mz_tabu_depth = -1;         // <0 => 10*n
+    int mz_tabu_samples = 24;       // amostras por iteração do tabu
+    int mz_phase_a_iters = 0;
+    int mz_phase_b_iters = 0;
+    double mz_a_t0 = 0.50;
+    double mz_a_t1 = 0.10;
+    double mz_b_t0 = 0.15;
+    double mz_b_t1 = 0.01;
+    double mz_overlap_a = 1.0;
+    double mz_overlap_b_start = 1.0;
+    double mz_overlap_b_end = 1e5;
+    bool mz_overlap_b_geometric = true;
+    double mz_w_push_contact = 100.0;   // "squeeze" via push_to_contact (+ overshoot)
+    double mz_push_overshoot_a = 1.0;   // fração de max_step na fase A
+    double mz_push_overshoot_b = 0.05;  // fração de max_step na fase B
+    double mz_w_resolve_overlap_b = 10.0;
 
     bool final_rigid = true;
     uint64_t seed = 123456789ULL;

@@ -37,3 +37,4 @@ __pycache__/
 
 *.md
 !README.md
+!docs/ARCHITECTURE.md

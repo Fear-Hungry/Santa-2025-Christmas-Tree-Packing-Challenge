@@ -6,19 +6,11 @@
 #include <limits>
 #include <sstream>
 
+#include "wrap_utils.hpp"
+
 namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kCalipersEps = 1e-12;
-
-double wrap_deg(double deg) {
-    deg = std::fmod(deg, 360.0);
-    if (deg <= -180.0) {
-        deg += 360.0;
-    } else if (deg > 180.0) {
-        deg -= 360.0;
-    }
-    return deg;
-}
 
 double wrap_deg_90(double deg) {
     deg = wrap_deg(deg);

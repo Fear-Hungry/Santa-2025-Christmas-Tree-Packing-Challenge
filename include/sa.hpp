@@ -82,6 +82,8 @@ public:
         // LNS (macro): remove um subconjunto da borda e reinsere por amostragem.
         int lns_remove = 6;
         int lns_attempts_per_tree = 30;
+        int lns_candidates = 1;  // quantos destroy-candidates avaliar por chamada
+        int lns_eval_attempts_per_tree = 0;  // 0 => usa lns_attempts_per_tree
         double lns_p_uniform = 0.30;
         double lns_p_contact = 0.35;
         double lns_pull_min = 0.30;
@@ -98,6 +100,7 @@ public:
         double overlap_weight_start = -1.0;  // < 0 => usa overlap_weight
         double overlap_weight_end = -1.0;    // < 0 => usa overlap_weight
         double overlap_weight_power = 1.0;   // 1 => linear
+        bool overlap_weight_geometric = false;  // w(t)=w0*(w1/w0)^frac (se w0,w1>0)
         double overlap_eps_area = 1e-12;     // métrica <= eps conta como "sem overlap"
         double overlap_cost_cap = 0.0;    // 0 => sem cap; senão, rejeita custo acima do cap
 
@@ -125,7 +128,11 @@ public:
 
     struct Result {
         std::vector<TreePose> best_poses;
+        std::vector<TreePose> final_poses;
         double best_side = std::numeric_limits<double>::infinity();
+        double final_side = std::numeric_limits<double>::infinity();
+        double final_overlap = 0.0;
+        double final_cost = std::numeric_limits<double>::infinity();
     };
 
     SARefiner(const Polygon& base_poly, double radius);

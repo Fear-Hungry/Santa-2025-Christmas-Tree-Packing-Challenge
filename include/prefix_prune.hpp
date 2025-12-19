@@ -72,3 +72,11 @@ ILSResult ils_basin_hop_compact(const Polygon& base_poly,
                                 std::vector<TreePose>& poses,
                                 uint64_t seed,
                                 const Options& opt);
+
+// Milenkovic-Zeng (soft overlap) + ILS estilo paper (shift + tabu/ILS), aplicado
+// somente em `n_max` (a própria lista de poses de tamanho n_max).
+ILSResult mz_its_soft_compact(const Polygon& base_poly,
+                              double radius,
+                              std::vector<TreePose>& poses,
+                              uint64_t seed,
+                              const Options& opt);

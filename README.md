@@ -154,7 +154,7 @@ Neste repo vamos usar **C++** como linguagem principal do solver:
 
 * Código em C++ dividido em módulos:
   * `include/geom.hpp` / `src/geom.cpp`: tipos (`Point`, `Polygon`, `TreePose`), transformação de polígonos, bounding box / bounding square (`s_n`), formatação `s...`.
-  * `include/collision.hpp` / `src/collision.cpp`: checagem de colisão (broad-phase por círculo envolvente + narrow-phase por interseção de segmentos).
+  * `include/collision.hpp` / `src/collision.cpp` + `src/collision_polygons.cpp`: checagem de colisão (broad-phase por círculo envolvente + narrow-phase por interseção de segmentos).
   * `include/baseline.hpp` / `src/baseline.cpp`: baseline em grade que gera posições sem overlap.
   * `apps/solver_baseline.cpp`: `main` que usa os módulos acima e escreve um `submission_baseline_cpp.csv` válido (use `--output` para mudar o caminho).
 
@@ -162,7 +162,7 @@ Para compilar e gerar o submission baseline:
 
 ```bash
 mkdir -p bin
-g++ -std=c++17 -O2 apps/solver_baseline.cpp src/baseline.cpp src/submission_io.cpp src/geom.cpp src/collision.cpp -Iinclude -o bin/solver_baseline
+g++ -std=c++17 -O2 apps/solver_baseline.cpp src/baseline.cpp src/submission_io.cpp src/geom.cpp src/collision.cpp src/collision_polygons.cpp -Iinclude -o bin/solver_baseline
 ./bin/solver_baseline --output runs/tmp/submission_baseline_cpp.csv
 ```
 
@@ -176,7 +176,7 @@ Compilar e rodar:
 
 ```bash
 mkdir -p bin
-g++ -std=c++17 -O2 apps/solver_tessellation.cpp src/ga.cpp src/submission_io.cpp src/sa.cpp src/geom.cpp src/collision.cpp -Iinclude -o bin/solver_tessellation
+g++ -std=c++17 -O2 apps/solver_tessellation.cpp src/ga.cpp src/submission_io.cpp src/sa.cpp src/geom.cpp src/collision.cpp src/collision_polygons.cpp -Iinclude -o bin/solver_tessellation
 ./bin/solver_tessellation --output runs/tmp/submission_tessellation_cpp.csv
 ```
 
@@ -223,7 +223,7 @@ Compilar e rodar:
 
 ```bash
 mkdir -p bin
-g++ -std=c++17 -O2 apps/solver_tile.cpp src/boundary_refine.cpp src/prefix_prune.cpp src/tiling_pool.cpp src/submission_io.cpp src/sa.cpp src/geom.cpp src/collision.cpp -Iinclude -o bin/solver_tile
+g++ -std=c++17 -O2 apps/solver_tile.cpp src/boundary_refine.cpp src/prefix_prune.cpp src/tiling_pool.cpp src/submission_io.cpp src/sa.cpp src/geom.cpp src/collision.cpp src/collision_polygons.cpp -Iinclude -o bin/solver_tile
 ./bin/solver_tile --output runs/tmp/submission_tile_cpp.csv
 ```
 
@@ -269,7 +269,7 @@ Compilar e rodar o simulador:
 
 ```bash
 mkdir -p bin
-g++ -std=c++17 -O2 apps/score_submission.cpp src/submission_io.cpp src/geom.cpp src/collision.cpp -Iinclude -o bin/score_submission
+g++ -std=c++17 -O2 apps/score_submission.cpp src/submission_io.cpp src/geom.cpp src/collision.cpp src/collision_polygons.cpp -Iinclude -o bin/score_submission
 ./bin/score_submission submission.csv
 ```
 
@@ -285,7 +285,7 @@ Compilar e rodar:
 
 ```bash
 mkdir -p bin
-g++ -std=c++17 -O2 apps/ensemble_submissions.cpp src/submission_io.cpp src/geom.cpp src/collision.cpp -Iinclude -o bin/ensemble_submissions
+g++ -std=c++17 -O2 apps/ensemble_submissions.cpp src/submission_io.cpp src/geom.cpp src/collision.cpp src/collision_polygons.cpp -Iinclude -o bin/ensemble_submissions
 ./bin/ensemble_submissions submission_ensemble.csv run1.csv run2.csv run3.csv
 ./bin/score_submission submission_ensemble.csv
 ```
@@ -333,7 +333,7 @@ Compilar e rodar:
 
 ```bash
 mkdir -p bin
-g++ -std=c++17 -O2 apps/blend_repair.cpp src/submission_io.cpp src/sa.cpp src/geom.cpp src/collision.cpp -Iinclude -o bin/blend_repair
+g++ -std=c++17 -O2 apps/blend_repair.cpp src/submission_io.cpp src/sa.cpp src/geom.cpp src/collision.cpp src/collision_polygons.cpp -Iinclude -o bin/blend_repair
 ./bin/blend_repair submission_repair.csv runs_tess/run_*.csv \
   --topk-per-n 30 --blend-iters 200 \
   --boundary-topk 20 --replace-min 3 --replace-max 16 \

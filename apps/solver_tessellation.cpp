@@ -51,6 +51,8 @@ struct Options {
     double sa_w_squeeze = 0.0;
     int sa_block_size = 6;
     int sa_lns_remove = 6;
+    int sa_lns_candidates = 1;
+    int sa_lns_eval_attempts_per_tree = 0;
     int sa_hh_segment = 50;
     double sa_hh_reaction = 0.20;
     SARefiner::OverlapMetric sa_overlap_metric = SARefiner::OverlapMetric::kArea;
@@ -58,6 +60,7 @@ struct Options {
     double sa_overlap_weight_start = -1.0;
     double sa_overlap_weight_end = -1.0;
     double sa_overlap_weight_power = 1.0;
+    bool sa_overlap_weight_geometric = false;
     double sa_overlap_eps_area = 1e-12;
     double sa_overlap_cost_cap = 0.0;
     double sa_plateau_eps = 0.0;
@@ -355,6 +358,10 @@ Options parse_args(int argc, char** argv) {
             opt.sa_block_size = parse_int(need(arg));
         } else if (arg == "--sa-lns-remove") {
             opt.sa_lns_remove = parse_int(need(arg));
+        } else if (arg == "--sa-lns-candidates") {
+            opt.sa_lns_candidates = parse_int(need(arg));
+        } else if (arg == "--sa-lns-eval-attempts") {
+            opt.sa_lns_eval_attempts_per_tree = parse_int(need(arg));
         } else if (arg == "--sa-hh-segment") {
             opt.sa_hh_segment = parse_int(need(arg));
         } else if (arg == "--sa-hh-reaction") {
@@ -369,6 +376,8 @@ Options parse_args(int argc, char** argv) {
             opt.sa_overlap_weight_end = parse_double(need(arg));
         } else if (arg == "--sa-overlap-weight-power") {
             opt.sa_overlap_weight_power = parse_double(need(arg));
+        } else if (arg == "--sa-overlap-weight-geometric") {
+            opt.sa_overlap_weight_geometric = true;
         } else if (arg == "--sa-overlap-eps-area") {
             opt.sa_overlap_eps_area = parse_double(need(arg));
         } else if (arg == "--sa-overlap-cost-cap") {
@@ -436,6 +445,12 @@ Options parse_args(int argc, char** argv) {
     }
     if (opt.sa_lns_remove < 0) {
         throw std::runtime_error("--sa-lns-remove precisa ser >= 0.");
+    }
+    if (opt.sa_lns_candidates < 1) {
+        throw std::runtime_error("--sa-lns-candidates precisa ser >= 1.");
+    }
+    if (opt.sa_lns_eval_attempts_per_tree < 0) {
+        throw std::runtime_error("--sa-lns-eval-attempts precisa ser >= 0.");
     }
     if (opt.sa_hh_segment < 0) {
         throw std::runtime_error("--sa-hh-segment precisa ser >= 0.");
@@ -615,6 +630,8 @@ int main(int argc, char** argv) {
                 p.w_squeeze = opt.sa_w_squeeze;
                 p.block_size = opt.sa_block_size;
                 p.lns_remove = opt.sa_lns_remove;
+                p.lns_candidates = opt.sa_lns_candidates;
+                p.lns_eval_attempts_per_tree = opt.sa_lns_eval_attempts_per_tree;
                 p.hh_segment = opt.sa_hh_segment;
                 p.hh_reaction = opt.sa_hh_reaction;
                 p.overlap_metric = opt.sa_overlap_metric;
@@ -622,6 +639,7 @@ int main(int argc, char** argv) {
                 p.overlap_weight_start = opt.sa_overlap_weight_start;
                 p.overlap_weight_end = opt.sa_overlap_weight_end;
                 p.overlap_weight_power = opt.sa_overlap_weight_power;
+                p.overlap_weight_geometric = opt.sa_overlap_weight_geometric;
                 p.overlap_eps_area = opt.sa_overlap_eps_area;
                 p.overlap_cost_cap = opt.sa_overlap_cost_cap;
                 p.plateau_eps = opt.sa_plateau_eps;
