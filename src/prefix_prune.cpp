@@ -48,6 +48,419 @@ std::vector<int> boundary_indices(const std::vector<BoundingBox>& bbs,
     return out;
 }
 
+ILSResult ils_basin_hop_compact(const Polygon& base_poly,
+                                double radius,
+                                std::vector<TreePose>& poses,
+                                uint64_t seed,
+                                const Options& opt) {
+    ILSResult out;
+    if (opt.ils_iters <= 0 || poses.empty()) {
+        return out;
+    }
+
+    const int n = static_cast<int>(poses.size());
+
+    auto side_from_poses = [&](const std::vector<TreePose>& p) -> double {
+        std::vector<BoundingBox> bbs = bounding_boxes_for_poses(base_poly, p);
+        return side_from_extents(compute_extents(bbs));
+    };
+
+    poses = quantize_poses_wrap_deg(poses);
+    if (any_overlap(base_poly, poses, radius)) {
+        throw std::runtime_error("ILS: start contém overlap (precisa ser solução válida).");
+    }
+
+    const double start_side = side_from_poses(poses);
+    out.start_side = start_side;
+    out.best_side = start_side;
+
+    std::vector<TreePose> best = poses;
+    std::vector<TreePose> curr = poses;
+    double best_side = start_side;
+    double curr_side = start_side;
+
+    std::mt19937_64 rng(seed);
+    std::uniform_real_distribution<double> uni01(0.0, 1.0);
+    std::uniform_real_distribution<double> uni_alpha(opt.ils_alpha_min, opt.ils_alpha_max);
+    std::uniform_real_distribution<double> uni_shear(-opt.ils_shear_max, opt.ils_shear_max);
+    std::uniform_real_distribution<double> uni_rot(-opt.ils_rot_deg_max, opt.ils_rot_deg_max);
+    std::normal_distribution<double> normal(0.0, 1.0);
+
+    auto ils_temp_at = [&](int it) -> double {
+        if (!opt.ils_accept_sa) {
+            return 0.0;
+        }
+        const double t0 = opt.ils_t0;
+        const double t1 = opt.ils_t1;
+        if (!(t0 > 0.0) || !(t1 > 0.0)) {
+            return 0.0;
+        }
+        if (opt.ils_iters <= 1) {
+            return t1;
+        }
+        double frac = static_cast<double>(it) / static_cast<double>(opt.ils_iters - 1);
+        return t0 * std::pow(t1 / t0, frac);
+    };
+
+    auto accept_worse = [&](double old_cost, double new_cost, double T) -> bool {
+        double delta = new_cost - old_cost;
+        if (delta <= 0.0) {
+            return true;
+        }
+        if (!(T > 0.0)) {
+            return false;
+        }
+        double rel = delta / std::max(1e-12, old_cost);
+        double prob = std::exp(-rel / std::max(1e-12, T));
+        return (uni01(rng) < prob);
+    };
+
+    auto apply_shake = [&](std::vector<TreePose>& p) -> bool {
+        std::vector<BoundingBox> bbs = bounding_boxes_for_poses(base_poly, p);
+        Extents e = compute_extents(bbs);
+        if (!std::isfinite(e.min_x) || !std::isfinite(e.max_x) || !std::isfinite(e.min_y) ||
+            !std::isfinite(e.max_y)) {
+            return false;
+        }
+        const double cx = 0.5 * (e.min_x + e.max_x);
+        const double cy = 0.5 * (e.min_y + e.max_y);
+        const double width = e.max_x - e.min_x;
+        const double height = e.max_y - e.min_y;
+        const double base_side = std::max(width, height);
+        const bool dom_x = (width >= height);
+
+        double alpha = uni_alpha(rng);
+        double ax = alpha;
+        double ay = alpha;
+        if (uni01(rng) < opt.ils_p_aniso) {
+            if (dom_x) {
+                const double ratio = (width > 1e-12) ? (height / width) : 1.0;
+                ax = alpha;
+                ay = 1.0 - (1.0 - alpha) * ratio;
+            } else {
+                const double ratio = (height > 1e-12) ? (width / height) : 1.0;
+                ay = alpha;
+                ax = 1.0 - (1.0 - alpha) * ratio;
+            }
+        }
+
+        const double shx = (opt.ils_shear_max > 0.0) ? uni_shear(rng) : 0.0;
+        const double shy = (opt.ils_shear_max > 0.0) ? uni_shear(rng) : 0.0;
+
+        const double jitter = opt.ils_jitter_frac * std::max(1e-9, base_side);
+
+        std::vector<int> idx(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) {
+            idx[static_cast<size_t>(i)] = i;
+        }
+        std::shuffle(idx.begin(), idx.end(), rng);
+        int subset = static_cast<int>(std::round(opt.ils_subset_frac * static_cast<double>(n)));
+        subset = std::max(0, std::min(n, subset));
+
+        for (int i = 0; i < n; ++i) {
+            TreePose& pose = p[static_cast<size_t>(i)];
+            const double dx = pose.x - cx;
+            const double dy = pose.y - cy;
+            const double sx = ax * dx;
+            const double sy = ay * dy;
+            pose.x = cx + sx + shx * sy;
+            pose.y = cy + sy + shy * sx;
+        }
+
+        for (int k = 0; k < subset; ++k) {
+            const int i = idx[static_cast<size_t>(k)];
+            TreePose& pose = p[static_cast<size_t>(i)];
+            pose.x += normal(rng) * jitter;
+            pose.y += normal(rng) * jitter;
+            if (opt.ils_rot_deg_max > 0.0 && uni01(rng) < opt.ils_rot_prob) {
+                pose.deg += uni_rot(rng);
+            }
+        }
+
+        p = quantize_poses_wrap_deg(p);
+        for (const auto& pose : p) {
+            if (pose.x < -100.0 || pose.x > 100.0 || pose.y < -100.0 || pose.y > 100.0) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    auto aabb_overlap = [](const BoundingBox& a, const BoundingBox& b) -> bool {
+        if (a.max_x < b.min_x || b.max_x < a.min_x) {
+            return false;
+        }
+        if (a.max_y < b.min_y || b.max_y < a.min_y) {
+            return false;
+        }
+        return true;
+    };
+
+    auto repair_mtv = [&](std::vector<TreePose>& p, uint64_t rseed) -> bool {
+        if (opt.ils_repair_mtv_passes <= 0) {
+            return !any_overlap(base_poly, p, radius);
+        }
+
+        const double thr = 2.0 * radius + 1e-9;
+        const double limit_sq = thr * thr;
+
+        std::vector<Point> centers;
+        centers.reserve(p.size());
+        std::vector<Polygon> polys;
+        polys.reserve(p.size());
+        std::vector<BoundingBox> bbs;
+        bbs.reserve(p.size());
+        for (const auto& pose : p) {
+            centers.push_back(Point{pose.x, pose.y});
+            Polygon poly = transform_polygon(base_poly, pose);
+            polys.push_back(std::move(poly));
+            bbs.push_back(bounding_box(polys.back()));
+        }
+
+        auto find_first = [&]() -> std::pair<int, int> {
+            for (int i = 0; i < n; ++i) {
+                for (int j = i + 1; j < n; ++j) {
+                    const double dx =
+                        centers[static_cast<size_t>(i)].x - centers[static_cast<size_t>(j)].x;
+                    const double dy =
+                        centers[static_cast<size_t>(i)].y - centers[static_cast<size_t>(j)].y;
+                    if (dx * dx + dy * dy > limit_sq) {
+                        continue;
+                    }
+                    if (!aabb_overlap(bbs[static_cast<size_t>(i)],
+                                      bbs[static_cast<size_t>(j)])) {
+                        continue;
+                    }
+                    if (polygons_intersect(polys[static_cast<size_t>(i)],
+                                           polys[static_cast<size_t>(j)])) {
+                        return {i, j};
+                    }
+                }
+            }
+            return {-1, -1};
+        };
+
+        auto centrality_key = [&](const TreePose& pose) -> double {
+            return std::max(std::abs(pose.x), std::abs(pose.y));
+        };
+
+        auto pick_idx = [&](int a, int b) -> int {
+            double ka = centrality_key(p[static_cast<size_t>(a)]);
+            double kb = centrality_key(p[static_cast<size_t>(b)]);
+            return (ka < kb) ? a : b;
+        };
+
+        SARefiner sep(base_poly, radius);
+        std::mt19937_64 rrng(rseed);
+        std::uniform_real_distribution<double> u01(0.0, 1.0);
+
+        const bool split = (opt.ils_repair_mtv_split > 0.0 && opt.ils_repair_mtv_split < 1.0);
+        for (int pass = 0; pass < opt.ils_repair_mtv_passes; ++pass) {
+            auto [i, j] = find_first();
+            if (i < 0) {
+                return true;
+            }
+
+            int idx = pick_idx(i, j);
+            int other = (idx == i) ? j : i;
+
+            Point mtv{0.0, 0.0};
+            double ov_area = 0.0;
+            if (!sep.overlap_mtv(p[static_cast<size_t>(idx)],
+                                 p[static_cast<size_t>(other)],
+                                 mtv,
+                                 ov_area) ||
+                !(std::hypot(mtv.x, mtv.y) > 1e-12)) {
+                double dx = p[static_cast<size_t>(idx)].x - p[static_cast<size_t>(other)].x;
+                double dy = p[static_cast<size_t>(idx)].y - p[static_cast<size_t>(other)].y;
+                double norm = std::hypot(dx, dy);
+                if (!(norm > 1e-12)) {
+                    double ang = u01(rrng) * 2.0 * 3.14159265358979323846;
+                    dx = std::cos(ang);
+                    dy = std::sin(ang);
+                    norm = 1.0;
+                }
+                mtv.x = dx / norm;
+                mtv.y = dy / norm;
+                const double step = std::max(1e-6, 1e-3 * radius);
+                mtv.x *= step;
+                mtv.y *= step;
+            }
+
+            mtv.x *= opt.ils_repair_mtv_damping;
+            mtv.y *= opt.ils_repair_mtv_damping;
+
+            double frac_idx = 1.0;
+            double frac_other = 0.0;
+            if (split) {
+                frac_idx = opt.ils_repair_mtv_split;
+                frac_other = 1.0 - opt.ils_repair_mtv_split;
+            }
+
+            double scale = 1.0;
+            bool moved = false;
+            for (int bt = 0; bt < 12 && !moved; ++bt) {
+                TreePose cand_idx = p[static_cast<size_t>(idx)];
+                TreePose cand_other = p[static_cast<size_t>(other)];
+                cand_idx.x += mtv.x * frac_idx * scale;
+                cand_idx.y += mtv.y * frac_idx * scale;
+                if (split) {
+                    cand_other.x -= mtv.x * frac_other * scale;
+                    cand_other.y -= mtv.y * frac_other * scale;
+                }
+
+                cand_idx = quantize_pose_wrap_deg(cand_idx);
+                if (split) {
+                    cand_other = quantize_pose_wrap_deg(cand_other);
+                }
+
+                if (cand_idx.x < -100.0 || cand_idx.x > 100.0 || cand_idx.y < -100.0 ||
+                    cand_idx.y > 100.0) {
+                    scale *= 0.5;
+                    continue;
+                }
+                if (split && (cand_other.x < -100.0 || cand_other.x > 100.0 ||
+                              cand_other.y < -100.0 || cand_other.y > 100.0)) {
+                    scale *= 0.5;
+                    continue;
+                }
+
+                p[static_cast<size_t>(idx)] = cand_idx;
+                centers[static_cast<size_t>(idx)] = Point{cand_idx.x, cand_idx.y};
+                polys[static_cast<size_t>(idx)] = transform_polygon(base_poly, cand_idx);
+                bbs[static_cast<size_t>(idx)] = bounding_box(polys[static_cast<size_t>(idx)]);
+
+                if (split) {
+                    p[static_cast<size_t>(other)] = cand_other;
+                    centers[static_cast<size_t>(other)] = Point{cand_other.x, cand_other.y};
+                    polys[static_cast<size_t>(other)] = transform_polygon(base_poly, cand_other);
+                    bbs[static_cast<size_t>(other)] =
+                        bounding_box(polys[static_cast<size_t>(other)]);
+                }
+
+                moved = true;
+            }
+
+            if (!moved) {
+                break;
+            }
+        }
+
+        return (find_first().first < 0);
+    };
+
+    SARefiner sa(base_poly, radius);
+
+    for (int it = 0; it < opt.ils_iters; ++it) {
+        std::vector<TreePose> cand = curr;
+        if (!apply_shake(cand)) {
+            continue;
+        }
+
+        out.attempts += 1;
+
+        uint64_t cand_seed =
+            seed ^
+            (0xD1B54A32D192ED03ULL + static_cast<uint64_t>(it) * 0x9E3779B97F4A7C15ULL);
+
+        if (!repair_mtv(cand, cand_seed)) {
+            continue;
+        }
+        if (any_overlap(base_poly, cand, radius)) {
+            continue;
+        }
+
+        if (opt.ils_sa_iters > 0 && opt.ils_sa_restarts > 0) {
+            SARefiner::Params p;
+            p.iters = opt.ils_sa_iters;
+            p.w_micro = opt.sa_w_micro;
+            p.w_swap_rot = opt.sa_w_swap_rot;
+            p.w_relocate = opt.sa_w_relocate;
+            p.w_block_translate = opt.sa_w_block_translate;
+            p.w_block_rotate = opt.sa_w_block_rotate;
+            p.w_lns = opt.sa_w_lns;
+            p.w_push_contact = opt.sa_w_push_contact;
+            p.w_squeeze = opt.sa_w_squeeze;
+            p.block_size = opt.sa_block_size;
+            p.lns_remove = opt.sa_lns_remove;
+            p.hh_segment = opt.sa_hh_segment;
+            p.hh_reaction = opt.sa_hh_reaction;
+            p.overlap_metric = opt.sa_overlap_metric;
+            p.overlap_weight = opt.sa_overlap_weight;
+            p.overlap_weight_start = opt.sa_overlap_weight_start;
+            p.overlap_weight_end = opt.sa_overlap_weight_end;
+            p.overlap_weight_power = opt.sa_overlap_weight_power;
+            p.overlap_eps_area = opt.sa_overlap_eps_area;
+            p.overlap_cost_cap = opt.sa_overlap_cost_cap;
+            p.plateau_eps = opt.sa_plateau_eps;
+            p.w_resolve_overlap = opt.sa_w_resolve_overlap;
+            p.resolve_attempts = opt.sa_resolve_attempts;
+            p.resolve_step_frac_max = opt.sa_resolve_step_frac_max;
+            p.resolve_step_frac_min = opt.sa_resolve_step_frac_min;
+            p.resolve_noise_frac = opt.sa_resolve_noise_frac;
+            p.push_max_step_frac = opt.sa_push_max_step_frac;
+            p.push_bisect_iters = opt.sa_push_bisect_iters;
+            p.push_overshoot_frac = opt.sa_push_overshoot_frac;
+            p.squeeze_pushes = opt.sa_squeeze_pushes;
+            if (opt.sa_aggressive) {
+                SARefiner::apply_aggressive_preset(p);
+            }
+
+            double best_local_side = std::numeric_limits<double>::infinity();
+            std::vector<TreePose> best_local = cand;
+            for (int r = 0; r < opt.ils_sa_restarts; ++r) {
+                uint64_t sr =
+                    cand_seed ^
+                    (0x94D049BB133111EBULL + static_cast<uint64_t>(r) * 0xBF58476D1CE4E5B9ULL);
+                SARefiner::Result res = sa.refine_min_side(cand, sr, p);
+                if (!std::isfinite(res.best_side)) {
+                    continue;
+                }
+                if (any_overlap(base_poly, res.best_poses, radius)) {
+                    continue;
+                }
+                if (res.best_side + 1e-15 < best_local_side) {
+                    best_local_side = res.best_side;
+                    best_local = std::move(res.best_poses);
+                }
+            }
+            if (!std::isfinite(best_local_side)) {
+                continue;
+            }
+            cand = std::move(best_local);
+        }
+
+        const double cand_side = side_from_poses(cand);
+
+        const double T = ils_temp_at(it);
+        bool accepted = false;
+        if (cand_side + 1e-15 < curr_side) {
+            accepted = true;
+        } else if (opt.ils_accept_sa) {
+            accepted = accept_worse(curr_side, cand_side, T);
+        }
+
+        if (accepted) {
+            out.accepted += 1;
+            curr = cand;
+            curr_side = cand_side;
+        }
+
+        if (cand_side + 1e-15 < best_side) {
+            best = std::move(cand);
+            best_side = cand_side;
+        }
+    }
+
+    if (best_side + 1e-15 < start_side) {
+        poses = std::move(best);
+        out.improved = true;
+        out.best_side = best_side;
+    }
+
+    return out;
+}
+
 Extents extents_without_index(const std::vector<BoundingBox>& bbs, int skip) {
     Extents e;
     e.min_x = std::numeric_limits<double>::infinity();
@@ -539,7 +952,11 @@ ChainResult build_sa_chain_solutions(const Polygon& base_poly,
             p.lns_remove = opt.sa_lns_remove;
             p.hh_segment = opt.sa_hh_segment;
             p.hh_reaction = opt.sa_hh_reaction;
+            p.overlap_metric = opt.sa_overlap_metric;
             p.overlap_weight = opt.sa_overlap_weight;
+            p.overlap_weight_start = opt.sa_overlap_weight_start;
+            p.overlap_weight_end = opt.sa_overlap_weight_end;
+            p.overlap_weight_power = opt.sa_overlap_weight_power;
             p.overlap_eps_area = opt.sa_overlap_eps_area;
             p.overlap_cost_cap = opt.sa_overlap_cost_cap;
             p.plateau_eps = opt.sa_plateau_eps;
@@ -550,7 +967,11 @@ ChainResult build_sa_chain_solutions(const Polygon& base_poly,
             p.resolve_noise_frac = opt.sa_resolve_noise_frac;
             p.push_max_step_frac = opt.sa_push_max_step_frac;
             p.push_bisect_iters = opt.sa_push_bisect_iters;
+            p.push_overshoot_frac = opt.sa_push_overshoot_frac;
             p.squeeze_pushes = opt.sa_squeeze_pushes;
+            if (opt.sa_aggressive) {
+                SARefiner::apply_aggressive_preset(p);
+            }
 
             uint64_t seed =
                 opt.seed ^
@@ -648,7 +1069,11 @@ ChainResult build_sa_beam_chain_solutions(const Polygon& base_poly,
         p.lns_remove = opt.sa_lns_remove;
         p.hh_segment = opt.sa_hh_segment;
         p.hh_reaction = opt.sa_hh_reaction;
+        p.overlap_metric = opt.sa_overlap_metric;
         p.overlap_weight = opt.sa_overlap_weight;
+        p.overlap_weight_start = opt.sa_overlap_weight_start;
+        p.overlap_weight_end = opt.sa_overlap_weight_end;
+        p.overlap_weight_power = opt.sa_overlap_weight_power;
         p.overlap_eps_area = opt.sa_overlap_eps_area;
         p.overlap_cost_cap = opt.sa_overlap_cost_cap;
         p.plateau_eps = opt.sa_plateau_eps;
@@ -659,7 +1084,11 @@ ChainResult build_sa_beam_chain_solutions(const Polygon& base_poly,
         p.resolve_noise_frac = opt.sa_resolve_noise_frac;
         p.push_max_step_frac = opt.sa_push_max_step_frac;
         p.push_bisect_iters = opt.sa_push_bisect_iters;
+        p.push_overshoot_frac = opt.sa_push_overshoot_frac;
         p.squeeze_pushes = opt.sa_squeeze_pushes;
+        if (opt.sa_aggressive) {
+            SARefiner::apply_aggressive_preset(p);
+        }
 
         SARefiner::Result res = sa.refine_min_side(poses, seed, p, &active);
         auto cand_q = quantize_poses(res.best_poses);

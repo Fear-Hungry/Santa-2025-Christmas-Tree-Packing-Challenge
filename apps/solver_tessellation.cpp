@@ -53,7 +53,11 @@ struct Options {
     int sa_lns_remove = 6;
     int sa_hh_segment = 50;
     double sa_hh_reaction = 0.20;
+    SARefiner::OverlapMetric sa_overlap_metric = SARefiner::OverlapMetric::kArea;
     double sa_overlap_weight = 0.0;
+    double sa_overlap_weight_start = -1.0;
+    double sa_overlap_weight_end = -1.0;
+    double sa_overlap_weight_power = 1.0;
     double sa_overlap_eps_area = 1e-12;
     double sa_overlap_cost_cap = 0.0;
     double sa_plateau_eps = 0.0;
@@ -64,7 +68,9 @@ struct Options {
     double sa_resolve_noise_frac = 0.05;
     double sa_push_max_step_frac = 0.60;
     int sa_push_bisect_iters = 10;
+    double sa_push_overshoot_frac = 0.0;
     int sa_squeeze_pushes = 6;
+    bool sa_aggressive = false;
     bool final_rigid = true;
 };
 
@@ -241,6 +247,15 @@ Options parse_args(int argc, char** argv) {
         }
         return v;
     };
+    auto parse_overlap_metric = [](const std::string& s) -> SARefiner::OverlapMetric {
+        if (s == "area") {
+            return SARefiner::OverlapMetric::kArea;
+        }
+        if (s == "mtv2" || s == "mtv") {
+            return SARefiner::OverlapMetric::kMtv2;
+        }
+        throw std::runtime_error("--sa-overlap-metric precisa ser 'area' ou 'mtv2'.");
+    };
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -344,8 +359,16 @@ Options parse_args(int argc, char** argv) {
             opt.sa_hh_segment = parse_int(need(arg));
         } else if (arg == "--sa-hh-reaction") {
             opt.sa_hh_reaction = parse_double(need(arg));
+        } else if (arg == "--sa-overlap-metric") {
+            opt.sa_overlap_metric = parse_overlap_metric(need(arg));
         } else if (arg == "--sa-overlap-weight") {
             opt.sa_overlap_weight = parse_double(need(arg));
+        } else if (arg == "--sa-overlap-weight-start") {
+            opt.sa_overlap_weight_start = parse_double(need(arg));
+        } else if (arg == "--sa-overlap-weight-end") {
+            opt.sa_overlap_weight_end = parse_double(need(arg));
+        } else if (arg == "--sa-overlap-weight-power") {
+            opt.sa_overlap_weight_power = parse_double(need(arg));
         } else if (arg == "--sa-overlap-eps-area") {
             opt.sa_overlap_eps_area = parse_double(need(arg));
         } else if (arg == "--sa-overlap-cost-cap") {
@@ -366,8 +389,12 @@ Options parse_args(int argc, char** argv) {
             opt.sa_push_max_step_frac = parse_double(need(arg));
         } else if (arg == "--sa-push-bisect-iters") {
             opt.sa_push_bisect_iters = parse_int(need(arg));
+        } else if (arg == "--sa-push-overshoot-frac") {
+            opt.sa_push_overshoot_frac = parse_double(need(arg));
         } else if (arg == "--sa-squeeze-pushes") {
             opt.sa_squeeze_pushes = parse_int(need(arg));
+        } else if (arg == "--sa-aggressive") {
+            opt.sa_aggressive = true;
         } else if (arg == "--no-final-rigid" || arg == "--no-sa-rigid") {
             opt.final_rigid = false;
         } else {
@@ -419,6 +446,9 @@ Options parse_args(int argc, char** argv) {
     if (!(opt.sa_overlap_weight >= 0.0)) {
         throw std::runtime_error("--sa-overlap-weight precisa ser >= 0.");
     }
+    if (!(opt.sa_overlap_weight_power > 0.0)) {
+        throw std::runtime_error("--sa-overlap-weight-power precisa ser > 0.");
+    }
     if (!(opt.sa_overlap_eps_area >= 0.0)) {
         throw std::runtime_error("--sa-overlap-eps-area precisa ser >= 0.");
     }
@@ -443,6 +473,9 @@ Options parse_args(int argc, char** argv) {
     }
     if (opt.sa_push_bisect_iters <= 0) {
         throw std::runtime_error("--sa-push-bisect-iters precisa ser > 0.");
+    }
+    if (opt.sa_push_overshoot_frac < 0.0 || opt.sa_push_overshoot_frac > 1.0) {
+        throw std::runtime_error("--sa-push-overshoot-frac precisa estar em [0, 1].");
     }
     if (opt.sa_squeeze_pushes < 0) {
         throw std::runtime_error("--sa-squeeze-pushes precisa ser >= 0.");
@@ -584,7 +617,11 @@ int main(int argc, char** argv) {
                 p.lns_remove = opt.sa_lns_remove;
                 p.hh_segment = opt.sa_hh_segment;
                 p.hh_reaction = opt.sa_hh_reaction;
+                p.overlap_metric = opt.sa_overlap_metric;
                 p.overlap_weight = opt.sa_overlap_weight;
+                p.overlap_weight_start = opt.sa_overlap_weight_start;
+                p.overlap_weight_end = opt.sa_overlap_weight_end;
+                p.overlap_weight_power = opt.sa_overlap_weight_power;
                 p.overlap_eps_area = opt.sa_overlap_eps_area;
                 p.overlap_cost_cap = opt.sa_overlap_cost_cap;
                 p.plateau_eps = opt.sa_plateau_eps;
@@ -595,7 +632,11 @@ int main(int argc, char** argv) {
                 p.resolve_noise_frac = opt.sa_resolve_noise_frac;
                 p.push_max_step_frac = opt.sa_push_max_step_frac;
                 p.push_bisect_iters = opt.sa_push_bisect_iters;
+                p.push_overshoot_frac = opt.sa_push_overshoot_frac;
                 p.squeeze_pushes = opt.sa_squeeze_pushes;
+                if (opt.sa_aggressive) {
+                    SARefiner::apply_aggressive_preset(p);
+                }
 
                 for (int r = 0; r < opt.sa_restarts; ++r) {
                     uint64_t seed =
@@ -649,6 +690,7 @@ int main(int argc, char** argv) {
         std::cout << "SA restarts: " << opt.sa_restarts << "\n";
         std::cout << "SA base iters: " << opt.sa_base_iters << "\n";
         std::cout << "SA iters per n: " << opt.sa_iters_per_n << "\n";
+        std::cout << "SA aggressive: " << (opt.sa_aggressive ? "on" : "off") << "\n";
         std::cout << "Final rigid: " << (opt.final_rigid ? "on" : "off") << "\n";
 
     } catch (const std::exception& ex) {

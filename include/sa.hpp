@@ -9,6 +9,11 @@
 
 class SARefiner {
 public:
+    enum class OverlapMetric {
+        kArea = 0,
+        kMtv2 = 1,
+    };
+
     struct Params {
         int iters = 0;
         double t0 = 0.15;
@@ -24,6 +29,11 @@ public:
         double p_random_dir = 0.15;
         double kick_prob = 0.02;
         double kick_mult = 3.0;
+        // Reheat on stagnation: after `reheat_iters` without best improvement.
+        int reheat_iters = 0;
+        double reheat_mult = 1.0;
+        double reheat_step_mult = 1.0;
+        int reheat_max = 1;
 
         // Quantização no espaço do CSV. Se `quantize_decimals >= 0`, o SA
         // avalia candidatos já quantizados e mantém o estado quantizado após
@@ -81,10 +91,14 @@ public:
         double lns_box_mult = 1.05;
 
         // Soft constraints (overlap): quando overlap_weight > 0, o SA pode aceitar
-        // overlaps temporários, penalizando a área de interseção.
+        // overlaps temporários, penalizando o overlap conforme a métrica escolhida.
         // O retorno do SA continua sendo a melhor solução válida (overlap ~ 0).
+        OverlapMetric overlap_metric = OverlapMetric::kArea;
         double overlap_weight = 0.0;      // 0 => hard constraint (padrão)
-        double overlap_eps_area = 1e-12;  // área <= eps conta como "sem overlap"
+        double overlap_weight_start = -1.0;  // < 0 => usa overlap_weight
+        double overlap_weight_end = -1.0;    // < 0 => usa overlap_weight
+        double overlap_weight_power = 1.0;   // 1 => linear
+        double overlap_eps_area = 1e-12;     // métrica <= eps conta como "sem overlap"
         double overlap_cost_cap = 0.0;    // 0 => sem cap; senão, rejeita custo acima do cap
 
         // Tie-breaker em platôs de `side = max(width, height)`: adiciona um termo
@@ -103,6 +117,7 @@ public:
         // Move uma árvore da casca ao longo de ±x/±y até o primeiro contato.
         double push_max_step_frac = 0.60;  // limite do step inicial (relativo a curr_side)
         int push_bisect_iters = 10;        // número de checagens na busca binária
+        double push_overshoot_frac = 0.0;  // fração de max_step para "atravessar" o contato (soft)
 
         // Squeeze: repete `push_to_contact` algumas vezes no eixo dominante.
         int squeeze_pushes = 6;
@@ -119,6 +134,8 @@ public:
                            uint64_t seed,
                            const Params& p,
                            const std::vector<char>* active_mask = nullptr) const;
+
+    static void apply_aggressive_preset(Params& p);
 
     // MTV (minimum translation vector) aproximado via decomposição em triângulos + SAT.
     // Retorna um vetor para mover `a` para fora de `b` (0/false se não houver overlap).

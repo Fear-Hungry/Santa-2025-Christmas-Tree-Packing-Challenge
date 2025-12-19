@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "sa.hpp"
+
 enum class TileObjective {
     kDensity,
     kScore,
@@ -52,7 +54,11 @@ struct Options {
     int sa_lns_remove = 6;
     int sa_hh_segment = 50;
     double sa_hh_reaction = 0.20;
+    SARefiner::OverlapMetric sa_overlap_metric = SARefiner::OverlapMetric::kArea;
     double sa_overlap_weight = 0.0;
+    double sa_overlap_weight_start = -1.0;
+    double sa_overlap_weight_end = -1.0;
+    double sa_overlap_weight_power = 1.0;
     double sa_overlap_eps_area = 1e-12;
     double sa_overlap_cost_cap = 0.0;
     double sa_plateau_eps = 0.0;
@@ -65,7 +71,29 @@ struct Options {
     double sa_resolve_noise_frac = 0.05;
     double sa_push_max_step_frac = 0.60;
     int sa_push_bisect_iters = 10;
+    double sa_push_overshoot_frac = 0.0;
     int sa_squeeze_pushes = 6;
+    bool sa_aggressive = false;
+
+    // ILS / basin-hopping (n_max): shake afim + repair + SA local.
+    int ils_iters = 0;
+    int ils_sa_restarts = 1;
+    int ils_sa_iters = 0;
+    bool ils_accept_sa = false;
+    double ils_t0 = 0.05;
+    double ils_t1 = 0.01;
+    double ils_alpha_min = 0.97;
+    double ils_alpha_max = 0.995;
+    double ils_p_aniso = 0.70;
+    double ils_shear_max = 0.0;
+    double ils_jitter_frac = 0.02;
+    double ils_subset_frac = 0.20;
+    double ils_rot_prob = 0.20;
+    double ils_rot_deg_max = 30.0;
+    int ils_repair_mtv_passes = 300;
+    double ils_repair_mtv_damping = 1.0;
+    double ils_repair_mtv_split = 0.5;
+
     bool final_rigid = true;
     uint64_t seed = 123456789ULL;
     double spacing_safety = 1.001;

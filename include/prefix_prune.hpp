@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <vector>
 
 #include "geom.hpp"
@@ -22,6 +23,14 @@ struct ChainResult {
     std::vector<std::vector<TreePose>> solutions_by_n;  // index = n
     std::vector<double> side_by_n;  // index = n
     double total_score = 0.0;
+};
+
+struct ILSResult {
+    bool improved = false;
+    double start_side = std::numeric_limits<double>::infinity();
+    double best_side = std::numeric_limits<double>::infinity();
+    int attempts = 0;
+    int accepted = 0;
 };
 
 std::vector<BoundingBox> bounding_boxes_for_poses(const Polygon& base_poly,
@@ -57,3 +66,9 @@ ChainResult build_sa_beam_chain_solutions(const Polygon& base_poly,
                                           int n_max,
                                           double band_step,
                                           const Options& opt);
+
+ILSResult ils_basin_hop_compact(const Polygon& base_poly,
+                                double radius,
+                                std::vector<TreePose>& poses,
+                                uint64_t seed,
+                                const Options& opt);

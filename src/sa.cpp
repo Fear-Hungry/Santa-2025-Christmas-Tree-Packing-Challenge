@@ -442,6 +442,75 @@ namespace {
 SARefiner::SARefiner(const Polygon& base_poly, double radius)
     : base_poly_(base_poly), radius_(radius), base_tris_(triangulate_polygon(base_poly)) {}
 
+void SARefiner::apply_aggressive_preset(Params& p) {
+    p.t0 = std::max(p.t0, 0.20) * 1.5;
+    p.t1 = std::max(p.t1, 0.012) * 1.3;
+
+    p.step_frac_max = std::min(0.25, p.step_frac_max * 1.7);
+    p.step_frac_min = std::min(p.step_frac_max, std::min(0.02, p.step_frac_min * 2.0));
+
+    p.ddeg_max = std::min(45.0, p.ddeg_max * 1.6);
+    p.ddeg_min = std::min(p.ddeg_max, std::min(10.0, p.ddeg_min * 1.6));
+
+    p.p_rot = std::min(0.65, p.p_rot + 0.15);
+    p.p_random_dir = std::min(0.40, p.p_random_dir + 0.15);
+    p.p_pick_extreme = std::min(0.985, p.p_pick_extreme + 0.03);
+    p.extreme_topk = std::max(p.extreme_topk, 20);
+    if (p.rebuild_extreme_every > 0) {
+        p.rebuild_extreme_every = std::max(10, p.rebuild_extreme_every / 2);
+    }
+
+    p.kick_prob = std::min(0.08, p.kick_prob + 0.03);
+    p.kick_mult = std::min(9.0, p.kick_mult * 2.0);
+
+    p.w_relocate = std::max(p.w_relocate, 0.25);
+    p.w_block_translate = std::max(p.w_block_translate, 0.12);
+    p.w_block_rotate = std::max(p.w_block_rotate, 0.05);
+    p.w_lns = std::max(p.w_lns, 0.01);
+    p.w_push_contact = std::max(p.w_push_contact, 0.15);
+    p.w_squeeze = std::max(p.w_squeeze, 0.06);
+
+    p.block_size = std::max(p.block_size, 8);
+    p.lns_remove = std::max(p.lns_remove, 10);
+
+    p.relocate_attempts = std::max(p.relocate_attempts, 16);
+    p.lns_attempts_per_tree = std::max(p.lns_attempts_per_tree, 45);
+    p.relocate_noise_frac = std::min(0.18, p.relocate_noise_frac * 1.5);
+    p.block_step_frac_max = std::min(0.35, p.block_step_frac_max * 1.4);
+    p.block_step_frac_min =
+        std::min(p.block_step_frac_max, std::min(0.08, p.block_step_frac_min * 1.5));
+    p.block_rot_deg_max = std::min(45.0, p.block_rot_deg_max * 1.4);
+    p.block_rot_deg_min =
+        std::min(p.block_rot_deg_max, std::min(10.0, p.block_rot_deg_min * 1.4));
+    p.block_p_random_dir = std::min(0.25, p.block_p_random_dir + 0.10);
+
+    p.lns_noise_frac = std::min(0.25, p.lns_noise_frac * 1.5);
+    p.lns_p_rot = std::min(0.80, p.lns_p_rot + 0.10);
+
+    if (p.hh_segment > 0) {
+        p.hh_segment = std::max(20, p.hh_segment / 2);
+    }
+    if (p.hh_reaction > 0.0) {
+        p.hh_reaction = std::min(0.35, p.hh_reaction + 0.10);
+    }
+    if (p.hh_max_block_weight > 0.0) {
+        p.hh_max_block_weight = std::max(p.hh_max_block_weight, 0.35);
+    }
+    if (p.hh_max_lns_weight > 0.0) {
+        p.hh_max_lns_weight = std::max(p.hh_max_lns_weight, 0.15);
+    }
+
+    p.push_max_step_frac = std::min(0.85, p.push_max_step_frac * 1.2);
+    p.squeeze_pushes = std::max(p.squeeze_pushes, 10);
+
+    if (p.iters > 0 && p.reheat_iters <= 0) {
+        p.reheat_iters = std::max(50, p.iters / 25);
+    }
+    p.reheat_mult = std::max(p.reheat_mult, 1.5);
+    p.reheat_step_mult = std::max(p.reheat_step_mult, 1.3);
+    p.reheat_max = std::max(p.reheat_max, 3);
+}
+
 SARefiner::OverlapInfo SARefiner::overlap_info(const TreePose& a, const TreePose& b) const {
         const double ra = a.deg * 3.14159265358979323846 / 180.0;
         const double rb = b.deg * 3.14159265358979323846 / 180.0;
@@ -604,6 +673,7 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
         best.best_side = curr_side;
         best.best_poses = poses;
         double best_min_dim = std::min(gmxx - gmnx, gmxy - gmny);
+        int last_best_iter = 0;
 
         auto better_than_best = [&](double side, double min_dim) -> bool {
             if (!std::isfinite(best.best_side)) {
@@ -627,10 +697,32 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
 	        const double thr = 2.0 * radius_ + 1e-9;
 	        const double thr_sq = thr * thr;
 	        const double tol = 1e-12;
-	        const bool soft_overlap = (p.overlap_weight > 0.0);
+	        const double overlap_w0 =
+	            (p.overlap_weight_start >= 0.0) ? p.overlap_weight_start : p.overlap_weight;
+	        const double overlap_w1 =
+	            (p.overlap_weight_end >= 0.0) ? p.overlap_weight_end : p.overlap_weight;
+	        const bool soft_overlap = (std::max(overlap_w0, overlap_w1) > 0.0);
+	        const bool use_mtv_metric = (p.overlap_metric == OverlapMetric::kMtv2);
 
-	        auto clamp_overlap = [&](double area) -> double {
-	            return (area > p.overlap_eps_area) ? area : 0.0;
+	        auto overlap_weight_at = [&](int t) -> double {
+	            const double w0 = overlap_w0;
+	            const double w1 = overlap_w1;
+	            if (w0 == w1) {
+	                return w1;
+	            }
+	            double frac = (p.iters > 1) ? static_cast<double>(t) /
+	                                              static_cast<double>(p.iters - 1)
+	                                        : 1.0;
+	            if (p.overlap_weight_power != 1.0) {
+	                frac = std::pow(frac, p.overlap_weight_power);
+	            }
+	            return w0 + (w1 - w0) * frac;
+	        };
+
+	        double overlap_weight = soft_overlap ? overlap_weight_at(0) : 0.0;
+
+	        auto clamp_overlap = [&](double metric) -> double {
+	            return (metric > p.overlap_eps_area) ? metric : 0.0;
 	        };
             auto plateau_term = [&](double width, double height) -> double {
                 if (!(p.plateau_eps > 0.0)) {
@@ -638,13 +730,24 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                 }
                 return p.plateau_eps * std::min(width, height);
             };
-	        auto cost_from = [&](double width, double height, double overlap_area) -> double {
+	        auto cost_from = [&](double width, double height, double overlap_value) -> double {
                 const double side = std::max(width, height);
                 double cost = side + plateau_term(width, height);
-	            if (soft_overlap) {
-	                cost += p.overlap_weight * overlap_area;
+	            if (soft_overlap && overlap_weight > 0.0) {
+	                cost += overlap_weight * overlap_value;
 	            }
 	            return cost;
+	        };
+	        auto overlap_metric = [&](const TreePose& a, const TreePose& b) -> double {
+	            if (!use_mtv_metric) {
+	                return overlap_info(a, b).area;
+	            }
+	            Point mtv{0.0, 0.0};
+	            double area = 0.0;
+	            if (!overlap_mtv(a, b, mtv, area)) {
+	                return 0.0;
+	            }
+	            return mtv.x * mtv.x + mtv.y * mtv.y;
 	        };
 
         // Broad-phase incremental: hash grid uniforme com célula ~ 2r.
@@ -826,9 +929,9 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
 	                                            polys[static_cast<size_t>(j)])) {
 	                        continue;
 	                    }
-	                    curr_overlap += overlap_info(poses[static_cast<size_t>(i)],
-	                                                 poses[static_cast<size_t>(j)])
-	                                        .area;
+	                    curr_overlap +=
+	                        overlap_metric(poses[static_cast<size_t>(i)],
+	                                       poses[static_cast<size_t>(j)]);
 	                }
 	            }
 	            curr_overlap = clamp_overlap(curr_overlap);
@@ -867,7 +970,9 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
 	        if (!soft_overlap) {
 	            weights[kResolveOverlap] = 0.0;
 	        } else {
-	            weights[kPushContact] = 0.0;
+	            if (!(p.push_overshoot_frac > 0.0)) {
+	                weights[kPushContact] = 0.0;
+	            }
 	            weights[kSqueeze] = 0.0;
 	        }
 	        std::array<double, kNumOps> op_cost = {
@@ -938,14 +1043,32 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
         if (!(p.plateau_eps >= 0.0)) {
             throw std::runtime_error("Parâmetros inválidos: plateau_eps precisa ser >= 0.");
         }
+        if (!(p.overlap_weight_power > 0.0)) {
+            throw std::runtime_error("Parâmetros inválidos: overlap_weight_power precisa ser > 0.");
+        }
         if (!(p.push_max_step_frac > 0.0)) {
             throw std::runtime_error("Parâmetros inválidos: push_max_step_frac precisa ser > 0.");
         }
         if (p.push_bisect_iters <= 0) {
             throw std::runtime_error("Parâmetros inválidos: push_bisect_iters precisa ser > 0.");
         }
+        if (p.push_overshoot_frac < 0.0 || p.push_overshoot_frac > 1.0) {
+            throw std::runtime_error("Parâmetros inválidos: push_overshoot_frac precisa estar em [0,1].");
+        }
         if (p.squeeze_pushes < 0) {
             throw std::runtime_error("Parâmetros inválidos: squeeze_pushes precisa ser >= 0.");
+        }
+        if (p.reheat_iters < 0) {
+            throw std::runtime_error("Parâmetros inválidos: reheat_iters precisa ser >= 0.");
+        }
+        if (p.reheat_mult < 1.0) {
+            throw std::runtime_error("Parâmetros inválidos: reheat_mult precisa ser >= 1.0.");
+        }
+        if (p.reheat_step_mult < 1.0) {
+            throw std::runtime_error("Parâmetros inválidos: reheat_step_mult precisa ser >= 1.0.");
+        }
+        if (p.reheat_max < 0) {
+            throw std::runtime_error("Parâmetros inválidos: reheat_max precisa ser >= 0.");
         }
 
         auto build_boundary_pool = [&]() -> std::vector<int> {
@@ -1334,14 +1457,35 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
 	            double frac = static_cast<double>(t) / std::max(1, p.iters - 1);
 	            double T = p.t0 * (1.0 - frac) + p.t1 * frac;
 
+            double step_mult = 1.0;
+            if (p.reheat_iters > 0 && p.reheat_max > 0 &&
+                (p.reheat_mult > 1.0 || p.reheat_step_mult > 1.0)) {
+                const int stall = t - last_best_iter;
+                if (stall >= p.reheat_iters) {
+                    const int level = std::min(p.reheat_max, stall / p.reheat_iters);
+                    const double heat = std::pow(p.reheat_mult, level);
+                    step_mult = std::pow(p.reheat_step_mult, level);
+                    T *= heat;
+                }
+            }
+
+            if (soft_overlap) {
+                overlap_weight = overlap_weight_at(t);
+                const double width = gmxx - gmnx;
+                const double height = gmxy - gmny;
+                curr_cost = cost_from(width, height, curr_overlap);
+            }
+
             if (p.rebuild_extreme_every > 0 && (t % p.rebuild_extreme_every) == 0) {
                 boundary_pool = build_boundary_pool();
             }
 
-            const double step =
+            double step =
                 (p.step_frac_max * (1.0 - frac) + p.step_frac_min * frac) *
                 std::max(1e-9, curr_side);
-            const double ddeg_rng = p.ddeg_max * (1.0 - frac) + p.ddeg_min * frac;
+            double ddeg_rng = p.ddeg_max * (1.0 - frac) + p.ddeg_min * frac;
+            step *= step_mult;
+            ddeg_rng = std::min(180.0, ddeg_rng * step_mult);
             const double cx = 0.5 * (gmnx + gmxx);
             const double cy = 0.5 * (gmny + gmxy);
 
@@ -1519,17 +1663,16 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
 	                            aabb_overlap(old_bb, bbs[static_cast<size_t>(j)]) &&
 	                            polygons_intersect(polys[static_cast<size_t>(i)],
 	                                               polys[static_cast<size_t>(j)])) {
-	                            old_a = overlap_info(poses[static_cast<size_t>(i)],
-	                                                 poses[static_cast<size_t>(j)])
-	                                        .area;
+	                            old_a = overlap_metric(poses[static_cast<size_t>(i)],
+	                                                   poses[static_cast<size_t>(j)]);
 	                        }
 	                        double new_a = 0.0;
 	                        if ((new_dx * new_dx + new_dy * new_dy <= thr_sq) &&
 	                            aabb_overlap(cand_bb, bbs[static_cast<size_t>(j)]) &&
 	                            polygons_intersect(cand_poly,
 	                                               polys[static_cast<size_t>(j)])) {
-	                            new_a =
-	                                overlap_info(cand, poses[static_cast<size_t>(j)]).area;
+	                            new_a = overlap_metric(cand,
+	                                                   poses[static_cast<size_t>(j)]);
 	                        }
 	                        delta_overlap += clamp_overlap(new_a) - clamp_overlap(old_a);
 	                    }
@@ -1570,7 +1713,8 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
 	                    curr_cost = old_cost;
 	                }
             } else if (op == kPushContact) {
-                if (soft_overlap || n <= 1) {
+                const bool allow_soft_push = soft_overlap && (p.push_overshoot_frac > 0.0);
+                if (n <= 1 || (soft_overlap && !allow_soft_push)) {
                     add_reward(op, false, false, false, curr_cost, curr_cost);
                     maybe_update_controller(t);
                     continue;
@@ -1635,7 +1779,8 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                 }
 
                 if (!candidates.empty()) {
-                    std::uniform_int_distribution<int> pick(0, static_cast<int>(candidates.size()) - 1);
+                    std::uniform_int_distribution<int> pick(0,
+                                                             static_cast<int>(candidates.size()) - 1);
                     i = candidates[static_cast<size_t>(pick(rng))];
                 } else {
                     i = pick_index(p.p_pick_extreme).idx;
@@ -1773,16 +1918,63 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                     continue;
                 }
 
+                TreePose cand_pose = best_pose;
+                Polygon cand_poly = best_poly;
+                BoundingBox cand_bb = best_bb;
+                double cand_delta = best_delta;
+                if (soft_overlap) {
+                    const double overshoot = p.push_overshoot_frac * max_step;
+                    if (overshoot > 0.0) {
+                        double target_delta = std::min(max_step, best_delta + overshoot);
+                        if (target_delta > best_delta + 1e-12) {
+                            double delta = target_delta;
+                            bool ok = false;
+                            for (int bt = 0; bt < 6; ++bt) {
+                                TreePose pose_out = poses[static_cast<size_t>(i)];
+                                pose_out.x += dir_x * delta;
+                                pose_out.y += dir_y * delta;
+                                quantize_pose_inplace(pose_out);
+                                if (pose_out.x < -100.0 || pose_out.x > 100.0 ||
+                                    pose_out.y < -100.0 || pose_out.y > 100.0) {
+                                    delta = best_delta + 0.5 * (delta - best_delta);
+                                    continue;
+                                }
+                                Polygon poly_out = transform_polygon(base_poly_, pose_out);
+                                BoundingBox bb_out = bounding_box(poly_out);
+                                cand_pose = pose_out;
+                                cand_poly = std::move(poly_out);
+                                cand_bb = bb_out;
+                                cand_delta = delta;
+                                ok = true;
+                                break;
+                            }
+                            if (!ok) {
+                                cand_pose = best_pose;
+                                cand_poly = best_poly;
+                                cand_bb = best_bb;
+                                cand_delta = best_delta;
+                            }
+                        }
+                    }
+                }
+
+                if (!(cand_delta > 1e-12)) {
+                    add_reward(op, false, false, false, curr_cost, curr_cost);
+                    maybe_update_controller(t);
+                    continue;
+                }
+
                 const BoundingBox old_bb = bbs[static_cast<size_t>(i)];
                 const double old_gmnx = gmnx, old_gmxx = gmxx, old_gmny = gmny, old_gmxy = gmxy;
                 const double old_side = curr_side;
                 const double old_cost = curr_cost;
+                const double old_overlap = curr_overlap;
 
-                bbs[static_cast<size_t>(i)] = best_bb;
-                gmnx = std::min(gmnx, best_bb.min_x);
-                gmxx = std::max(gmxx, best_bb.max_x);
-                gmny = std::min(gmny, best_bb.min_y);
-                gmxy = std::max(gmxy, best_bb.max_y);
+                bbs[static_cast<size_t>(i)] = cand_bb;
+                gmnx = std::min(gmnx, cand_bb.min_x);
+                gmxx = std::max(gmxx, cand_bb.max_x);
+                gmny = std::min(gmny, cand_bb.min_y);
+                gmxy = std::max(gmxy, cand_bb.max_y);
 
                 bool need_full = (old_bb.min_x <= old_gmnx + tol) ||
                                  (old_bb.max_x >= old_gmxx - tol) ||
@@ -1800,18 +1992,70 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                 const double new_height = gmxy - gmny;
                 double new_side = std::max(new_width, new_height);
                 const double new_min_dim = std::min(new_width, new_height);
-                double new_cost = cost_from(new_width, new_height, curr_overlap);
+                double new_overlap = curr_overlap;
+                if (soft_overlap) {
+                    double delta_overlap = 0.0;
+                    gather_union(i,
+                                 -1,
+                                 poses[static_cast<size_t>(i)].x,
+                                 poses[static_cast<size_t>(i)].y,
+                                 cand_pose.x,
+                                 cand_pose.y,
+                                 neigh_union);
+                    for (int j : neigh_union) {
+                        const double old_dx =
+                            poses[static_cast<size_t>(i)].x - poses[static_cast<size_t>(j)].x;
+                        const double old_dy =
+                            poses[static_cast<size_t>(i)].y - poses[static_cast<size_t>(j)].y;
+                        const double new_dx = cand_pose.x - poses[static_cast<size_t>(j)].x;
+                        const double new_dy = cand_pose.y - poses[static_cast<size_t>(j)].y;
+
+                        double old_a = 0.0;
+                        if ((old_dx * old_dx + old_dy * old_dy <= thr_sq) &&
+                            aabb_overlap(old_bb, bbs[static_cast<size_t>(j)]) &&
+                            polygons_intersect(polys[static_cast<size_t>(i)],
+                                               polys[static_cast<size_t>(j)])) {
+                            old_a = overlap_metric(poses[static_cast<size_t>(i)],
+                                                   poses[static_cast<size_t>(j)]);
+                        }
+                        double new_a = 0.0;
+                        if ((new_dx * new_dx + new_dy * new_dy <= thr_sq) &&
+                            aabb_overlap(cand_bb, bbs[static_cast<size_t>(j)]) &&
+                            polygons_intersect(cand_poly,
+                                               polys[static_cast<size_t>(j)])) {
+                            new_a = overlap_metric(cand_pose,
+                                                   poses[static_cast<size_t>(j)]);
+                        }
+                        delta_overlap += clamp_overlap(new_a) - clamp_overlap(old_a);
+                    }
+                    new_overlap = std::max(0.0, old_overlap + delta_overlap);
+                    new_overlap = clamp_overlap(new_overlap);
+                }
+
+                double new_cost = cost_from(new_width, new_height, new_overlap);
+                if (p.overlap_cost_cap > 0.0 && new_cost > p.overlap_cost_cap) {
+                    new_cost = std::numeric_limits<double>::infinity();
+                }
 
                 reward_old_cost = old_cost;
                 reward_new_cost = new_cost;
-                accepted = (new_cost <= old_cost + 1e-15);
+                if (soft_overlap) {
+                    accepted = accept_move(old_cost, new_cost, T);
+                } else {
+                    accepted = (new_cost <= old_cost + 1e-15);
+                }
                 if (accepted) {
                     improved_curr = (new_cost + 1e-15 < old_cost);
-                    improved_best = better_than_best(new_side, new_min_dim);
-                    grid.update_position(i, best_pose.x, best_pose.y);
-                    poses[static_cast<size_t>(i)] = best_pose;
-                    polys[static_cast<size_t>(i)] = std::move(best_poly);
+                    const bool valid =
+                        soft_overlap ? (new_overlap <= p.overlap_eps_area) : true;
+                    improved_best = valid && better_than_best(new_side, new_min_dim);
+                    grid.update_position(i, cand_pose.x, cand_pose.y);
+                    poses[static_cast<size_t>(i)] = cand_pose;
+                    polys[static_cast<size_t>(i)] = std::move(cand_poly);
                     curr_side = new_side;
+                    if (soft_overlap) {
+                        curr_overlap = new_overlap;
+                    }
                     curr_cost = new_cost;
                     if (improved_best) {
                         best.best_side = curr_side;
@@ -1825,6 +2069,9 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                     gmny = old_gmny;
                     gmxy = old_gmxy;
                     curr_side = old_side;
+                    if (soft_overlap) {
+                        curr_overlap = old_overlap;
+                    }
                     curr_cost = old_cost;
                 }
             } else if (op == kSqueeze) {
@@ -2208,9 +2455,9 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
 	                        if (!aabb_overlap(bb_a, bb_b) || !polygons_intersect(poly_a, poly_b)) {
 	                            return 0.0;
 	                        }
-	                        return clamp_overlap(overlap_info(poses[static_cast<size_t>(a)],
-	                                                          poses[static_cast<size_t>(b)])
-	                                                 .area);
+	                        return clamp_overlap(
+	                            overlap_metric(poses[static_cast<size_t>(a)],
+	                                           poses[static_cast<size_t>(b)]));
 	                    };
 	                    auto new_pair = [&](int a, int b) -> double {
 	                        const TreePose& pa = (a == i) ? cand_i : (a == j ? cand_j : poses[static_cast<size_t>(a)]);
@@ -2227,7 +2474,7 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
 	                        if (!aabb_overlap(bb_a, bb_b) || !polygons_intersect(poly_a, poly_b)) {
 	                            return 0.0;
 	                        }
-	                        return clamp_overlap(overlap_info(pa, pb).area);
+	                        return clamp_overlap(overlap_metric(pa, pb));
 	                    };
 
 	                    delta_overlap += new_pair(i, j) - old_pair(i, j);
@@ -2290,7 +2537,8 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
 	                const double old_overlap = curr_overlap;
 	                const double old_cost = curr_cost;
 
-	                const double noise = p.relocate_noise_frac * std::max(1e-9, curr_side);
+	                const double noise =
+                        p.relocate_noise_frac * std::max(1e-9, curr_side) * step_mult;
 
 	                TreePose best_cand;
 	                Polygon best_poly;
@@ -2408,15 +2656,14 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
 	                            aabb_overlap(old_bb, bbs[static_cast<size_t>(k)]) &&
 	                            polygons_intersect(polys[static_cast<size_t>(i)],
 	                                               polys[static_cast<size_t>(k)])) {
-	                            old_a = overlap_info(poses[static_cast<size_t>(i)],
-	                                                 poses[static_cast<size_t>(k)])
-	                                        .area;
+	                            old_a = overlap_metric(poses[static_cast<size_t>(i)],
+	                                                   poses[static_cast<size_t>(k)]);
 	                        }
 	                        double new_a = 0.0;
 	                        if ((new_dx * new_dx + new_dy * new_dy <= thr_sq) &&
 	                            aabb_overlap(cand_bb, bbs[static_cast<size_t>(k)]) &&
 	                            polygons_intersect(cand_poly, polys[static_cast<size_t>(k)])) {
-	                            new_a = overlap_info(cand, poses[static_cast<size_t>(k)]).area;
+	                            new_a = overlap_metric(cand, poses[static_cast<size_t>(k)]);
 	                        }
 	                        delta_overlap += clamp_overlap(new_a) - clamp_overlap(old_a);
 	                    }
@@ -2510,9 +2757,10 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                     in_block[static_cast<size_t>(idx)] = 1;
                 }
 
-                const double block_step =
+                double block_step =
                     (p.block_step_frac_max * (1.0 - frac) + p.block_step_frac_min * frac) *
                     std::max(1e-9, curr_side);
+                block_step *= step_mult;
                 double dx = 0.0;
                 double dy = 0.0;
                 if (uni(rng) < p.block_p_random_dir) {
@@ -2636,9 +2884,9 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
 	                                               polys[static_cast<size_t>(b)])) {
 	                            return 0.0;
 	                        }
-	                        return clamp_overlap(overlap_info(poses[static_cast<size_t>(a)],
-	                                                          poses[static_cast<size_t>(b)])
-	                                                 .area);
+	                        return clamp_overlap(
+	                            overlap_metric(poses[static_cast<size_t>(a)],
+	                                           poses[static_cast<size_t>(b)]));
 	                    };
 	                    auto overlap_new = [&](int a, int b) -> double {
 	                        const int pa = pos[static_cast<size_t>(a)];
@@ -2663,7 +2911,7 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
 	                        if (!aabb_overlap(ba, bb) || !polygons_intersect(pa_poly, pb_poly)) {
 	                            return 0.0;
 	                        }
-	                        return clamp_overlap(overlap_info(ta, tb).area);
+	                        return clamp_overlap(overlap_metric(ta, tb));
 	                    };
 
 	                    for (int a : block) {
@@ -2740,8 +2988,9 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                 px /= static_cast<double>(block.size());
                 py /= static_cast<double>(block.size());
 
-                const double rot_rng =
+                double rot_rng =
                     p.block_rot_deg_max * (1.0 - frac) + p.block_rot_deg_min * frac;
+                rot_rng = std::min(180.0, rot_rng * step_mult);
                 const double ang = uni_deg(rng) * rot_rng;
                 const double rad = ang * 3.14159265358979323846 / 180.0;
                 const double cA = std::cos(rad);
@@ -2842,9 +3091,9 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                                                polys[static_cast<size_t>(b)])) {
                             return 0.0;
                         }
-                        return clamp_overlap(overlap_info(poses[static_cast<size_t>(a)],
-                                                          poses[static_cast<size_t>(b)])
-                                                 .area);
+                        return clamp_overlap(
+                            overlap_metric(poses[static_cast<size_t>(a)],
+                                           poses[static_cast<size_t>(b)]));
                     };
                     auto overlap_new = [&](int a, int b) -> double {
                         const int pa = pos[static_cast<size_t>(a)];
@@ -2875,7 +3124,7 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                         if (!aabb_overlap(ba, bb) || !polygons_intersect(pa_poly, pb_poly)) {
                             return 0.0;
                         }
-                        return clamp_overlap(overlap_info(ta, tb).area);
+                        return clamp_overlap(overlap_metric(ta, tb));
                     };
 
                     for (int a : block) {
@@ -3179,7 +3428,8 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                 const double ccx = 0.5 * (min_x + max_x);
                 const double ccy = 0.5 * (min_y + max_y);
                 const double half = 0.5 * box_side;
-                const double noise = p.lns_noise_frac * std::max(1e-9, curr_side);
+                const double noise =
+                    p.lns_noise_frac * std::max(1e-9, curr_side) * step_mult;
 
                 std::vector<TreePose> cand_poses = poses;
                 std::vector<Polygon> cand_polys = polys;
@@ -3211,9 +3461,8 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                                 continue;
                             }
                             active_overlap += clamp_overlap(
-                                overlap_info(cand_poses[static_cast<size_t>(i)],
-                                             cand_poses[static_cast<size_t>(j)])
-                                    .area);
+                                overlap_metric(cand_poses[static_cast<size_t>(i)],
+                                               cand_poses[static_cast<size_t>(j)]));
                         }
                     }
 	                    active_overlap = clamp_overlap(active_overlap);
@@ -3341,7 +3590,7 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                                     break;
                                 }
                                 overlap_add += clamp_overlap(
-                                    overlap_info(cand, cand_poses[static_cast<size_t>(j)]).area);
+                                    overlap_metric(cand, cand_poses[static_cast<size_t>(j)]));
                             }
                         }
                         if (collide) {
@@ -3440,9 +3689,10 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                 }
 
                 bool moved = false;
-                const double step =
+                double step =
                     (p.resolve_step_frac_max * (1.0 - frac) + p.resolve_step_frac_min * frac) *
                     std::max(1e-9, curr_side);
+                step *= step_mult;
 
                 for (int att = 0; att < std::max(1, p.resolve_attempts) && !moved; ++att) {
                     int i = -1;
@@ -3485,9 +3735,12 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                                 }
 
                                 Point avg_mtv = mul_point(os.mtv_sum, 1.0 / a);
-                                double score = a;
-                                if (score > best_score) {
-                                    best_score = score;
+                                double metric = use_mtv_metric
+                                                    ? (avg_mtv.x * avg_mtv.x + avg_mtv.y * avg_mtv.y)
+                                                    : a;
+                                metric = clamp_overlap(metric);
+                                if (metric > best_score) {
+                                    best_score = metric;
                                     best_rep = avg_mtv;
                                 }
                             }
@@ -3557,15 +3810,14 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                                              bbs[static_cast<size_t>(k)]) &&
                                 polygons_intersect(polys[static_cast<size_t>(i)],
                                                    polys[static_cast<size_t>(k)])) {
-                                old_a = overlap_info(poses[static_cast<size_t>(i)],
-                                                     poses[static_cast<size_t>(k)])
-                                            .area;
+                                old_a = overlap_metric(poses[static_cast<size_t>(i)],
+                                                       poses[static_cast<size_t>(k)]);
                             }
                             double new_a = 0.0;
                             if ((new_dx * new_dx + new_dy * new_dy <= thr_sq) &&
                                 aabb_overlap(cand_bb, bbs[static_cast<size_t>(k)]) &&
                                 polygons_intersect(cand_poly, polys[static_cast<size_t>(k)])) {
-                                new_a = overlap_info(cand, poses[static_cast<size_t>(k)]).area;
+                                new_a = overlap_metric(cand, poses[static_cast<size_t>(k)]);
                             }
                             delta_overlap += clamp_overlap(new_a) - clamp_overlap(old_a);
                         }
@@ -3635,6 +3887,9 @@ SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
             }
 
             add_reward(op, accepted, improved_best, improved_curr, reward_old_cost, reward_new_cost);
+            if (improved_best) {
+                last_best_iter = t;
+            }
             maybe_update_controller(t);
         }
 

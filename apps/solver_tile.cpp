@@ -357,6 +357,15 @@ Options parse_args(int argc, char** argv) {
         }
         return v;
     };
+    auto parse_overlap_metric = [](const std::string& s) -> SARefiner::OverlapMetric {
+        if (s == "area") {
+            return SARefiner::OverlapMetric::kArea;
+        }
+        if (s == "mtv2" || s == "mtv") {
+            return SARefiner::OverlapMetric::kMtv2;
+        }
+        throw std::runtime_error("--sa-overlap-metric precisa ser 'area' ou 'mtv2'.");
+    };
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -456,8 +465,16 @@ Options parse_args(int argc, char** argv) {
             opt.sa_hh_segment = parse_int(need(arg));
         } else if (arg == "--sa-hh-reaction") {
             opt.sa_hh_reaction = parse_double(need(arg));
+        } else if (arg == "--sa-overlap-metric") {
+            opt.sa_overlap_metric = parse_overlap_metric(need(arg));
         } else if (arg == "--sa-overlap-weight") {
             opt.sa_overlap_weight = parse_double(need(arg));
+        } else if (arg == "--sa-overlap-weight-start") {
+            opt.sa_overlap_weight_start = parse_double(need(arg));
+        } else if (arg == "--sa-overlap-weight-end") {
+            opt.sa_overlap_weight_end = parse_double(need(arg));
+        } else if (arg == "--sa-overlap-weight-power") {
+            opt.sa_overlap_weight_power = parse_double(need(arg));
         } else if (arg == "--sa-overlap-eps-area") {
             opt.sa_overlap_eps_area = parse_double(need(arg));
         } else if (arg == "--sa-overlap-cost-cap") {
@@ -478,8 +495,46 @@ Options parse_args(int argc, char** argv) {
             opt.sa_push_max_step_frac = parse_double(need(arg));
         } else if (arg == "--sa-push-bisect-iters") {
             opt.sa_push_bisect_iters = parse_int(need(arg));
+        } else if (arg == "--sa-push-overshoot-frac") {
+            opt.sa_push_overshoot_frac = parse_double(need(arg));
         } else if (arg == "--sa-squeeze-pushes") {
             opt.sa_squeeze_pushes = parse_int(need(arg));
+        } else if (arg == "--sa-aggressive") {
+            opt.sa_aggressive = true;
+        } else if (arg == "--ils-iters") {
+            opt.ils_iters = parse_int(need(arg));
+        } else if (arg == "--ils-sa-restarts") {
+            opt.ils_sa_restarts = parse_int(need(arg));
+        } else if (arg == "--ils-sa-iters") {
+            opt.ils_sa_iters = parse_int(need(arg));
+        } else if (arg == "--ils-accept-sa") {
+            opt.ils_accept_sa = true;
+        } else if (arg == "--ils-t0") {
+            opt.ils_t0 = parse_double(need(arg));
+        } else if (arg == "--ils-t1") {
+            opt.ils_t1 = parse_double(need(arg));
+        } else if (arg == "--ils-alpha-min") {
+            opt.ils_alpha_min = parse_double(need(arg));
+        } else if (arg == "--ils-alpha-max") {
+            opt.ils_alpha_max = parse_double(need(arg));
+        } else if (arg == "--ils-p-aniso") {
+            opt.ils_p_aniso = parse_double(need(arg));
+        } else if (arg == "--ils-shear-max") {
+            opt.ils_shear_max = parse_double(need(arg));
+        } else if (arg == "--ils-jitter-frac") {
+            opt.ils_jitter_frac = parse_double(need(arg));
+        } else if (arg == "--ils-subset-frac") {
+            opt.ils_subset_frac = parse_double(need(arg));
+        } else if (arg == "--ils-rot-prob") {
+            opt.ils_rot_prob = parse_double(need(arg));
+        } else if (arg == "--ils-rot-deg-max") {
+            opt.ils_rot_deg_max = parse_double(need(arg));
+        } else if (arg == "--ils-repair-mtv-passes") {
+            opt.ils_repair_mtv_passes = parse_int(need(arg));
+        } else if (arg == "--ils-repair-mtv-damping") {
+            opt.ils_repair_mtv_damping = parse_double(need(arg));
+        } else if (arg == "--ils-repair-mtv-split") {
+            opt.ils_repair_mtv_split = parse_double(need(arg));
         } else if (arg == "--no-final-rigid" || arg == "--no-sa-rigid") {
             opt.final_rigid = false;
         } else if (arg == "--seed") {
@@ -635,6 +690,9 @@ Options parse_args(int argc, char** argv) {
     if (!(opt.sa_overlap_weight >= 0.0)) {
         throw std::runtime_error("--sa-overlap-weight precisa ser >= 0.");
     }
+    if (!(opt.sa_overlap_weight_power > 0.0)) {
+        throw std::runtime_error("--sa-overlap-weight-power precisa ser > 0.");
+    }
     if (!(opt.sa_overlap_eps_area >= 0.0)) {
         throw std::runtime_error("--sa-overlap-eps-area precisa ser >= 0.");
     }
@@ -660,8 +718,56 @@ Options parse_args(int argc, char** argv) {
     if (opt.sa_push_bisect_iters <= 0) {
         throw std::runtime_error("--sa-push-bisect-iters precisa ser > 0.");
     }
+    if (opt.sa_push_overshoot_frac < 0.0 || opt.sa_push_overshoot_frac > 1.0) {
+        throw std::runtime_error("--sa-push-overshoot-frac precisa estar em [0, 1].");
+    }
     if (opt.sa_squeeze_pushes < 0) {
         throw std::runtime_error("--sa-squeeze-pushes precisa ser >= 0.");
+    }
+    if (opt.ils_iters < 0) {
+        throw std::runtime_error("--ils-iters precisa ser >= 0.");
+    }
+    if (opt.ils_sa_restarts < 0) {
+        throw std::runtime_error("--ils-sa-restarts precisa ser >= 0.");
+    }
+    if (opt.ils_sa_iters < 0) {
+        throw std::runtime_error("--ils-sa-iters precisa ser >= 0.");
+    }
+    if (opt.ils_accept_sa) {
+        if (!(opt.ils_t0 > 0.0) || !(opt.ils_t1 > 0.0) || opt.ils_t1 > opt.ils_t0) {
+            throw std::runtime_error("--ils-t0/--ils-t1 inválidos (0 < t1 <= t0).");
+        }
+    }
+    if (!(opt.ils_alpha_min > 0.0) || !(opt.ils_alpha_max > 0.0) ||
+        opt.ils_alpha_min > opt.ils_alpha_max || opt.ils_alpha_max > 1.0) {
+        throw std::runtime_error("--ils-alpha-min/max inválidos (0 < min <= max <= 1).");
+    }
+    if (opt.ils_p_aniso < 0.0 || opt.ils_p_aniso > 1.0) {
+        throw std::runtime_error("--ils-p-aniso precisa estar em [0,1].");
+    }
+    if (opt.ils_shear_max < 0.0 || opt.ils_shear_max > 0.50) {
+        throw std::runtime_error("--ils-shear-max precisa estar em [0,0.50].");
+    }
+    if (opt.ils_jitter_frac < 0.0 || opt.ils_jitter_frac > 0.50) {
+        throw std::runtime_error("--ils-jitter-frac precisa estar em [0,0.50].");
+    }
+    if (opt.ils_subset_frac < 0.0 || opt.ils_subset_frac > 1.0) {
+        throw std::runtime_error("--ils-subset-frac precisa estar em [0,1].");
+    }
+    if (opt.ils_rot_prob < 0.0 || opt.ils_rot_prob > 1.0) {
+        throw std::runtime_error("--ils-rot-prob precisa estar em [0,1].");
+    }
+    if (!(opt.ils_rot_deg_max >= 0.0)) {
+        throw std::runtime_error("--ils-rot-deg-max precisa ser >= 0.");
+    }
+    if (opt.ils_repair_mtv_passes < 0) {
+        throw std::runtime_error("--ils-repair-mtv-passes precisa ser >= 0.");
+    }
+    if (!(opt.ils_repair_mtv_damping > 0.0)) {
+        throw std::runtime_error("--ils-repair-mtv-damping precisa ser > 0.");
+    }
+    if (opt.ils_repair_mtv_split < 0.0 || opt.ils_repair_mtv_split > 1.0) {
+        throw std::runtime_error("--ils-repair-mtv-split precisa estar em [0,1].");
     }
     return opt;
 }
@@ -796,6 +902,35 @@ int main(int argc, char** argv) {
             }
         }
 
+        if (opt.ils_iters > 0) {
+            std::vector<TreePose>& sol_nmax =
+                solutions_by_n[static_cast<size_t>(opt.n_max)];
+            double side_before = bounding_square_side(
+                transformed_polygons(base_poly, sol_nmax));
+            ILSResult ils = ils_basin_hop_compact(
+                base_poly,
+                radius,
+                sol_nmax,
+                opt.seed ^
+                    (0xA24BAED4963EE407ULL +
+                     static_cast<uint64_t>(opt.n_max) * 0x9E3779B97F4A7C15ULL),
+                opt);
+            double side_after = bounding_square_side(
+                transformed_polygons(base_poly, sol_nmax));
+            if (ils.improved) {
+                total_score +=
+                    ((side_after * side_after) - (side_before * side_before)) /
+                    static_cast<double>(opt.n_max);
+            }
+            std::cout << "ILS (n=" << opt.n_max << "): "
+                      << (ils.improved ? "improved" : "no-improve")
+                      << " (attempts=" << ils.attempts
+                      << ", accepted=" << ils.accepted
+                      << ", side=" << std::fixed << std::setprecision(9)
+                      << ils.start_side << " -> " << ils.best_side
+                      << ")\n";
+        }
+
         const bool use_beam = opt.sa_beam && opt.sa_beam_width > 0;
         const bool use_chain = opt.sa_chain &&
                                (opt.sa_chain_base_iters > 0 ||
@@ -860,7 +995,11 @@ int main(int argc, char** argv) {
                 p.lns_remove = opt.sa_lns_remove;
                 p.hh_segment = opt.sa_hh_segment;
                 p.hh_reaction = opt.sa_hh_reaction;
+                p.overlap_metric = opt.sa_overlap_metric;
                 p.overlap_weight = opt.sa_overlap_weight;
+                p.overlap_weight_start = opt.sa_overlap_weight_start;
+                p.overlap_weight_end = opt.sa_overlap_weight_end;
+                p.overlap_weight_power = opt.sa_overlap_weight_power;
                 p.overlap_eps_area = opt.sa_overlap_eps_area;
                 p.overlap_cost_cap = opt.sa_overlap_cost_cap;
                 p.plateau_eps = opt.sa_plateau_eps;
@@ -871,7 +1010,11 @@ int main(int argc, char** argv) {
                 p.resolve_noise_frac = opt.sa_resolve_noise_frac;
                 p.push_max_step_frac = opt.sa_push_max_step_frac;
                 p.push_bisect_iters = opt.sa_push_bisect_iters;
+                p.push_overshoot_frac = opt.sa_push_overshoot_frac;
                 p.squeeze_pushes = opt.sa_squeeze_pushes;
+                if (opt.sa_aggressive) {
+                    SARefiner::apply_aggressive_preset(p);
+                }
 
                 std::vector<TreePose> best_sol =
                     solutions_by_n[static_cast<size_t>(n)];
@@ -991,6 +1134,7 @@ int main(int argc, char** argv) {
         } else if (!opt.sa_beam) {
             std::cout << "SA chain: off\n";
         }
+        std::cout << "SA aggressive: " << (opt.sa_aggressive ? "on" : "off") << "\n";
 
     } catch (const std::exception& ex) {
         std::cerr << "Erro: " << ex.what() << "\n";

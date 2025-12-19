@@ -67,6 +67,7 @@ struct Options {
 
     int sa_restarts = 0;
     int sa_iters = 0;
+    bool sa_on_best = false;
     double sa_w_micro = 1.0;
     double sa_w_swap_rot = 0.25;
     double sa_w_relocate = 0.15;
@@ -79,18 +80,24 @@ struct Options {
     int sa_lns_remove = 6;
     int sa_hh_segment = 50;
     double sa_hh_reaction = 0.20;
-	    double sa_overlap_weight = 0.0;
-	    double sa_overlap_eps_area = 1e-12;
-	    double sa_overlap_cost_cap = 0.0;
-	    double sa_plateau_eps = 0.0;
-	    double sa_w_resolve_overlap = 0.0;
-	    int sa_resolve_attempts = 6;
-	    double sa_resolve_step_frac_max = 0.20;
-	    double sa_resolve_step_frac_min = 0.02;
+    SARefiner::OverlapMetric sa_overlap_metric = SARefiner::OverlapMetric::kArea;
+    double sa_overlap_weight = 0.0;
+    double sa_overlap_weight_start = -1.0;
+    double sa_overlap_weight_end = -1.0;
+    double sa_overlap_weight_power = 1.0;
+    double sa_overlap_eps_area = 1e-12;
+    double sa_overlap_cost_cap = 0.0;
+    double sa_plateau_eps = 0.0;
+    double sa_w_resolve_overlap = 0.0;
+    int sa_resolve_attempts = 6;
+    double sa_resolve_step_frac_max = 0.20;
+    double sa_resolve_step_frac_min = 0.02;
     double sa_resolve_noise_frac = 0.05;
     double sa_push_max_step_frac = 0.60;
     int sa_push_bisect_iters = 10;
+    double sa_push_overshoot_frac = 0.0;
     int sa_squeeze_pushes = 6;
+    bool sa_aggressive = false;
 
     // Squeeze (global): comprime layout e repara overlaps.
     int squeeze_tries = 0;
@@ -98,6 +105,9 @@ struct Options {
     double squeeze_alpha_min = 0.985;
     double squeeze_alpha_max = 0.9995;
     double squeeze_p_aniso = 0.70;
+    int squeeze_steps = 1;
+    int squeeze_patience = 2;
+    bool squeeze_alt_axis = false;
     int squeeze_repair_passes = 200;
 
     bool final_rigid = true;
@@ -575,6 +585,7 @@ bool repair_inplace(const Polygon& base_poly,
             p.w_lns = 0.0;
             p.w_push_contact = 0.0;
             p.w_squeeze = 0.0;
+            p.overlap_metric = opt.sa_overlap_metric;
             p.overlap_weight = opt.repair_soft_overlap_weight;
             p.overlap_eps_area = opt.sa_overlap_eps_area;
             p.overlap_cost_cap = 0.0;
@@ -912,6 +923,15 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
         }
         return v;
     };
+    auto parse_overlap_metric = [](const std::string& s) -> SARefiner::OverlapMetric {
+        if (s == "area") {
+            return SARefiner::OverlapMetric::kArea;
+        }
+        if (s == "mtv2" || s == "mtv") {
+            return SARefiner::OverlapMetric::kMtv2;
+        }
+        throw std::runtime_error("--sa-overlap-metric precisa ser 'area' ou 'mtv2'.");
+    };
 
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
@@ -996,6 +1016,8 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
             opt.sa_restarts = parse_int(need(arg));
         } else if (arg == "--sa-iters") {
             opt.sa_iters = parse_int(need(arg));
+        } else if (arg == "--sa-on-best") {
+            opt.sa_on_best = true;
         } else if (arg == "--sa-w-micro") {
             opt.sa_w_micro = parse_double(need(arg));
         } else if (arg == "--sa-w-swap-rot") {
@@ -1020,18 +1042,26 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
             opt.sa_hh_segment = parse_int(need(arg));
         } else if (arg == "--sa-hh-reaction") {
             opt.sa_hh_reaction = parse_double(need(arg));
+        } else if (arg == "--sa-overlap-metric") {
+            opt.sa_overlap_metric = parse_overlap_metric(need(arg));
         } else if (arg == "--sa-overlap-weight") {
             opt.sa_overlap_weight = parse_double(need(arg));
-	        } else if (arg == "--sa-overlap-eps-area") {
-	            opt.sa_overlap_eps_area = parse_double(need(arg));
-	        } else if (arg == "--sa-overlap-cost-cap") {
-	            opt.sa_overlap_cost_cap = parse_double(need(arg));
-	        } else if (arg == "--sa-plateau-eps") {
-	            opt.sa_plateau_eps = parse_double(need(arg));
-	        } else if (arg == "--sa-w-resolve-overlap") {
-	            opt.sa_w_resolve_overlap = parse_double(need(arg));
-	        } else if (arg == "--sa-resolve-attempts") {
-	            opt.sa_resolve_attempts = parse_int(need(arg));
+        } else if (arg == "--sa-overlap-weight-start") {
+            opt.sa_overlap_weight_start = parse_double(need(arg));
+        } else if (arg == "--sa-overlap-weight-end") {
+            opt.sa_overlap_weight_end = parse_double(need(arg));
+        } else if (arg == "--sa-overlap-weight-power") {
+            opt.sa_overlap_weight_power = parse_double(need(arg));
+        } else if (arg == "--sa-overlap-eps-area") {
+            opt.sa_overlap_eps_area = parse_double(need(arg));
+        } else if (arg == "--sa-overlap-cost-cap") {
+            opt.sa_overlap_cost_cap = parse_double(need(arg));
+        } else if (arg == "--sa-plateau-eps") {
+            opt.sa_plateau_eps = parse_double(need(arg));
+        } else if (arg == "--sa-w-resolve-overlap") {
+            opt.sa_w_resolve_overlap = parse_double(need(arg));
+        } else if (arg == "--sa-resolve-attempts") {
+            opt.sa_resolve_attempts = parse_int(need(arg));
         } else if (arg == "--sa-resolve-step-frac-max") {
             opt.sa_resolve_step_frac_max = parse_double(need(arg));
         } else if (arg == "--sa-resolve-step-frac-min") {
@@ -1042,8 +1072,12 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
             opt.sa_push_max_step_frac = parse_double(need(arg));
         } else if (arg == "--sa-push-bisect-iters") {
             opt.sa_push_bisect_iters = parse_int(need(arg));
+        } else if (arg == "--sa-push-overshoot-frac") {
+            opt.sa_push_overshoot_frac = parse_double(need(arg));
         } else if (arg == "--sa-squeeze-pushes") {
             opt.sa_squeeze_pushes = parse_int(need(arg));
+        } else if (arg == "--sa-aggressive") {
+            opt.sa_aggressive = true;
         } else if (arg == "--squeeze-tries") {
             opt.squeeze_tries = parse_int(need(arg));
         } else if (arg == "--squeeze-control") {
@@ -1054,6 +1088,12 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
             opt.squeeze_alpha_max = parse_double(need(arg));
         } else if (arg == "--squeeze-p-aniso") {
             opt.squeeze_p_aniso = parse_double(need(arg));
+        } else if (arg == "--squeeze-steps") {
+            opt.squeeze_steps = parse_int(need(arg));
+        } else if (arg == "--squeeze-patience") {
+            opt.squeeze_patience = parse_int(need(arg));
+        } else if (arg == "--squeeze-alt-axis") {
+            opt.squeeze_alt_axis = true;
         } else if (arg == "--squeeze-repair-passes") {
             opt.squeeze_repair_passes = parse_int(need(arg));
         } else if (arg == "--no-final-rigid") {
@@ -1169,15 +1209,18 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
     if (!(opt.sa_overlap_eps_area >= 0.0)) {
         throw std::runtime_error("--sa-overlap-eps-area precisa ser >= 0.");
     }
-	    if (!(opt.sa_overlap_cost_cap >= 0.0)) {
-	        throw std::runtime_error("--sa-overlap-cost-cap precisa ser >= 0.");
-	    }
-	    if (!(opt.sa_plateau_eps >= 0.0)) {
-	        throw std::runtime_error("--sa-plateau-eps precisa ser >= 0.");
-	    }
-	    if (opt.sa_resolve_attempts <= 0) {
-	        throw std::runtime_error("--sa-resolve-attempts precisa ser > 0.");
-	    }
+    if (!(opt.sa_overlap_weight_power > 0.0)) {
+        throw std::runtime_error("--sa-overlap-weight-power precisa ser > 0.");
+    }
+    if (!(opt.sa_overlap_cost_cap >= 0.0)) {
+        throw std::runtime_error("--sa-overlap-cost-cap precisa ser >= 0.");
+    }
+    if (!(opt.sa_plateau_eps >= 0.0)) {
+        throw std::runtime_error("--sa-plateau-eps precisa ser >= 0.");
+    }
+    if (opt.sa_resolve_attempts <= 0) {
+        throw std::runtime_error("--sa-resolve-attempts precisa ser > 0.");
+    }
     if (!(opt.sa_resolve_step_frac_max > 0.0) || !(opt.sa_resolve_step_frac_min > 0.0) ||
         opt.sa_resolve_step_frac_min > opt.sa_resolve_step_frac_max) {
         throw std::runtime_error("--sa-resolve-step-frac-min/max inválidos.");
@@ -1191,6 +1234,9 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
     if (opt.sa_push_bisect_iters <= 0) {
         throw std::runtime_error("--sa-push-bisect-iters precisa ser > 0.");
     }
+    if (opt.sa_push_overshoot_frac < 0.0 || opt.sa_push_overshoot_frac > 1.0) {
+        throw std::runtime_error("--sa-push-overshoot-frac precisa estar em [0,1].");
+    }
     if (opt.sa_squeeze_pushes < 0) {
         throw std::runtime_error("--sa-squeeze-pushes precisa ser >= 0.");
     }
@@ -1203,6 +1249,12 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
     }
     if (opt.squeeze_p_aniso < 0.0 || opt.squeeze_p_aniso > 1.0) {
         throw std::runtime_error("--squeeze-p-aniso precisa estar em [0,1].");
+    }
+    if (opt.squeeze_steps <= 0) {
+        throw std::runtime_error("--squeeze-steps precisa ser > 0.");
+    }
+    if (opt.squeeze_patience < 0) {
+        throw std::runtime_error("--squeeze-patience precisa ser >= 0.");
     }
     if (opt.squeeze_repair_passes < 0) {
         throw std::runtime_error("--squeeze-repair-passes precisa ser >= 0.");
@@ -1344,6 +1396,69 @@ int main(int argc, char** argv) {
             const double best_parent_side = pool[0].side;
             CandidateSol best = pool[0];
 
+            if (opt.sa_on_best && opt.sa_iters > 0 && opt.sa_restarts > 0) {
+                SARefiner::Params p;
+                p.iters = opt.sa_iters;
+                p.quantize_decimals = opt.output_decimals;
+                p.w_micro = opt.sa_w_micro;
+                p.w_swap_rot = opt.sa_w_swap_rot;
+                p.w_relocate = opt.sa_w_relocate;
+                p.w_block_translate = opt.sa_w_block_translate;
+                p.w_block_rotate = opt.sa_w_block_rotate;
+                p.w_lns = opt.sa_w_lns;
+                p.w_push_contact = opt.sa_w_push_contact;
+                p.w_squeeze = opt.sa_w_squeeze;
+                p.block_size = opt.sa_block_size;
+                p.lns_remove = opt.sa_lns_remove;
+                p.hh_segment = opt.sa_hh_segment;
+                p.hh_reaction = opt.sa_hh_reaction;
+                p.overlap_metric = opt.sa_overlap_metric;
+                p.overlap_weight = opt.sa_overlap_weight;
+                p.overlap_weight_start = opt.sa_overlap_weight_start;
+                p.overlap_weight_end = opt.sa_overlap_weight_end;
+                p.overlap_weight_power = opt.sa_overlap_weight_power;
+                p.overlap_eps_area = opt.sa_overlap_eps_area;
+                p.overlap_cost_cap = opt.sa_overlap_cost_cap;
+                p.plateau_eps = opt.sa_plateau_eps;
+                p.w_resolve_overlap = opt.sa_w_resolve_overlap;
+                p.resolve_attempts = opt.sa_resolve_attempts;
+                p.resolve_step_frac_max = opt.sa_resolve_step_frac_max;
+                p.resolve_step_frac_min = opt.sa_resolve_step_frac_min;
+                p.resolve_noise_frac = opt.sa_resolve_noise_frac;
+                p.push_max_step_frac = opt.sa_push_max_step_frac;
+                p.push_bisect_iters = opt.sa_push_bisect_iters;
+                p.push_overshoot_frac = opt.sa_push_overshoot_frac;
+                p.squeeze_pushes = opt.sa_squeeze_pushes;
+                if (opt.sa_aggressive) {
+                    SARefiner::apply_aggressive_preset(p);
+                }
+
+                CandidateSol best_sa;
+                bool have_sa = false;
+                for (int r = 0; r < opt.sa_restarts; ++r) {
+                    uint64_t s =
+                        opt.seed ^
+                        (0x9e3779b97f4a7c15ULL +
+                         static_cast<uint64_t>(n) * 0xbf58476d1ce4e5b9ULL +
+                         static_cast<uint64_t>(r) * 0x94d049bb133111ebULL +
+                         0xD1B54A32D192ED03ULL);
+                    SARefiner::Result res = sa.refine_min_side(best.poses, s, p);
+                    CandidateSol cand;
+                    std::vector<TreePose> tmp = std::move(res.best_poses);
+                    if (!finalize_solution(base_poly, radius, tmp, s, opt, cand)) {
+                        continue;
+                    }
+                    if (!have_sa || cand.side + 1e-15 < best_sa.side) {
+                        best_sa = std::move(cand);
+                        have_sa = true;
+                    }
+                }
+                if (have_sa && best_sa.side + 1e-15 < best.side) {
+                    best = best_sa;
+                    pool[0] = best;
+                }
+            }
+
             if (opt.blend_iters > 0 && pool.size() >= 2 && opt.repair_passes > 0) {
                 std::mt19937_64 rng(opt.seed ^
                                     (0x9e3779b97f4a7c15ULL +
@@ -1435,7 +1550,11 @@ int main(int argc, char** argv) {
                         p.lns_remove = opt.sa_lns_remove;
                         p.hh_segment = opt.sa_hh_segment;
                         p.hh_reaction = opt.sa_hh_reaction;
+                        p.overlap_metric = opt.sa_overlap_metric;
                         p.overlap_weight = opt.sa_overlap_weight;
+                        p.overlap_weight_start = opt.sa_overlap_weight_start;
+                        p.overlap_weight_end = opt.sa_overlap_weight_end;
+                        p.overlap_weight_power = opt.sa_overlap_weight_power;
                         p.overlap_eps_area = opt.sa_overlap_eps_area;
                         p.overlap_cost_cap = opt.sa_overlap_cost_cap;
                         p.plateau_eps = opt.sa_plateau_eps;
@@ -1446,7 +1565,11 @@ int main(int argc, char** argv) {
                         p.resolve_noise_frac = opt.sa_resolve_noise_frac;
                         p.push_max_step_frac = opt.sa_push_max_step_frac;
                         p.push_bisect_iters = opt.sa_push_bisect_iters;
+                        p.push_overshoot_frac = opt.sa_push_overshoot_frac;
                         p.squeeze_pushes = opt.sa_squeeze_pushes;
+                        if (opt.sa_aggressive) {
+                            SARefiner::apply_aggressive_preset(p);
+                        }
 
                         double best_sa_side = std::numeric_limits<double>::infinity();
                         std::vector<TreePose> best_sa = refined;
@@ -1510,276 +1633,330 @@ int main(int argc, char** argv) {
                 Options opt_sq = opt;
                 opt_sq.repair_passes = opt.squeeze_repair_passes;
 
-                if (opt.squeeze_control) {
-                    const CandidateSol base_best = best;
-                    const Extents e0 = compute_extents(base_best.bbs);
-                    const double cx = 0.5 * (e0.min_x + e0.max_x);
-                    const double cy = 0.5 * (e0.min_y + e0.max_y);
-                    const double w0 = e0.max_x - e0.min_x;
-                    const double h0 = e0.max_y - e0.min_y;
+                CandidateSol curr_best = best;
+                int no_improve = 0;
+                const int max_steps = std::max(1, opt.squeeze_steps);
 
-                    auto scales_for_alpha = [&](double alpha, double& out_ax, double& out_ay) {
-                        double ax = 1.0;
-                        double ay = 1.0;
-                        if (w0 >= h0) {
-                            ax = alpha;
-                            const double ratio = (w0 > 1e-12) ? (h0 / w0) : 1.0;
-                            ay = 1.0 - (1.0 - alpha) * ratio;
-                        } else {
-                            ay = alpha;
-                            const double ratio = (h0 > 1e-12) ? (w0 / h0) : 1.0;
-                            ax = 1.0 - (1.0 - alpha) * ratio;
-                        }
-                        out_ax = ax;
-                        out_ay = ay;
-                    };
+                for (int step = 0; step < max_steps; ++step) {
+                    CandidateSol step_best = curr_best;
+                    bool improved_step = false;
+                    const bool flip_axis = opt.squeeze_alt_axis && (step % 2 == 1);
 
-                    auto eval_alpha = [&](double alpha, int eval_idx, CandidateSol& out_cand) -> bool {
-                        double ax = 1.0;
-                        double ay = 1.0;
-                        scales_for_alpha(alpha, ax, ay);
-                        if (!(ax < 1.0) && !(ay < 1.0)) {
-                            return false;
-                        }
+                    if (opt.squeeze_control) {
+                        const Extents e0 = compute_extents(curr_best.bbs);
+                        const double cx = 0.5 * (e0.min_x + e0.max_x);
+                        const double cy = 0.5 * (e0.min_y + e0.max_y);
+                        const double w0 = e0.max_x - e0.min_x;
+                        const double h0 = e0.max_y - e0.min_y;
 
-                        std::vector<TreePose> tmp = base_best.poses;
-                        for (auto& p : tmp) {
-                            p.x = cx + ax * (p.x - cx);
-                            p.y = cy + ay * (p.y - cy);
-                        }
-                        tmp = quantize_poses_wrap_deg(tmp, opt.output_decimals);
-
-                        std::vector<char> movable(tmp.size(), 1);
-                        uint64_t s = opt.seed ^
-                                     (0x94d049bb133111ebULL +
-                                      static_cast<uint64_t>(n) * 0x2545F4914F6CDD1DULL +
-                                      static_cast<uint64_t>(eval_idx) * 0xBF58476D1CE4E5B9ULL);
-                        if (!repair_inplace(base_poly, radius, tmp, movable, s, opt_sq)) {
-                            return false;
-                        }
-
-                        CandidateSol cand;
-                        if (!finalize_solution(base_poly, radius, tmp, s, opt, cand)) {
-                            return false;
-                        }
-                        out_cand = std::move(cand);
-                        return true;
-                    };
-
-                    const int budget = opt.squeeze_tries;
-                    int eval_idx = 0;
-
-                    double infeasible = opt.squeeze_alpha_min;
-                    double feasible = opt.squeeze_alpha_max;
-
-                    CandidateSol best_ctrl;
-                    bool have = false;
-
-                    CandidateSol cand_hi;
-                    if (budget > 0 && eval_alpha(opt.squeeze_alpha_max, eval_idx++, cand_hi)) {
-                        have = true;
-                        best_ctrl = cand_hi;
-
-                        if (eval_idx < budget) {
-                            CandidateSol cand_lo;
-                            if (eval_alpha(opt.squeeze_alpha_min, eval_idx++, cand_lo)) {
-                                feasible = opt.squeeze_alpha_min;
-                                best_ctrl = cand_lo;
+                        auto scales_for_alpha = [&](double alpha, double& out_ax, double& out_ay) {
+                            double ax = 1.0;
+                            double ay = 1.0;
+                            bool axis_x = (w0 >= h0);
+                            if (flip_axis) {
+                                axis_x = !axis_x;
+                            }
+                            if (axis_x) {
+                                ax = alpha;
+                                const double ratio = (w0 > 1e-12) ? (h0 / w0) : 1.0;
+                                ay = 1.0 - (1.0 - alpha) * ratio;
                             } else {
-                                infeasible = opt.squeeze_alpha_min;
-                                while (eval_idx < budget && (feasible - infeasible) > 1e-12) {
-                                    double mid = 0.5 * (infeasible + feasible);
-                                    CandidateSol cand_mid;
-                                    if (eval_alpha(mid, eval_idx++, cand_mid)) {
-                                        feasible = mid;
-                                        if (cand_mid.side + 1e-15 < best_ctrl.side) {
-                                            best_ctrl = std::move(cand_mid);
+                                ay = alpha;
+                                const double ratio = (h0 > 1e-12) ? (w0 / h0) : 1.0;
+                                ax = 1.0 - (1.0 - alpha) * ratio;
+                            }
+                            out_ax = ax;
+                            out_ay = ay;
+                        };
+
+                        auto eval_alpha = [&](double alpha,
+                                              int eval_idx,
+                                              CandidateSol& out_cand) -> bool {
+                            double ax = 1.0;
+                            double ay = 1.0;
+                            scales_for_alpha(alpha, ax, ay);
+                            if (!(ax < 1.0) && !(ay < 1.0)) {
+                                return false;
+                            }
+
+                            std::vector<TreePose> tmp = curr_best.poses;
+                            for (auto& p : tmp) {
+                                p.x = cx + ax * (p.x - cx);
+                                p.y = cy + ay * (p.y - cy);
+                            }
+                            tmp = quantize_poses_wrap_deg(tmp, opt.output_decimals);
+
+                            std::vector<char> movable(tmp.size(), 1);
+                            uint64_t s = opt.seed ^
+                                         (0x94d049bb133111ebULL +
+                                          static_cast<uint64_t>(n) * 0x2545F4914F6CDD1DULL +
+                                          static_cast<uint64_t>(step) * 0xD1B54A32D192ED03ULL +
+                                          static_cast<uint64_t>(eval_idx) * 0xBF58476D1CE4E5B9ULL);
+                            if (!repair_inplace(base_poly, radius, tmp, movable, s, opt_sq)) {
+                                return false;
+                            }
+
+                            CandidateSol cand;
+                            if (!finalize_solution(base_poly, radius, tmp, s, opt, cand)) {
+                                return false;
+                            }
+                            out_cand = std::move(cand);
+                            return true;
+                        };
+
+                        const int budget = opt.squeeze_tries;
+                        int eval_idx = 0;
+
+                        double infeasible = opt.squeeze_alpha_min;
+                        double feasible = opt.squeeze_alpha_max;
+
+                        CandidateSol best_ctrl;
+                        bool have = false;
+
+                        CandidateSol cand_hi;
+                        if (budget > 0 && eval_alpha(opt.squeeze_alpha_max, eval_idx++, cand_hi)) {
+                            have = true;
+                            best_ctrl = cand_hi;
+
+                            if (eval_idx < budget) {
+                                CandidateSol cand_lo;
+                                if (eval_alpha(opt.squeeze_alpha_min, eval_idx++, cand_lo)) {
+                                    feasible = opt.squeeze_alpha_min;
+                                    best_ctrl = cand_lo;
+                                } else {
+                                    infeasible = opt.squeeze_alpha_min;
+                                    while (eval_idx < budget && (feasible - infeasible) > 1e-12) {
+                                        double mid = 0.5 * (infeasible + feasible);
+                                        CandidateSol cand_mid;
+                                        if (eval_alpha(mid, eval_idx++, cand_mid)) {
+                                            feasible = mid;
+                                            if (cand_mid.side + 1e-15 < best_ctrl.side) {
+                                                best_ctrl = std::move(cand_mid);
+                                            }
+                                        } else {
+                                            infeasible = mid;
                                         }
-                                    } else {
-                                        infeasible = mid;
                                     }
                                 }
                             }
                         }
-                    }
 
-                    if (have && opt.sa_iters > 0 && opt.sa_restarts > 0) {
-                        std::vector<TreePose> tmp = best_ctrl.poses;
-                        SARefiner::Params p;
-                        p.iters = opt.sa_iters;
-                        p.quantize_decimals = opt.output_decimals;
-                        p.w_micro = opt.sa_w_micro;
-                        p.w_swap_rot = opt.sa_w_swap_rot;
-                        p.w_relocate = opt.sa_w_relocate;
-                        p.w_block_translate = opt.sa_w_block_translate;
-                        p.w_block_rotate = opt.sa_w_block_rotate;
-                        p.w_lns = opt.sa_w_lns;
-                        p.w_push_contact = opt.sa_w_push_contact;
-                        p.w_squeeze = opt.sa_w_squeeze;
-                        p.block_size = opt.sa_block_size;
-                        p.lns_remove = opt.sa_lns_remove;
-                        p.hh_segment = opt.sa_hh_segment;
-                        p.hh_reaction = opt.sa_hh_reaction;
-                        p.overlap_weight = opt.sa_overlap_weight;
-                        p.overlap_eps_area = opt.sa_overlap_eps_area;
-                        p.overlap_cost_cap = opt.sa_overlap_cost_cap;
-                        p.plateau_eps = opt.sa_plateau_eps;
-                        p.w_resolve_overlap = opt.sa_w_resolve_overlap;
-                        p.resolve_attempts = opt.sa_resolve_attempts;
-                        p.resolve_step_frac_max = opt.sa_resolve_step_frac_max;
-                        p.resolve_step_frac_min = opt.sa_resolve_step_frac_min;
-                        p.resolve_noise_frac = opt.sa_resolve_noise_frac;
-                        p.push_max_step_frac = opt.sa_push_max_step_frac;
-                        p.push_bisect_iters = opt.sa_push_bisect_iters;
-                        p.squeeze_pushes = opt.sa_squeeze_pushes;
+                        if (have && opt.sa_iters > 0 && opt.sa_restarts > 0) {
+                            std::vector<TreePose> tmp = best_ctrl.poses;
+                            SARefiner::Params p;
+                            p.iters = opt.sa_iters;
+                            p.quantize_decimals = opt.output_decimals;
+                            p.w_micro = opt.sa_w_micro;
+                            p.w_swap_rot = opt.sa_w_swap_rot;
+                            p.w_relocate = opt.sa_w_relocate;
+                            p.w_block_translate = opt.sa_w_block_translate;
+                            p.w_block_rotate = opt.sa_w_block_rotate;
+                            p.w_lns = opt.sa_w_lns;
+                            p.w_push_contact = opt.sa_w_push_contact;
+                            p.w_squeeze = opt.sa_w_squeeze;
+                            p.block_size = opt.sa_block_size;
+                            p.lns_remove = opt.sa_lns_remove;
+                            p.hh_segment = opt.sa_hh_segment;
+                            p.hh_reaction = opt.sa_hh_reaction;
+                            p.overlap_metric = opt.sa_overlap_metric;
+                            p.overlap_weight = opt.sa_overlap_weight;
+                            p.overlap_weight_start = opt.sa_overlap_weight_start;
+                            p.overlap_weight_end = opt.sa_overlap_weight_end;
+                            p.overlap_weight_power = opt.sa_overlap_weight_power;
+                            p.overlap_eps_area = opt.sa_overlap_eps_area;
+                            p.overlap_cost_cap = opt.sa_overlap_cost_cap;
+                            p.plateau_eps = opt.sa_plateau_eps;
+                            p.w_resolve_overlap = opt.sa_w_resolve_overlap;
+                            p.resolve_attempts = opt.sa_resolve_attempts;
+                            p.resolve_step_frac_max = opt.sa_resolve_step_frac_max;
+                            p.resolve_step_frac_min = opt.sa_resolve_step_frac_min;
+                            p.resolve_noise_frac = opt.sa_resolve_noise_frac;
+                            p.push_max_step_frac = opt.sa_push_max_step_frac;
+                            p.push_bisect_iters = opt.sa_push_bisect_iters;
+                            p.push_overshoot_frac = opt.sa_push_overshoot_frac;
+                            p.squeeze_pushes = opt.sa_squeeze_pushes;
+                            if (opt.sa_aggressive) {
+                                SARefiner::apply_aggressive_preset(p);
+                            }
 
-                        double best_sa_side = std::numeric_limits<double>::infinity();
-                        std::vector<TreePose> best_sa = tmp;
-                        for (int r = 0; r < opt.sa_restarts; ++r) {
-                            uint64_t sr =
-                                opt.seed ^
-                                (0x9e3779b97f4a7c15ULL +
-                                 static_cast<uint64_t>(n) * 0xbf58476d1ce4e5b9ULL +
-                                 static_cast<uint64_t>(r) * 0x94d049bb133111ebULL +
-                                 0xD1B54A32D192ED03ULL);
-                            SARefiner::Result res = sa.refine_min_side(tmp, sr, p);
+                            double best_sa_side = std::numeric_limits<double>::infinity();
+                            std::vector<TreePose> best_sa = tmp;
+                            for (int r = 0; r < opt.sa_restarts; ++r) {
+                                uint64_t sr =
+                                    opt.seed ^
+                                    (0x9e3779b97f4a7c15ULL +
+                                     static_cast<uint64_t>(n) * 0xbf58476d1ce4e5b9ULL +
+                                     static_cast<uint64_t>(r) * 0x94d049bb133111ebULL +
+                                     0xD1B54A32D192ED03ULL +
+                                     static_cast<uint64_t>(step) * 0xA24BAED4963EE407ULL);
+                                SARefiner::Result res = sa.refine_min_side(tmp, sr, p);
+                                CandidateSol cand;
+                                std::vector<TreePose> tmp2 = std::move(res.best_poses);
+                                if (!finalize_solution(base_poly, radius, tmp2, sr, opt, cand)) {
+                                    continue;
+                                }
+                                if (cand.side + 1e-15 < best_sa_side) {
+                                    best_sa_side = cand.side;
+                                    best_sa = std::move(cand.poses);
+                                }
+                            }
+                            tmp = std::move(best_sa);
+
+                            uint64_t s = opt.seed ^
+                                         (0x94d049bb133111ebULL +
+                                          static_cast<uint64_t>(n) * 0x2545F4914F6CDD1DULL +
+                                          0xD1B54A32D192ED03ULL +
+                                          static_cast<uint64_t>(step) * 0xA24BAED4963EE407ULL);
                             CandidateSol cand;
-                            std::vector<TreePose> tmp2 = std::move(res.best_poses);
-                            if (!finalize_solution(base_poly, radius, tmp2, sr, opt, cand)) {
+                            if (finalize_solution(base_poly, radius, tmp, s, opt, cand) &&
+                                cand.side + 1e-15 < best_ctrl.side) {
+                                best_ctrl = std::move(cand);
+                            }
+                        }
+
+                        if (have && best_ctrl.side + 1e-15 < step_best.side) {
+                            step_best = std::move(best_ctrl);
+                            improved_step = true;
+                        }
+                    } else {
+                        std::mt19937_64 rng(opt.seed ^
+                                            (0x9e3779b97f4a7c15ULL +
+                                             static_cast<uint64_t>(n) * 0xbf58476d1ce4e5b9ULL +
+                                             static_cast<uint64_t>(step) * 0xD1B54A32D192ED03ULL));
+                        std::uniform_real_distribution<double> uni01(0.0, 1.0);
+                        std::uniform_real_distribution<double> uni_alpha(opt.squeeze_alpha_min,
+                                                                         opt.squeeze_alpha_max);
+
+                        for (int st = 0; st < opt.squeeze_tries; ++st) {
+                            const Extents e = compute_extents(curr_best.bbs);
+                            const double cx = 0.5 * (e.min_x + e.max_x);
+                            const double cy = 0.5 * (e.min_y + e.max_y);
+
+                            double ax = 1.0;
+                            double ay = 1.0;
+                            if (uni01(rng) < opt.squeeze_p_aniso) {
+                                const double w = e.max_x - e.min_x;
+                                const double h = e.max_y - e.min_y;
+                                bool prefer_x = (w >= h);
+                                if (flip_axis) {
+                                    prefer_x = !prefer_x;
+                                }
+                                bool shrink_x = prefer_x;
+                                if (uni01(rng) < 0.25) {
+                                    shrink_x = !shrink_x;
+                                }
+                                if (shrink_x) {
+                                    ax = uni_alpha(rng);
+                                } else {
+                                    ay = uni_alpha(rng);
+                                }
+                            } else {
+                                ax = uni_alpha(rng);
+                                ay = uni_alpha(rng);
+                            }
+                            if (!(ax < 1.0) && !(ay < 1.0)) {
                                 continue;
                             }
-                            if (cand.side + 1e-15 < best_sa_side) {
-                                best_sa_side = cand.side;
-                                best_sa = std::move(cand.poses);
+
+                            std::vector<TreePose> tmp = curr_best.poses;
+                            for (auto& p : tmp) {
+                                p.x = cx + ax * (p.x - cx);
+                                p.y = cy + ay * (p.y - cy);
                             }
-                        }
-                        tmp = std::move(best_sa);
 
-                        uint64_t s = opt.seed ^
-                                     (0x94d049bb133111ebULL +
-                                      static_cast<uint64_t>(n) * 0x2545F4914F6CDD1DULL +
-                                      0xD1B54A32D192ED03ULL);
-                        CandidateSol cand;
-                        if (finalize_solution(base_poly, radius, tmp, s, opt, cand) &&
-                            cand.side + 1e-15 < best_ctrl.side) {
-                            best_ctrl = std::move(cand);
-                        }
-                    }
+                            std::vector<char> movable(tmp.size(), 1);
+                            uint64_t s = opt.seed ^
+                                         (0x94d049bb133111ebULL +
+                                          static_cast<uint64_t>(n) * 0x2545F4914F6CDD1DULL +
+                                          static_cast<uint64_t>(step) * 0xD1B54A32D192ED03ULL +
+                                          static_cast<uint64_t>(st) * 0xBF58476D1CE4E5B9ULL);
+                            if (!repair_inplace(base_poly, radius, tmp, movable, s, opt_sq)) {
+                                continue;
+                            }
 
-                    if (have && best_ctrl.side + 1e-15 < best.side) {
-                        best = std::move(best_ctrl);
-                    }
-                } else {
-                    std::mt19937_64 rng(opt.seed ^
+                            if (opt.sa_iters > 0 && opt.sa_restarts > 0) {
+                                SARefiner::Params p;
+                                p.iters = opt.sa_iters;
+                                p.quantize_decimals = opt.output_decimals;
+                                p.w_micro = opt.sa_w_micro;
+                                p.w_swap_rot = opt.sa_w_swap_rot;
+                                p.w_relocate = opt.sa_w_relocate;
+                                p.w_block_translate = opt.sa_w_block_translate;
+                                p.w_block_rotate = opt.sa_w_block_rotate;
+                                p.w_lns = opt.sa_w_lns;
+                                p.w_push_contact = opt.sa_w_push_contact;
+                                p.w_squeeze = opt.sa_w_squeeze;
+                                p.block_size = opt.sa_block_size;
+                                p.lns_remove = opt.sa_lns_remove;
+                                p.hh_segment = opt.sa_hh_segment;
+                                p.hh_reaction = opt.sa_hh_reaction;
+                                p.overlap_metric = opt.sa_overlap_metric;
+                                p.overlap_weight = opt.sa_overlap_weight;
+                                p.overlap_weight_start = opt.sa_overlap_weight_start;
+                                p.overlap_weight_end = opt.sa_overlap_weight_end;
+                                p.overlap_weight_power = opt.sa_overlap_weight_power;
+                                p.overlap_eps_area = opt.sa_overlap_eps_area;
+                                p.overlap_cost_cap = opt.sa_overlap_cost_cap;
+                                p.plateau_eps = opt.sa_plateau_eps;
+                                p.w_resolve_overlap = opt.sa_w_resolve_overlap;
+                                p.resolve_attempts = opt.sa_resolve_attempts;
+                                p.resolve_step_frac_max = opt.sa_resolve_step_frac_max;
+                                p.resolve_step_frac_min = opt.sa_resolve_step_frac_min;
+                                p.resolve_noise_frac = opt.sa_resolve_noise_frac;
+                                p.push_max_step_frac = opt.sa_push_max_step_frac;
+                                p.push_bisect_iters = opt.sa_push_bisect_iters;
+                                p.push_overshoot_frac = opt.sa_push_overshoot_frac;
+                                p.squeeze_pushes = opt.sa_squeeze_pushes;
+                                if (opt.sa_aggressive) {
+                                    SARefiner::apply_aggressive_preset(p);
+                                }
+
+                                double best_sa_side = std::numeric_limits<double>::infinity();
+                                std::vector<TreePose> best_sa = tmp;
+                                for (int r = 0; r < opt.sa_restarts; ++r) {
+                                    uint64_t sr =
+                                        s ^
                                         (0x9e3779b97f4a7c15ULL +
                                          static_cast<uint64_t>(n) * 0xbf58476d1ce4e5b9ULL +
-                                         0xD1B54A32D192ED03ULL));
-                    std::uniform_real_distribution<double> uni01(0.0, 1.0);
-                    std::uniform_real_distribution<double> uni_alpha(opt.squeeze_alpha_min,
-                                                                     opt.squeeze_alpha_max);
+                                         static_cast<uint64_t>(r) * 0x94d049bb133111ebULL);
+                                    SARefiner::Result res = sa.refine_min_side(tmp, sr, p);
+                                    CandidateSol cand;
+                                    std::vector<TreePose> tmp2 = std::move(res.best_poses);
+                                    if (!finalize_solution(base_poly, radius, tmp2, sr, opt, cand)) {
+                                        continue;
+                                    }
+                                    if (cand.side + 1e-15 < best_sa_side) {
+                                        best_sa_side = cand.side;
+                                        best_sa = std::move(cand.poses);
+                                    }
+                                }
+                                tmp = std::move(best_sa);
+                            }
 
-                    for (int st = 0; st < opt.squeeze_tries; ++st) {
-                        const Extents e = compute_extents(best.bbs);
-                        const double cx = 0.5 * (e.min_x + e.max_x);
-                        const double cy = 0.5 * (e.min_y + e.max_y);
-
-	                    double ax = 1.0;
-	                    double ay = 1.0;
-	                    if (uni01(rng) < opt.squeeze_p_aniso) {
-	                        const double w = e.max_x - e.min_x;
-	                        const double h = e.max_y - e.min_y;
-	                        const bool prefer_x = (w >= h);
-	                        bool shrink_x = prefer_x;
-	                        if (uni01(rng) < 0.25) {
-	                            shrink_x = !shrink_x;
-	                        }
-	                        if (shrink_x) {
-	                            ax = uni_alpha(rng);
-	                        } else {
-	                            ay = uni_alpha(rng);
-	                        }
-	                    } else {
-	                        ax = uni_alpha(rng);
-	                        ay = uni_alpha(rng);
-	                    }
-                        if (!(ax < 1.0) && !(ay < 1.0)) {
-                            continue;
-                        }
-
-                        std::vector<TreePose> tmp = best.poses;
-                        for (auto& p : tmp) {
-                            p.x = cx + ax * (p.x - cx);
-                            p.y = cy + ay * (p.y - cy);
-                        }
-
-                        std::vector<char> movable(tmp.size(), 1);
-                        uint64_t s = opt.seed ^
-                                     (0x94d049bb133111ebULL +
-                                      static_cast<uint64_t>(n) * 0x2545F4914F6CDD1DULL +
-                                      static_cast<uint64_t>(st) * 0xBF58476D1CE4E5B9ULL);
-	                    if (!repair_inplace(base_poly, radius, tmp, movable, s, opt_sq)) {
-	                        continue;
-	                    }
-
-	                    if (opt.sa_iters > 0 && opt.sa_restarts > 0) {
-	                        SARefiner::Params p;
-	                        p.iters = opt.sa_iters;
-	                        p.quantize_decimals = opt.output_decimals;
-	                        p.w_micro = opt.sa_w_micro;
-	                        p.w_swap_rot = opt.sa_w_swap_rot;
-	                        p.w_relocate = opt.sa_w_relocate;
-	                        p.w_block_translate = opt.sa_w_block_translate;
-	                        p.w_block_rotate = opt.sa_w_block_rotate;
-	                        p.w_lns = opt.sa_w_lns;
-	                        p.w_push_contact = opt.sa_w_push_contact;
-	                        p.w_squeeze = opt.sa_w_squeeze;
-	                        p.block_size = opt.sa_block_size;
-	                        p.lns_remove = opt.sa_lns_remove;
-	                        p.hh_segment = opt.sa_hh_segment;
-	                        p.hh_reaction = opt.sa_hh_reaction;
-	                        p.overlap_weight = opt.sa_overlap_weight;
-	                        p.overlap_eps_area = opt.sa_overlap_eps_area;
-	                        p.overlap_cost_cap = opt.sa_overlap_cost_cap;
-	                        p.plateau_eps = opt.sa_plateau_eps;
-	                        p.w_resolve_overlap = opt.sa_w_resolve_overlap;
-	                        p.resolve_attempts = opt.sa_resolve_attempts;
-	                        p.resolve_step_frac_max = opt.sa_resolve_step_frac_max;
-	                        p.resolve_step_frac_min = opt.sa_resolve_step_frac_min;
-	                        p.resolve_noise_frac = opt.sa_resolve_noise_frac;
-	                        p.push_max_step_frac = opt.sa_push_max_step_frac;
-	                        p.push_bisect_iters = opt.sa_push_bisect_iters;
-	                        p.squeeze_pushes = opt.sa_squeeze_pushes;
-
-	                        double best_sa_side = std::numeric_limits<double>::infinity();
-	                        std::vector<TreePose> best_sa = tmp;
-	                        for (int r = 0; r < opt.sa_restarts; ++r) {
-	                            uint64_t sr =
-	                                s ^
-	                                (0x9e3779b97f4a7c15ULL +
-	                                 static_cast<uint64_t>(n) * 0xbf58476d1ce4e5b9ULL +
-	                                 static_cast<uint64_t>(r) * 0x94d049bb133111ebULL);
-	                            SARefiner::Result res = sa.refine_min_side(tmp, sr, p);
-	                            CandidateSol cand;
-	                            std::vector<TreePose> tmp2 = std::move(res.best_poses);
-	                            if (!finalize_solution(base_poly, radius, tmp2, sr, opt, cand)) {
-	                                continue;
-	                            }
-	                            if (cand.side + 1e-15 < best_sa_side) {
-	                                best_sa_side = cand.side;
-	                                best_sa = std::move(cand.poses);
-	                            }
-	                        }
-	                        tmp = std::move(best_sa);
-	                    }
-
-	                    CandidateSol cand;
-	                    if (!finalize_solution(base_poly, radius, tmp, s, opt, cand)) {
-	                        continue;
-	                    }
-                        if (cand.side + 1e-15 < best.side) {
-                            best = std::move(cand);
+                            CandidateSol cand;
+                            if (!finalize_solution(base_poly, radius, tmp, s, opt, cand)) {
+                                continue;
+                            }
+                            if (cand.side + 1e-15 < step_best.side) {
+                                step_best = std::move(cand);
+                                improved_step = true;
+                            }
                         }
                     }
+
+                    if (improved_step) {
+                        curr_best = std::move(step_best);
+                        no_improve = 0;
+                    } else {
+                        no_improve += 1;
+                        if (opt.squeeze_patience > 0 && no_improve >= opt.squeeze_patience) {
+                            break;
+                        }
+                    }
+                }
+
+                if (curr_best.side + 1e-15 < best.side) {
+                    best = std::move(curr_best);
                 }
             }
 
@@ -1813,9 +1990,13 @@ int main(int argc, char** argv) {
                   << ", alpha=[" << opt.squeeze_alpha_min << "," << opt.squeeze_alpha_max << "]"
                   << ", mode=" << (opt.squeeze_control ? "control" : "tries")
                   << ", aniso=" << opt.squeeze_p_aniso
+                  << ", steps=" << opt.squeeze_steps
+                  << ", patience=" << opt.squeeze_patience
+                  << ", alt_axis=" << (opt.squeeze_alt_axis ? "on" : "off")
                   << ", repair_passes=" << opt.squeeze_repair_passes << ")\n";
         std::cout << "SA: " << (opt.sa_iters > 0 && opt.sa_restarts > 0 ? "on" : "off")
                   << " (iters=" << opt.sa_iters << ", restarts=" << opt.sa_restarts << ")\n";
+        std::cout << "SA on best: " << (opt.sa_on_best ? "on" : "off") << "\n";
         std::cout << "Final rigid: " << (opt.final_rigid ? "on" : "off") << "\n";
         std::cout << "Output decimals: " << opt.output_decimals << "\n";
         std::cout << "Improved n vs best parent: " << improved_n << "\n";
