@@ -18,6 +18,17 @@
 
 ---
 
+## Status atual do projeto (laboratório)
+
+* **Score local atual (fonte de verdade: `./bin/score_submission`):** `84.394057199`
+  * **Arquivo:** `submissions/submission_best.csv` (ver `submissions/BEST.txt` e `submissions/scores.tsv`)
+  * Observação: é **score local** (minimização); LB público pode variar.
+* **Como chegamos nele:**
+  * Pipeline **auto80** em `runs/auto80_20251219_233144` (script `auto80.sh` + logs).
+  * Cada iteração roda um **sweep de 200 runs** combinando `solver_tile` + `solver_tessellation` com variação de parâmetros/offsets (via `santa_pipeline.py sweep` / `scripts/sweep_blend.py`).
+  * Depois do sweep, faz **ensemble + repair** contra o best atual e **promove** se melhorar.
+  * Melhor atual surgiu na `iter_0005` (seed0 `10801`), ver `runs/auto80_20251219_233144/progress.tsv` e `auto80.log`.
+
 ## O que “dá score alto” aqui (na prática)
 
 Você sobe score com 3 coisas (ordem de importância):
@@ -152,6 +163,15 @@ Cole aqui:
 
 Neste repo vamos usar **C++** como linguagem principal do solver:
 
+Build (CMake):
+
+```bash
+cmake -S . -B build
+cmake --build build -j
+```
+
+Depois de configurar, use `cmake --build build -j --target <alvo>` para compilar um binário específico.
+
 * Código em C++ dividido em módulos:
   * `include/geom.hpp` / `src/geom.cpp`: tipos (`Point`, `Polygon`, `TreePose`), transformação de polígonos, bounding box / bounding square (`s_n`), formatação `s...`.
   * `include/collision.hpp` / `src/collision.cpp` + `src/collision_polygons.cpp`: checagem de colisão (broad-phase por círculo envolvente + narrow-phase por interseção de segmentos).
@@ -161,8 +181,7 @@ Neste repo vamos usar **C++** como linguagem principal do solver:
 Para compilar e gerar o submission baseline:
 
 ```bash
-mkdir -p bin
-g++ -std=c++17 -O2 apps/solver_baseline.cpp src/baseline.cpp src/submission_io.cpp src/geom.cpp src/collision.cpp src/collision_polygons.cpp -Iinclude -o bin/solver_baseline
+cmake --build build -j --target solver_baseline
 ./bin/solver_baseline --output runs/tmp/submission_baseline_cpp.csv
 ```
 
@@ -175,8 +194,7 @@ Este solver gera uma solução “estrutural” baseada em **tesselação hexago
 Compilar e rodar:
 
 ```bash
-mkdir -p bin
-g++ -std=c++17 -O2 apps/solver_tessellation.cpp src/ga.cpp src/submission_io.cpp src/sa.cpp src/geom.cpp src/collision.cpp src/collision_polygons.cpp -Iinclude -o bin/solver_tessellation
+cmake --build build -j --target solver_tessellation
 ./bin/solver_tessellation --output runs/tmp/submission_tessellation_cpp.csv
 ```
 
@@ -222,8 +240,7 @@ Este solver implementa a ideia de **“tile pequeno + translação”**:
 Compilar e rodar:
 
 ```bash
-mkdir -p bin
-g++ -std=c++17 -O2 apps/solver_tile.cpp src/boundary_refine.cpp src/prefix_prune.cpp src/tiling_pool.cpp src/submission_io.cpp src/sa.cpp src/geom.cpp src/collision.cpp src/collision_polygons.cpp -Iinclude -o bin/solver_tile
+cmake --build build -j --target solver_tile
 ./bin/solver_tile --output runs/tmp/submission_tile_cpp.csv
 ```
 
@@ -268,8 +285,7 @@ onde `s_n` é o lado do quadrado axis-aligned que contém todas as árvores da i
 Compilar e rodar o simulador:
 
 ```bash
-mkdir -p bin
-g++ -std=c++17 -O2 apps/score_submission.cpp src/submission_io.cpp src/geom.cpp src/collision.cpp src/collision_polygons.cpp -Iinclude -o bin/score_submission
+cmake --build build -j --target score_submission
 ./bin/score_submission submission.csv
 ```
 
@@ -284,8 +300,7 @@ Como cada `n` é uma instância independente, dá para combinar vários `submiss
 Compilar e rodar:
 
 ```bash
-mkdir -p bin
-g++ -std=c++17 -O2 apps/ensemble_submissions.cpp src/submission_io.cpp src/geom.cpp src/collision.cpp src/collision_polygons.cpp -Iinclude -o bin/ensemble_submissions
+cmake --build build -j --target ensemble_submissions
 ./bin/ensemble_submissions submission_ensemble.csv run1.csv run2.csv run3.csv
 ./bin/score_submission submission_ensemble.csv
 ```
@@ -332,8 +347,7 @@ Depois do ensemble simples, dá para tentar um salto extra misturando **mais gra
 Compilar e rodar:
 
 ```bash
-mkdir -p bin
-g++ -std=c++17 -O2 apps/blend_repair.cpp src/submission_io.cpp src/sa.cpp src/geom.cpp src/collision.cpp src/collision_polygons.cpp -Iinclude -o bin/blend_repair
+cmake --build build -j --target blend_repair
 ./bin/blend_repair submission_repair.csv runs_tess/run_*.csv \
   --topk-per-n 30 --blend-iters 200 \
   --boundary-topk 20 --replace-min 3 --replace-max 16 \

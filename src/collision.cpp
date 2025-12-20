@@ -33,15 +33,6 @@ double resolve_radius(const Polygon& base_poly, double radius) {
     return radius;
 }
 
-std::vector<BoundingBox> compute_bounding_boxes(const std::vector<Polygon>& polys) {
-    std::vector<BoundingBox> bbs;
-    bbs.reserve(polys.size());
-    for (const auto& poly : polys) {
-        bbs.push_back(bounding_box(poly));
-    }
-    return bbs;
-}
-
 bool aabb_overlap(const BoundingBox& a, const BoundingBox& b, const OverlapParams& params) {
     if (a.max_x < b.min_x - params.eps || b.max_x < a.min_x - params.eps) {
         return false;
@@ -117,7 +108,7 @@ bool any_overlap(const Polygon& base_poly,
     const OverlapParams params{limit, limit_sq, eps};
 
     auto polys = transformed_polygons(base_poly, poses);
-    auto bbs = compute_bounding_boxes(polys);
+    auto bbs = bounding_boxes(polys);
     const OverlapInput input{poses, polys, bbs};
     return any_overlap_with_grid(input, params);
 }

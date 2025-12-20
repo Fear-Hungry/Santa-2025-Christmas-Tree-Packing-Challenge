@@ -7,17 +7,12 @@
 
 #include "baseline.hpp"
 #include "geom.hpp"
+#include "score.hpp"
 #include "submission_io.hpp"
 
 namespace {
 
 constexpr int kOutputDecimals = 9;
-
-double score_instance(const Polygon& base_poly, const std::vector<TreePose>& poses) {
-    auto polys = transformed_polygons(base_poly, poses);
-    double s = bounding_square_side(polys);
-    return (s * s) / static_cast<double>(poses.size());
-}
 
 }  // namespace
 
@@ -31,21 +26,21 @@ int main(int argc, char** argv) {
             const std::string arg = argv[i];
             if (arg == "--output") {
                 if (i + 1 >= argc) {
-                    throw std::runtime_error("--output precisa de PATH.");
+                    throw std::runtime_error("--output expects a PATH.");
                 }
                 output_path = argv[++i];
             } else if (arg == "--help" || arg == "-h") {
-                std::cout << "Uso: " << argv[0]
+                std::cout << "Usage: " << argv[0]
                           << " [--output PATH]\n";
                 return 0;
             } else {
-                throw std::runtime_error("Argumento desconhecido: " + arg);
+                throw std::runtime_error("Unknown argument: " + arg);
             }
         }
 
         std::ofstream out(output_path);
         if (!out) {
-            std::cerr << "Erro ao abrir arquivo de saída: " << output_path
+            std::cerr << "Failed to open output file: " << output_path
                       << "\n";
             return 1;
         }
@@ -67,11 +62,11 @@ int main(int argc, char** argv) {
             }
         }
 
-        std::cout << "Submission gerada em " << output_path << "\n";
-        std::cout << "Score (local): " << std::fixed << std::setprecision(9)
+        std::cout << "Submission written to " << output_path << "\n";
+        std::cout << "Local score: " << std::fixed << std::setprecision(9)
                   << total_score << "\n";
     } catch (const std::exception &ex) {
-        std::cerr << "Erro: " << ex.what() << "\n";
+        std::cerr << "Error: " << ex.what() << "\n";
         return 1;
     }
 

@@ -297,6 +297,15 @@ BoundingBox bounding_box(const Polygon& points) {
     return {min_x, max_x, min_y, max_y};
 }
 
+std::vector<BoundingBox> bounding_boxes(const std::vector<Polygon>& polys) {
+    std::vector<BoundingBox> bbs;
+    bbs.reserve(polys.size());
+    for (const auto& poly : polys) {
+        bbs.push_back(bounding_box(poly));
+    }
+    return bbs;
+}
+
 double bounding_square_side(const std::vector<Polygon>& polys) {
     if (polys.empty()) {
         return 0.0;

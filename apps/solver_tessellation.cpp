@@ -10,10 +10,12 @@
 #include <string>
 #include <vector>
 
+#include "cli_parse.hpp"
 #include "collision.hpp"
 #include "ga.hpp"
 #include "geom.hpp"
 #include "sa.hpp"
+#include "score.hpp"
 #include "submission_io.hpp"
 #include "wrap_utils.hpp"
 
@@ -140,8 +142,8 @@ double find_min_safe_hex_spacing(const Polygon& base_poly,
     double lo = 0.0;
     double hi = 2.0 * radius;
     if (!safe_hex_spacing(base_poly, radius, hi, eps)) {
-        // Pela definição de radius como círculo envolvente, hi deveria ser
-        // sempre seguro. Mantemos um fallback por robustez.
+        // By definition of radius as the enclosing circle, hi should be safe.
+        // Keep a fallback loop for robustness.
         for (int it = 0; it < 30 && !safe_hex_spacing(base_poly, radius, hi, eps);
              ++it) {
             hi *= 1.5;
@@ -217,39 +219,9 @@ std::vector<TreePose> generate_hex_lattice_poses(int n,
     return out;
 }
 
-double local_score_for_n(const Polygon& base_poly, const std::vector<TreePose>& poses) {
-    auto polys = transformed_polygons(base_poly, poses);
-    double s = bounding_square_side(polys);
-    return (s * s) / static_cast<double>(poses.size());
-}
-
 Options parse_args(int argc, char** argv) {
     Options opt;
 
-    auto parse_int = [](const std::string& s) -> int {
-        size_t pos = 0;
-        int v = std::stoi(s, &pos);
-        if (pos != s.size()) {
-            throw std::runtime_error("Inteiro inválido: " + s);
-        }
-        return v;
-    };
-    auto parse_u64 = [](const std::string& s) -> uint64_t {
-        size_t pos = 0;
-        uint64_t v = std::stoull(s, &pos);
-        if (pos != s.size()) {
-            throw std::runtime_error("uint64 inválido: " + s);
-        }
-        return v;
-    };
-    auto parse_double = [](const std::string& s) -> double {
-        size_t pos = 0;
-        double v = std::stod(s, &pos);
-        if (pos != s.size()) {
-            throw std::runtime_error("Double inválido: " + s);
-        }
-        return v;
-    };
     auto parse_overlap_metric = [](const std::string& s) -> SARefiner::OverlapMetric {
         if (s == "area") {
             return SARefiner::OverlapMetric::kArea;
@@ -257,16 +229,13 @@ Options parse_args(int argc, char** argv) {
         if (s == "mtv2" || s == "mtv") {
             return SARefiner::OverlapMetric::kMtv2;
         }
-        throw std::runtime_error("--sa-overlap-metric precisa ser 'area' ou 'mtv2'.");
+        throw std::runtime_error("--sa-overlap-metric must be 'area' or 'mtv2'.");
     };
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         auto need = [&](const std::string& name) -> std::string {
-            if (i + 1 >= argc) {
-                throw std::runtime_error("Faltou valor para " + name);
-            }
-            return argv[++i];
+            return require_arg(i, argc, argv, name);
         };
 
         if (arg == "--n-max") {
@@ -290,18 +259,9 @@ Options parse_args(int argc, char** argv) {
         } else if (arg == "--ga-spacing-max") {
             opt.ga_spacing_max = parse_double(need(arg));
         } else if (arg == "--ga-rots") {
-            std::string s = need(arg);
-            opt.ga_rot_candidates.clear();
-            std::stringstream ss(s);
-            std::string item;
-            while (std::getline(ss, item, ',')) {
-                if (item.empty()) {
-                    continue;
-                }
-                opt.ga_rot_candidates.push_back(parse_double(item));
-            }
+            opt.ga_rot_candidates = parse_double_list(need(arg));
             if (opt.ga_rot_candidates.empty()) {
-                throw std::runtime_error("--ga-rots vazio.");
+                throw std::runtime_error("--ga-rots cannot be empty.");
             }
         } else if (arg == "--shift-a") {
             opt.shift_a = parse_double(need(arg));
@@ -312,23 +272,14 @@ Options parse_args(int argc, char** argv) {
             std::stringstream ss(s);
             std::string a, b;
             if (!std::getline(ss, a, ',') || !std::getline(ss, b, ',')) {
-                throw std::runtime_error("--shift precisa ser 'a,b'.");
+                throw std::runtime_error("--shift expects 'a,b'.");
             }
             opt.shift_a = parse_double(a);
             opt.shift_b = parse_double(b);
         } else if (arg == "--angles") {
-            std::string s = need(arg);
-            opt.angle_candidates.clear();
-            std::stringstream ss(s);
-            std::string item;
-            while (std::getline(ss, item, ',')) {
-                if (item.empty()) {
-                    continue;
-                }
-                opt.angle_candidates.push_back(parse_double(item));
-            }
+            opt.angle_candidates = parse_double_list(need(arg));
             if (opt.angle_candidates.empty()) {
-                throw std::runtime_error("--angles vazio.");
+                throw std::runtime_error("--angles cannot be empty.");
             }
         } else if (arg == "--output") {
             opt.output_path = need(arg);
@@ -407,93 +358,93 @@ Options parse_args(int argc, char** argv) {
         } else if (arg == "--no-final-rigid" || arg == "--no-sa-rigid") {
             opt.final_rigid = false;
         } else {
-            throw std::runtime_error("Argumento desconhecido: " + arg);
+            throw std::runtime_error("Unknown argument: " + arg);
         }
     }
 
     if (opt.n_max <= 0 || opt.n_max > 200) {
-        throw std::runtime_error("--n-max precisa estar em [1, 200].");
+        throw std::runtime_error("--n-max must be in [1, 200].");
     }
     if (!(opt.spacing_safety >= 1.0)) {
-        throw std::runtime_error("--spacing-safety precisa ser >= 1.0.");
+        throw std::runtime_error("--spacing-safety must be >= 1.0.");
     }
     if (opt.ga_pop <= 0) {
-        throw std::runtime_error("--ga-pop precisa ser > 0.");
+        throw std::runtime_error("--ga-pop must be > 0.");
     }
     if (opt.ga_gens < 0) {
-        throw std::runtime_error("--ga-gens precisa ser >= 0.");
+        throw std::runtime_error("--ga-gens must be >= 0.");
     }
     if (opt.ga_elite < 0 || opt.ga_elite > opt.ga_pop) {
-        throw std::runtime_error("--ga-elite precisa estar em [0, ga-pop].");
+        throw std::runtime_error("--ga-elite must be in [0, ga-pop].");
     }
     if (opt.ga_tournament <= 0) {
-        throw std::runtime_error("--ga-tournament precisa ser > 0.");
+        throw std::runtime_error("--ga-tournament must be > 0.");
     }
     if (!(opt.ga_spacing_min >= 1.0) || !(opt.ga_spacing_max >= opt.ga_spacing_min)) {
-        throw std::runtime_error("--ga-spacing-min/max inválidos (precisa min>=1 e max>=min).");
+        throw std::runtime_error("--ga-spacing-min/max invalid (min>=1 and max>=min required).");
     }
     if (opt.sa_restarts < 0 || opt.sa_base_iters < 0 || opt.sa_iters_per_n < 0) {
-        throw std::runtime_error("Parâmetros de SA precisam ser >= 0.");
+        throw std::runtime_error("SA parameters must be >= 0.");
     }
     if (opt.sa_w_micro < 0.0 || opt.sa_w_swap_rot < 0.0 || opt.sa_w_relocate < 0.0 ||
         opt.sa_w_block_translate < 0.0 || opt.sa_w_block_rotate < 0.0 || opt.sa_w_lns < 0.0 ||
         opt.sa_w_resolve_overlap < 0.0 || opt.sa_w_push_contact < 0.0 || opt.sa_w_squeeze < 0.0) {
-        throw std::runtime_error("Pesos de SA precisam ser >= 0.");
+        throw std::runtime_error("SA weights must be >= 0.");
     }
     if (opt.sa_block_size <= 0) {
-        throw std::runtime_error("--sa-block-size precisa ser > 0.");
+        throw std::runtime_error("--sa-block-size must be > 0.");
     }
     if (opt.sa_lns_remove < 0) {
-        throw std::runtime_error("--sa-lns-remove precisa ser >= 0.");
+        throw std::runtime_error("--sa-lns-remove must be >= 0.");
     }
     if (opt.sa_lns_candidates < 1) {
-        throw std::runtime_error("--sa-lns-candidates precisa ser >= 1.");
+        throw std::runtime_error("--sa-lns-candidates must be >= 1.");
     }
     if (opt.sa_lns_eval_attempts_per_tree < 0) {
-        throw std::runtime_error("--sa-lns-eval-attempts precisa ser >= 0.");
+        throw std::runtime_error("--sa-lns-eval-attempts must be >= 0.");
     }
     if (opt.sa_hh_segment < 0) {
-        throw std::runtime_error("--sa-hh-segment precisa ser >= 0.");
+        throw std::runtime_error("--sa-hh-segment must be >= 0.");
     }
     if (opt.sa_hh_reaction < 0.0 || opt.sa_hh_reaction > 1.0) {
-        throw std::runtime_error("--sa-hh-reaction precisa estar em [0, 1].");
+        throw std::runtime_error("--sa-hh-reaction must be in [0, 1].");
     }
     if (!(opt.sa_overlap_weight >= 0.0)) {
-        throw std::runtime_error("--sa-overlap-weight precisa ser >= 0.");
+        throw std::runtime_error("--sa-overlap-weight must be >= 0.");
     }
     if (!(opt.sa_overlap_weight_power > 0.0)) {
-        throw std::runtime_error("--sa-overlap-weight-power precisa ser > 0.");
+        throw std::runtime_error("--sa-overlap-weight-power must be > 0.");
     }
     if (!(opt.sa_overlap_eps_area >= 0.0)) {
-        throw std::runtime_error("--sa-overlap-eps-area precisa ser >= 0.");
+        throw std::runtime_error("--sa-overlap-eps-area must be >= 0.");
     }
     if (!(opt.sa_overlap_cost_cap >= 0.0)) {
-        throw std::runtime_error("--sa-overlap-cost-cap precisa ser >= 0.");
+        throw std::runtime_error("--sa-overlap-cost-cap must be >= 0.");
     }
     if (!(opt.sa_plateau_eps >= 0.0)) {
-        throw std::runtime_error("--sa-plateau-eps precisa ser >= 0.");
+        throw std::runtime_error("--sa-plateau-eps must be >= 0.");
     }
     if (opt.sa_resolve_attempts <= 0) {
-        throw std::runtime_error("--sa-resolve-attempts precisa ser > 0.");
+        throw std::runtime_error("--sa-resolve-attempts must be > 0.");
     }
     if (!(opt.sa_resolve_step_frac_max > 0.0) || !(opt.sa_resolve_step_frac_min > 0.0) ||
         opt.sa_resolve_step_frac_min > opt.sa_resolve_step_frac_max) {
-        throw std::runtime_error("--sa-resolve-step-frac-min/max inválidos.");
+        throw std::runtime_error("--sa-resolve-step-frac-min/max invalid.");
     }
     if (!(opt.sa_resolve_noise_frac >= 0.0)) {
-        throw std::runtime_error("--sa-resolve-noise-frac precisa ser >= 0.");
+        throw std::runtime_error("--sa-resolve-noise-frac must be >= 0.");
     }
     if (!(opt.sa_push_max_step_frac > 0.0)) {
-        throw std::runtime_error("--sa-push-max-step-frac precisa ser > 0.");
+        throw std::runtime_error("--sa-push-max-step-frac must be > 0.");
     }
     if (opt.sa_push_bisect_iters <= 0) {
-        throw std::runtime_error("--sa-push-bisect-iters precisa ser > 0.");
+        throw std::runtime_error("--sa-push-bisect-iters must be > 0.");
     }
     if (opt.sa_push_overshoot_frac < 0.0 || opt.sa_push_overshoot_frac > 1.0) {
-        throw std::runtime_error("--sa-push-overshoot-frac precisa estar em [0, 1].");
+        throw std::runtime_error("--sa-push-overshoot-frac must be in [0, 1].");
     }
     if (opt.sa_squeeze_pushes < 0) {
-        throw std::runtime_error("--sa-squeeze-pushes precisa ser >= 0.");
+        throw std::runtime_error("--sa-squeeze-pushes must be >= 0.");
     }
     return opt;
 }
@@ -514,7 +465,7 @@ int main(int argc, char** argv) {
 
         std::ofstream out(opt.output_path);
         if (!out) {
-            throw std::runtime_error("Erro ao abrir arquivo de saída: " + opt.output_path);
+            throw std::runtime_error("Failed to open output file: " + opt.output_path);
         }
 
         out << "id,x,y,deg\n";
@@ -575,10 +526,10 @@ int main(int argc, char** argv) {
                               << ", shift=" << gr.best_shift_a << "," << gr.best_shift_b
                               << ")\n";
                 } else {
-                    std::cerr << "Aviso: GA produziu overlap após quantização; ignorando GA.\n";
+                    std::cerr << "Warning: GA produced overlap after quantization; ignoring GA.\n";
                 }
             } else {
-                std::cerr << "Aviso: GA não encontrou solução; ignorando GA.\n";
+                std::cerr << "Warning: GA did not find a solution; ignoring GA.\n";
             }
         }
 
@@ -595,7 +546,7 @@ int main(int argc, char** argv) {
                 if (any_overlap(base_poly, poses_q, radius)) {
                     continue;
                 }
-                double score_n = local_score_for_n(base_poly, poses_q);
+                double score_n = score_instance(base_poly, poses_q);
                 if (score_n < best_score_n) {
                     best_score_n = score_n;
                     best_poses = std::move(poses_q);
@@ -604,7 +555,7 @@ int main(int argc, char** argv) {
 
             if (!ga_poses_sorted.empty() && static_cast<int>(ga_poses_sorted.size()) >= n) {
                 std::vector<TreePose> ga_prefix(ga_poses_sorted.begin(), ga_poses_sorted.begin() + n);
-                double score_n = local_score_for_n(base_poly, ga_prefix);
+                double score_n = score_instance(base_poly, ga_prefix);
                 if (score_n + 1e-15 < best_score_n) {
                     best_score_n = score_n;
                     best_poses = std::move(ga_prefix);
@@ -613,7 +564,7 @@ int main(int argc, char** argv) {
 
             if (!std::isfinite(best_score_n)) {
                 throw std::runtime_error(
-                    "Não foi possível gerar poses válidas para n=" +
+                    "Could not generate valid poses for n=" +
                     std::to_string(n) + ".");
             }
 
@@ -667,7 +618,7 @@ int main(int argc, char** argv) {
                     if (any_overlap(base_poly, cand_q, radius)) {
                         continue;
                     }
-                    double cand_score_n = local_score_for_n(base_poly, cand_q);
+                    double cand_score_n = score_instance(base_poly, cand_q);
                     if (cand_score_n + 1e-15 < best_score_n) {
                         best_score_n = cand_score_n;
                         best_poses = std::move(cand_q);
@@ -680,7 +631,7 @@ int main(int argc, char** argv) {
                 optimize_rigid_rotation(base_poly, rigid_sol);
                 auto rigid_q = quantize_poses(rigid_sol);
                 if (!any_overlap(base_poly, rigid_q, radius)) {
-                    double rigid_score_n = local_score_for_n(base_poly, rigid_q);
+                    double rigid_score_n = score_instance(base_poly, rigid_q);
                     if (rigid_score_n + 1e-15 < best_score_n) {
                         best_score_n = rigid_score_n;
                         best_poses = std::move(rigid_q);
@@ -699,8 +650,8 @@ int main(int argc, char** argv) {
             }
         }
 
-        std::cout << "Submission gerada em " << opt.output_path << "\n";
-        std::cout << "Score (local): " << std::fixed << std::setprecision(9)
+        std::cout << "Submission written to " << opt.output_path << "\n";
+        std::cout << "Local score: " << std::fixed << std::setprecision(9)
                   << total_score << "\n";
         std::cout << "Hex spacing: " << std::fixed << std::setprecision(9)
                   << spacing << "\n";
@@ -712,7 +663,7 @@ int main(int argc, char** argv) {
         std::cout << "Final rigid: " << (opt.final_rigid ? "on" : "off") << "\n";
 
     } catch (const std::exception& ex) {
-        std::cerr << "Erro: " << ex.what() << "\n";
+        std::cerr << "Error: " << ex.what() << "\n";
         return 1;
     }
 
