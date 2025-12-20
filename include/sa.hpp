@@ -34,6 +34,8 @@ public:
         double reheat_mult = 1.0;
         double reheat_step_mult = 1.0;
         int reheat_max = 1;
+        // Tempo máximo (segundos). 0 => usa apenas `iters`.
+        double time_budget_sec = 0.0;
 
         // Quantização no espaço do CSV. Se `quantize_decimals >= 0`, o SA
         // avalia candidatos já quantizados e mantém o estado quantizado após
@@ -51,6 +53,8 @@ public:
         double w_lns = 0.001;
         double w_push_contact = 0.0;
         double w_squeeze = 0.0;
+        double w_global_rotate = 0.0;
+        double w_eject_chain = 0.0;
 
         // Controlador adaptativo (ALNS-style).
         int hh_segment = 50;
@@ -124,6 +128,18 @@ public:
 
         // Squeeze: repete `push_to_contact` algumas vezes no eixo dominante.
         int squeeze_pushes = 6;
+
+        // Rotação global: move o layout inteiro com ângulo pequeno.
+        double global_rot_deg = 0.0;
+
+        // Ejection chain: remove árvore central, relaxa e reinsere na casca.
+        int eject_center_topk = 4;
+        int eject_relax_iters = 6;
+        double eject_step_frac = 0.08;
+        int eject_reinsert_attempts = 60;
+        double eject_reinsert_noise_frac = 0.05;
+        double eject_reinsert_rot_deg = 10.0;
+        double eject_reinsert_p_rot = 0.50;
     };
 
     struct Result {

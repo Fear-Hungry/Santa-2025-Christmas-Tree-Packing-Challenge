@@ -159,6 +159,11 @@ def main() -> int:
         help="Desliga o pós-processamento final rigid no ensemble.",
     )
     ap.add_argument(
+        "--cross-check-n",
+        action="store_true",
+        help="Força s_n <= s_{n+1} via remoção de 1 árvore da solução de n+1.",
+    )
+    ap.add_argument(
         "--keep-going",
         action="store_true",
         help="Continua mesmo se algum run falhar.",
@@ -290,6 +295,8 @@ def main() -> int:
     ensemble_cmd = [ensemble_bin, args.out, *run_paths]
     if args.no_final_rigid:
         ensemble_cmd.append("--no-final-rigid")
+    if args.cross_check_n:
+        ensemble_cmd.append("--cross-check-n")
 
     subprocess.run(ensemble_cmd, check=True)
     subprocess.run([score_bin, args.out], check=True)

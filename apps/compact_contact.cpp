@@ -47,6 +47,9 @@ struct Options {
     double diag_rand = 0.0;
     double center_bias = 0.0;
     double interior_prob = 0.0;
+    double shake_pos = 0.0;
+    double shake_rot_deg = 0.0;
+    double shake_prob = 1.0;
     bool final_rigid = true;
     int quantize_decimals = 9;
 };
@@ -399,6 +402,12 @@ Options parse_args(int argc, char** argv) {
             opt.center_bias = parse_double(need(arg));
         } else if (arg == "--interior-prob") {
             opt.interior_prob = parse_double(need(arg));
+        } else if (arg == "--shake-pos") {
+            opt.shake_pos = parse_double(need(arg));
+        } else if (arg == "--shake-rot-deg") {
+            opt.shake_rot_deg = parse_double(need(arg));
+        } else if (arg == "--shake-prob") {
+            opt.shake_prob = parse_double(need(arg));
         } else if (arg == "--no-alt-axis") {
             opt.alt_axis = false;
         } else if (arg == "--no-final-rigid") {
@@ -456,6 +465,15 @@ Options parse_args(int argc, char** argv) {
     }
     if (opt.interior_prob < 0.0 || opt.interior_prob > 1.0) {
         throw std::runtime_error("--interior-prob precisa estar em [0,1].");
+    }
+    if (opt.shake_pos < 0.0) {
+        throw std::runtime_error("--shake-pos precisa ser >= 0.");
+    }
+    if (opt.shake_rot_deg < 0.0) {
+        throw std::runtime_error("--shake-rot-deg precisa ser >= 0.");
+    }
+    if (opt.shake_prob < 0.0 || opt.shake_prob > 1.0) {
+        throw std::runtime_error("--shake-prob precisa estar em [0,1].");
     }
     if (opt.quantize_decimals < 0) {
         throw std::runtime_error("--quantize-decimals precisa ser >= 0.");
@@ -557,6 +575,58 @@ CompactResult compact_contact(const Polygon& base_poly,
 
     std::uniform_int_distribution<int> coin(0, 1);
     std::uniform_real_distribution<double> uni01(0.0, 1.0);
+    std::normal_distribution<double> normal(0.0, 1.0);
+
+    std::vector<int> neigh;
+    neigh.reserve(64);
+
+    auto try_shake = [&](int idx) {
+        if ((opt.shake_pos <= 0.0 && opt.shake_rot_deg <= 0.0) ||
+            uni01(rng) > opt.shake_prob) {
+            return;
+        }
+
+        TreePose cand = poses[static_cast<size_t>(idx)];
+        cand.x += normal(rng) * opt.shake_pos;
+        cand.y += normal(rng) * opt.shake_pos;
+        if (opt.shake_rot_deg > 0.0) {
+            cand.deg += normal(rng) * opt.shake_rot_deg;
+        }
+        cand = quantize_pose_wrap_deg(cand, opt.quantize_decimals);
+        if (cand.x < -100.0 || cand.x > 100.0 || cand.y < -100.0 || cand.y > 100.0) {
+            return;
+        }
+
+        Polygon poly = transform_polygon(base_poly, cand);
+        BoundingBox bb = bounding_box(poly);
+        bool collide = false;
+        grid.gather(cand.x, cand.y, neigh);
+        for (int j : neigh) {
+            if (j == idx) {
+                continue;
+            }
+            const double dx = cand.x - poses[static_cast<size_t>(j)].x;
+            const double dy = cand.y - poses[static_cast<size_t>(j)].y;
+            if (dx * dx + dy * dy > thr_sq) {
+                continue;
+            }
+            if (!aabb_overlap(bb, bbs[static_cast<size_t>(j)])) {
+                continue;
+            }
+            if (polygons_intersect(poly, polys[static_cast<size_t>(j)])) {
+                collide = true;
+                break;
+            }
+        }
+        if (collide) {
+            return;
+        }
+
+        poses[static_cast<size_t>(idx)] = cand;
+        polys[static_cast<size_t>(idx)] = std::move(poly);
+        bbs[static_cast<size_t>(idx)] = bb;
+        grid.update_position(idx, cand.x, cand.y);
+    };
 
     for (int pass = 0; pass < opt.passes; ++pass) {
         const double width = curr_ext.max_x - curr_ext.min_x;
@@ -605,6 +675,7 @@ CompactResult compact_contact(const Polygon& base_poly,
             if (opt.interior_prob > 0.0 && uni01(rng) < opt.interior_prob) {
                 i = pick_all(rng);
             }
+            try_shake(i);
             const BoundingBox& bb = bbs[static_cast<size_t>(i)];
 
             Point dir{0.0, 0.0};

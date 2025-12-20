@@ -78,6 +78,8 @@ struct Options {
     double sa_w_lns = 0.001;
     double sa_w_push_contact = 0.0;
     double sa_w_squeeze = 0.0;
+    double sa_w_global_rotate = 0.0;
+    double sa_w_eject_chain = 0.0;
     int sa_block_size = 6;
     int sa_lns_remove = 6;
     int sa_lns_candidates = 1;
@@ -92,6 +94,7 @@ struct Options {
     double sa_reheat_mult = 1.0;
     double sa_reheat_step_mult = 1.0;
     int sa_reheat_max = 1;
+    double sa_time_budget_sec = 0.0;
     SARefiner::OverlapMetric sa_overlap_metric = SARefiner::OverlapMetric::kArea;
     double sa_overlap_weight = 0.0;
     double sa_overlap_weight_start = -1.0;
@@ -110,6 +113,14 @@ struct Options {
     int sa_push_bisect_iters = 10;
     double sa_push_overshoot_frac = 0.0;
     int sa_squeeze_pushes = 6;
+    double sa_global_rot_deg = 0.0;
+    int sa_eject_center_topk = 4;
+    int sa_eject_relax_iters = 0;
+    double sa_eject_step_frac = 0.08;
+    int sa_eject_reinsert_attempts = 60;
+    double sa_eject_reinsert_noise_frac = 0.05;
+    double sa_eject_reinsert_rot_deg = 10.0;
+    double sa_eject_reinsert_p_rot = 0.50;
     bool sa_aggressive = false;
 
     // Milenkovic-Zeng: SA em 2 fases (liquefação -> solidificação) no stage SA.
@@ -145,6 +156,15 @@ struct Options {
     int squeeze_patience = 2;
     bool squeeze_alt_axis = false;
     int squeeze_repair_passes = 200;
+
+    // Global contraction: escala constante + relaxamento por forças.
+    int global_contract_steps = 0;
+    double global_contract_scale = 0.999;
+    int global_contract_relax_iters = 60;
+    double global_contract_overlap_force = 1.0;
+    double global_contract_center_force = 0.02;
+    double global_contract_step_frac = 0.05;
+    int global_contract_repair_passes = 200;
 
     bool final_rigid = true;
     int micro_rigid_steps = 0;
@@ -1571,6 +1591,209 @@ bool finalize_solution(const Polygon& base_poly,
     return true;
 }
 
+bool apply_global_contraction(const Polygon& base_poly,
+                              double radius,
+                              uint64_t seed,
+                              const Options& opt,
+                              CandidateSol& io) {
+    if (opt.global_contract_steps <= 0 || io.poses.empty()) {
+        return false;
+    }
+
+    bool improved = false;
+    CandidateSol best = io;
+    std::vector<TreePose> curr = io.poses;
+    SARefiner sep(base_poly, radius);
+    const double thr = 2.0 * radius + 1e-9;
+    const double thr_sq = thr * thr;
+
+    Options opt_relax = opt;
+    opt_relax.repair_passes = opt.global_contract_repair_passes;
+
+    std::mt19937_64 rng(seed ^ 0xBF58476D1CE4E5B9ULL);
+    std::normal_distribution<double> normal(0.0, 1.0);
+
+    for (int step = 0; step < opt.global_contract_steps; ++step) {
+        std::vector<BoundingBox> curr_bbs = bounding_boxes_for_poses(base_poly, curr);
+        Extents e = compute_extents(curr_bbs);
+        const double cx = 0.5 * (e.min_x + e.max_x);
+        const double cy = 0.5 * (e.min_y + e.max_y);
+
+        for (auto& p : curr) {
+            p.x = cx + opt.global_contract_scale * (p.x - cx);
+            p.y = cy + opt.global_contract_scale * (p.y - cy);
+        }
+        curr = quantize_poses_wrap_deg(curr, opt.output_decimals);
+
+        if (opt.global_contract_relax_iters > 0 &&
+            (opt.global_contract_overlap_force > 0.0 ||
+             opt.global_contract_center_force > 0.0)) {
+            for (int it = 0; it < opt.global_contract_relax_iters; ++it) {
+                std::vector<BoundingBox> bbs = bounding_boxes_for_poses(base_poly, curr);
+                Extents e2 = compute_extents(bbs);
+                const double ccx = 0.5 * (e2.min_x + e2.max_x);
+                const double ccy = 0.5 * (e2.min_y + e2.max_y);
+                const double side = side_from_extents(e2);
+                const double max_step =
+                    opt.global_contract_step_frac * std::max(1e-9, side);
+
+                std::vector<Point> forces(curr.size(), Point{0.0, 0.0});
+                if (opt.global_contract_center_force > 0.0) {
+                    for (size_t i = 0; i < curr.size(); ++i) {
+                        forces[i].x +=
+                            (ccx - curr[i].x) * opt.global_contract_center_force;
+                        forces[i].y +=
+                            (ccy - curr[i].y) * opt.global_contract_center_force;
+                    }
+                }
+
+                if (opt.global_contract_overlap_force > 0.0) {
+                    for (size_t i = 0; i < curr.size(); ++i) {
+                        for (size_t j = i + 1; j < curr.size(); ++j) {
+                            const double dx = curr[i].x - curr[j].x;
+                            const double dy = curr[i].y - curr[j].y;
+                            if (dx * dx + dy * dy > thr_sq) {
+                                continue;
+                            }
+                            if (!aabb_overlap(bbs[i], bbs[j])) {
+                                continue;
+                            }
+                            Point mtv{0.0, 0.0};
+                            double area = 0.0;
+                            if (!sep.overlap_mtv(curr[i], curr[j], mtv, area)) {
+                                continue;
+                            }
+                            forces[i].x += mtv.x * opt.global_contract_overlap_force;
+                            forces[i].y += mtv.y * opt.global_contract_overlap_force;
+                            forces[j].x -= mtv.x * opt.global_contract_overlap_force;
+                            forces[j].y -= mtv.y * opt.global_contract_overlap_force;
+                        }
+                    }
+                }
+
+                for (size_t i = 0; i < curr.size(); ++i) {
+                    double dx = forces[i].x;
+                    double dy = forces[i].y;
+                    const double norm = std::hypot(dx, dy);
+                    if (norm > max_step && norm > 1e-12) {
+                        const double scale = max_step / norm;
+                        dx *= scale;
+                        dy *= scale;
+                    }
+                    curr[i].x += dx + normal(rng) * (1e-6 * max_step);
+                    curr[i].y += dy + normal(rng) * (1e-6 * max_step);
+                    curr[i] = quantize_pose_wrap_deg(curr[i], opt.output_decimals);
+                }
+            }
+        }
+
+        std::vector<char> movable(curr.size(), 1);
+        uint64_t s = seed ^ (0x94d049bb133111ebULL + static_cast<uint64_t>(step));
+        if (!repair_inplace(base_poly, radius, curr, movable, s, opt_relax)) {
+            break;
+        }
+
+        if (opt.sa_iters > 0 && opt.sa_restarts > 0) {
+            SARefiner sa(base_poly, radius);
+            SARefiner::Params p;
+            p.iters = opt.sa_iters;
+            p.t0 = opt.sa_t0;
+            p.t1 = opt.sa_t1;
+            p.quantize_decimals = opt.output_decimals;
+            p.step_frac_max = opt.sa_step_frac_max;
+            p.step_frac_min = opt.sa_step_frac_min;
+            p.ddeg_max = opt.sa_ddeg_max;
+            p.ddeg_min = opt.sa_ddeg_min;
+            p.reheat_iters = opt.sa_reheat_iters;
+            p.reheat_mult = opt.sa_reheat_mult;
+            p.reheat_step_mult = opt.sa_reheat_step_mult;
+            p.reheat_max = opt.sa_reheat_max;
+            p.time_budget_sec = opt.sa_time_budget_sec;
+            p.w_micro = opt.sa_w_micro;
+            p.w_swap_rot = opt.sa_w_swap_rot;
+            p.w_relocate = opt.sa_w_relocate;
+            p.w_block_translate = opt.sa_w_block_translate;
+            p.w_block_rotate = opt.sa_w_block_rotate;
+            p.w_lns = opt.sa_w_lns;
+            p.w_push_contact = opt.sa_w_push_contact;
+            p.w_squeeze = opt.sa_w_squeeze;
+            p.w_global_rotate = opt.sa_w_global_rotate;
+            p.w_eject_chain = opt.sa_w_eject_chain;
+            p.block_size = opt.sa_block_size;
+            p.lns_remove = opt.sa_lns_remove;
+            p.lns_candidates = opt.sa_lns_candidates;
+            p.lns_eval_attempts_per_tree = opt.sa_lns_eval_attempts_per_tree;
+            p.hh_segment = opt.sa_hh_segment;
+            p.hh_reaction = opt.sa_hh_reaction;
+            p.overlap_metric = opt.sa_overlap_metric;
+            p.overlap_weight = opt.sa_overlap_weight;
+            p.overlap_weight_start = opt.sa_overlap_weight_start;
+            p.overlap_weight_end = opt.sa_overlap_weight_end;
+            p.overlap_weight_power = opt.sa_overlap_weight_power;
+            p.overlap_weight_geometric = opt.sa_overlap_weight_geometric;
+            p.overlap_eps_area = opt.sa_overlap_eps_area;
+            p.overlap_cost_cap = opt.sa_overlap_cost_cap;
+            p.plateau_eps = opt.sa_plateau_eps;
+            p.w_resolve_overlap = opt.sa_w_resolve_overlap;
+            p.resolve_attempts = opt.sa_resolve_attempts;
+            p.resolve_step_frac_max = opt.sa_resolve_step_frac_max;
+            p.resolve_step_frac_min = opt.sa_resolve_step_frac_min;
+            p.resolve_noise_frac = opt.sa_resolve_noise_frac;
+            p.push_max_step_frac = opt.sa_push_max_step_frac;
+            p.push_bisect_iters = opt.sa_push_bisect_iters;
+            p.push_overshoot_frac = opt.sa_push_overshoot_frac;
+            p.squeeze_pushes = opt.sa_squeeze_pushes;
+            p.global_rot_deg = opt.sa_global_rot_deg;
+            p.eject_center_topk = opt.sa_eject_center_topk;
+            p.eject_relax_iters = opt.sa_eject_relax_iters;
+            p.eject_step_frac = opt.sa_eject_step_frac;
+            p.eject_reinsert_attempts = opt.sa_eject_reinsert_attempts;
+            p.eject_reinsert_noise_frac = opt.sa_eject_reinsert_noise_frac;
+            p.eject_reinsert_rot_deg = opt.sa_eject_reinsert_rot_deg;
+            p.eject_reinsert_p_rot = opt.sa_eject_reinsert_p_rot;
+            if (opt.sa_aggressive) {
+                SARefiner::apply_aggressive_preset(p);
+            }
+
+            double best_sa_side = std::numeric_limits<double>::infinity();
+            std::vector<TreePose> best_sa = curr;
+            for (int r = 0; r < opt.sa_restarts; ++r) {
+                uint64_t sr =
+                    seed ^
+                    (0x9e3779b97f4a7c15ULL +
+                     static_cast<uint64_t>(step) * 0x94d049bb133111ebULL +
+                     static_cast<uint64_t>(r) * 0x2545F4914F6CDD1DULL);
+                SARefiner::Result res = sa.refine_min_side(curr, sr, p);
+                CandidateSol cand;
+                std::vector<TreePose> tmp2 = std::move(res.best_poses);
+                if (!finalize_solution(base_poly, radius, tmp2, sr, opt, cand)) {
+                    continue;
+                }
+                if (cand.side + 1e-15 < best_sa_side) {
+                    best_sa_side = cand.side;
+                    best_sa = std::move(cand.poses);
+                }
+            }
+            curr = std::move(best_sa);
+        }
+
+        CandidateSol cand;
+        if (!finalize_solution(base_poly, radius, curr, s, opt, cand)) {
+            break;
+        }
+        curr = cand.poses;
+        if (cand.side + 1e-15 < best.side) {
+            best = std::move(cand);
+            improved = true;
+        }
+    }
+
+    if (improved) {
+        io = std::move(best);
+    }
+    return improved;
+}
+
 int pick_ranked(int k, std::mt19937_64& rng) {
     if (k <= 1) {
         return 0;
@@ -1767,6 +1990,10 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
             opt.sa_w_push_contact = parse_double(need(arg));
         } else if (arg == "--sa-w-squeeze") {
             opt.sa_w_squeeze = parse_double(need(arg));
+        } else if (arg == "--sa-w-global-rotate") {
+            opt.sa_w_global_rotate = parse_double(need(arg));
+        } else if (arg == "--sa-w-eject-chain") {
+            opt.sa_w_eject_chain = parse_double(need(arg));
         } else if (arg == "--sa-block-size") {
             opt.sa_block_size = parse_int(need(arg));
         } else if (arg == "--sa-lns-remove") {
@@ -1815,6 +2042,22 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
             opt.sa_push_overshoot_frac = parse_double(need(arg));
         } else if (arg == "--sa-squeeze-pushes") {
             opt.sa_squeeze_pushes = parse_int(need(arg));
+        } else if (arg == "--sa-global-rot-deg") {
+            opt.sa_global_rot_deg = parse_double(need(arg));
+        } else if (arg == "--sa-eject-center-topk") {
+            opt.sa_eject_center_topk = parse_int(need(arg));
+        } else if (arg == "--sa-eject-relax-iters") {
+            opt.sa_eject_relax_iters = parse_int(need(arg));
+        } else if (arg == "--sa-eject-step-frac") {
+            opt.sa_eject_step_frac = parse_double(need(arg));
+        } else if (arg == "--sa-eject-reinsert-attempts") {
+            opt.sa_eject_reinsert_attempts = parse_int(need(arg));
+        } else if (arg == "--sa-eject-reinsert-noise-frac") {
+            opt.sa_eject_reinsert_noise_frac = parse_double(need(arg));
+        } else if (arg == "--sa-eject-reinsert-rot-deg") {
+            opt.sa_eject_reinsert_rot_deg = parse_double(need(arg));
+        } else if (arg == "--sa-eject-reinsert-p-rot") {
+            opt.sa_eject_reinsert_p_rot = parse_double(need(arg));
         } else if (arg == "--sa-aggressive") {
             opt.sa_aggressive = true;
         } else if (arg == "--sa-step-frac-max") {
@@ -1833,6 +2076,8 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
             opt.sa_reheat_step_mult = parse_double(need(arg));
         } else if (arg == "--sa-reheat-max") {
             opt.sa_reheat_max = parse_int(need(arg));
+        } else if (arg == "--sa-time-budget-sec") {
+            opt.sa_time_budget_sec = parse_double(need(arg));
         } else if (arg == "--micro-rigid-steps") {
             opt.micro_rigid_steps = parse_int(need(arg));
         } else if (arg == "--micro-rigid-step-deg") {
@@ -1855,6 +2100,20 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
             opt.squeeze_alt_axis = true;
         } else if (arg == "--squeeze-repair-passes") {
             opt.squeeze_repair_passes = parse_int(need(arg));
+        } else if (arg == "--global-contract-steps") {
+            opt.global_contract_steps = parse_int(need(arg));
+        } else if (arg == "--global-contract-scale") {
+            opt.global_contract_scale = parse_double(need(arg));
+        } else if (arg == "--global-contract-relax-iters") {
+            opt.global_contract_relax_iters = parse_int(need(arg));
+        } else if (arg == "--global-contract-overlap-force") {
+            opt.global_contract_overlap_force = parse_double(need(arg));
+        } else if (arg == "--global-contract-center-force") {
+            opt.global_contract_center_force = parse_double(need(arg));
+        } else if (arg == "--global-contract-step-frac") {
+            opt.global_contract_step_frac = parse_double(need(arg));
+        } else if (arg == "--global-contract-repair-passes") {
+            opt.global_contract_repair_passes = parse_int(need(arg));
         } else if (arg == "--no-final-rigid") {
             opt.final_rigid = false;
         } else if (arg == "--output-decimals") {
@@ -1978,6 +2237,9 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
     if (opt.sa_reheat_max < 1) {
         throw std::runtime_error("--sa-reheat-max precisa ser >= 1.");
     }
+    if (opt.sa_time_budget_sec < 0.0) {
+        throw std::runtime_error("--sa-time-budget-sec precisa ser >= 0.");
+    }
     if (opt.interlock_passes < 0) {
         throw std::runtime_error("--interlock-passes precisa ser >= 0.");
     }
@@ -2025,7 +2287,8 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
     }
     if (opt.sa_w_micro < 0.0 || opt.sa_w_swap_rot < 0.0 || opt.sa_w_relocate < 0.0 ||
         opt.sa_w_block_translate < 0.0 || opt.sa_w_block_rotate < 0.0 || opt.sa_w_lns < 0.0 ||
-        opt.sa_w_resolve_overlap < 0.0 || opt.sa_w_push_contact < 0.0 || opt.sa_w_squeeze < 0.0) {
+        opt.sa_w_resolve_overlap < 0.0 || opt.sa_w_push_contact < 0.0 ||
+        opt.sa_w_squeeze < 0.0 || opt.sa_w_global_rotate < 0.0 || opt.sa_w_eject_chain < 0.0) {
         throw std::runtime_error("Pesos de SA precisam ser >= 0.");
     }
     if (opt.sa_block_size <= 0) {
@@ -2083,6 +2346,30 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
     if (opt.sa_squeeze_pushes < 0) {
         throw std::runtime_error("--sa-squeeze-pushes precisa ser >= 0.");
     }
+    if (opt.sa_global_rot_deg < 0.0) {
+        throw std::runtime_error("--sa-global-rot-deg precisa ser >= 0.");
+    }
+    if (opt.sa_eject_center_topk < 1) {
+        throw std::runtime_error("--sa-eject-center-topk precisa ser >= 1.");
+    }
+    if (opt.sa_eject_relax_iters < 0) {
+        throw std::runtime_error("--sa-eject-relax-iters precisa ser >= 0.");
+    }
+    if (!(opt.sa_eject_step_frac > 0.0)) {
+        throw std::runtime_error("--sa-eject-step-frac precisa ser > 0.");
+    }
+    if (opt.sa_eject_reinsert_attempts < 0) {
+        throw std::runtime_error("--sa-eject-reinsert-attempts precisa ser >= 0.");
+    }
+    if (opt.sa_eject_reinsert_noise_frac < 0.0) {
+        throw std::runtime_error("--sa-eject-reinsert-noise-frac precisa ser >= 0.");
+    }
+    if (opt.sa_eject_reinsert_rot_deg < 0.0) {
+        throw std::runtime_error("--sa-eject-reinsert-rot-deg precisa ser >= 0.");
+    }
+    if (opt.sa_eject_reinsert_p_rot < 0.0 || opt.sa_eject_reinsert_p_rot > 1.0) {
+        throw std::runtime_error("--sa-eject-reinsert-p-rot precisa estar em [0,1].");
+    }
     if (opt.squeeze_tries < 0) {
         throw std::runtime_error("--squeeze-tries precisa ser >= 0.");
     }
@@ -2101,6 +2388,27 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
     }
     if (opt.squeeze_repair_passes < 0) {
         throw std::runtime_error("--squeeze-repair-passes precisa ser >= 0.");
+    }
+    if (opt.global_contract_steps < 0) {
+        throw std::runtime_error("--global-contract-steps precisa ser >= 0.");
+    }
+    if (!(opt.global_contract_scale > 0.0) || opt.global_contract_scale > 1.0) {
+        throw std::runtime_error("--global-contract-scale inválido (0 < scale <= 1).");
+    }
+    if (opt.global_contract_relax_iters < 0) {
+        throw std::runtime_error("--global-contract-relax-iters precisa ser >= 0.");
+    }
+    if (opt.global_contract_overlap_force < 0.0) {
+        throw std::runtime_error("--global-contract-overlap-force precisa ser >= 0.");
+    }
+    if (opt.global_contract_center_force < 0.0) {
+        throw std::runtime_error("--global-contract-center-force precisa ser >= 0.");
+    }
+    if (!(opt.global_contract_step_frac > 0.0)) {
+        throw std::runtime_error("--global-contract-step-frac precisa ser > 0.");
+    }
+    if (opt.global_contract_repair_passes < 0) {
+        throw std::runtime_error("--global-contract-repair-passes precisa ser >= 0.");
     }
     return opt;
 }
@@ -2307,6 +2615,7 @@ int main(int argc, char** argv) {
                 p.reheat_mult = opt.sa_reheat_mult;
                 p.reheat_step_mult = opt.sa_reheat_step_mult;
                 p.reheat_max = opt.sa_reheat_max;
+                p.time_budget_sec = opt.sa_time_budget_sec;
                 p.w_micro = opt.sa_w_micro;
                 p.w_swap_rot = opt.sa_w_swap_rot;
                 p.w_relocate = opt.sa_w_relocate;
@@ -2315,6 +2624,8 @@ int main(int argc, char** argv) {
                 p.w_lns = opt.sa_w_lns;
                 p.w_push_contact = opt.sa_w_push_contact;
                 p.w_squeeze = opt.sa_w_squeeze;
+                p.w_global_rotate = opt.sa_w_global_rotate;
+                p.w_eject_chain = opt.sa_w_eject_chain;
                 p.block_size = opt.sa_block_size;
                 p.lns_remove = opt.sa_lns_remove;
                 p.lns_candidates = opt.sa_lns_candidates;
@@ -2339,6 +2650,14 @@ int main(int argc, char** argv) {
                 p.push_bisect_iters = opt.sa_push_bisect_iters;
                 p.push_overshoot_frac = opt.sa_push_overshoot_frac;
                 p.squeeze_pushes = opt.sa_squeeze_pushes;
+                p.global_rot_deg = opt.sa_global_rot_deg;
+                p.eject_center_topk = opt.sa_eject_center_topk;
+                p.eject_relax_iters = opt.sa_eject_relax_iters;
+                p.eject_step_frac = opt.sa_eject_step_frac;
+                p.eject_reinsert_attempts = opt.sa_eject_reinsert_attempts;
+                p.eject_reinsert_noise_frac = opt.sa_eject_reinsert_noise_frac;
+                p.eject_reinsert_rot_deg = opt.sa_eject_reinsert_rot_deg;
+                p.eject_reinsert_p_rot = opt.sa_eject_reinsert_p_rot;
                 if (opt.sa_aggressive) {
                     SARefiner::apply_aggressive_preset(p);
                 }
@@ -2482,6 +2801,7 @@ int main(int argc, char** argv) {
                         p.reheat_mult = opt.sa_reheat_mult;
                         p.reheat_step_mult = opt.sa_reheat_step_mult;
                         p.reheat_max = opt.sa_reheat_max;
+                        p.time_budget_sec = opt.sa_time_budget_sec;
                         p.w_micro = opt.sa_w_micro;
 	                        p.w_swap_rot = opt.sa_w_swap_rot;
 	                        p.w_relocate = opt.sa_w_relocate;
@@ -2490,6 +2810,8 @@ int main(int argc, char** argv) {
                         p.w_lns = opt.sa_w_lns;
                         p.w_push_contact = opt.sa_w_push_contact;
                         p.w_squeeze = opt.sa_w_squeeze;
+                        p.w_global_rotate = opt.sa_w_global_rotate;
+                        p.w_eject_chain = opt.sa_w_eject_chain;
                         p.block_size = opt.sa_block_size;
                         p.lns_remove = opt.sa_lns_remove;
                         p.lns_candidates = opt.sa_lns_candidates;
@@ -2514,6 +2836,14 @@ int main(int argc, char** argv) {
                         p.push_bisect_iters = opt.sa_push_bisect_iters;
                         p.push_overshoot_frac = opt.sa_push_overshoot_frac;
                         p.squeeze_pushes = opt.sa_squeeze_pushes;
+                        p.global_rot_deg = opt.sa_global_rot_deg;
+                        p.eject_center_topk = opt.sa_eject_center_topk;
+                        p.eject_relax_iters = opt.sa_eject_relax_iters;
+                        p.eject_step_frac = opt.sa_eject_step_frac;
+                        p.eject_reinsert_attempts = opt.sa_eject_reinsert_attempts;
+                        p.eject_reinsert_noise_frac = opt.sa_eject_reinsert_noise_frac;
+                        p.eject_reinsert_rot_deg = opt.sa_eject_reinsert_rot_deg;
+                        p.eject_reinsert_p_rot = opt.sa_eject_reinsert_p_rot;
                         if (opt.sa_aggressive) {
                             SARefiner::apply_aggressive_preset(p);
                         }
@@ -2573,6 +2903,22 @@ int main(int argc, char** argv) {
                             pool.resize(static_cast<size_t>(opt.topk_per_n));
                         }
                     }
+                }
+            }
+
+            if (opt.global_contract_steps > 0 &&
+                opt.global_contract_repair_passes > 0 &&
+                opt.repair_attempts > 0) {
+                CandidateSol curr_best = best;
+                apply_global_contraction(base_poly,
+                                         radius,
+                                         opt.seed ^
+                                             (0xD1B54A32D192ED03ULL +
+                                              static_cast<uint64_t>(n) * 0x9E3779B97F4A7C15ULL),
+                                         opt,
+                                         curr_best);
+                if (curr_best.side + 1e-15 < best.side) {
+                    best = std::move(curr_best);
                 }
             }
 
@@ -2703,6 +3049,7 @@ int main(int argc, char** argv) {
                             p.reheat_mult = opt.sa_reheat_mult;
                             p.reheat_step_mult = opt.sa_reheat_step_mult;
                             p.reheat_max = opt.sa_reheat_max;
+                            p.time_budget_sec = opt.sa_time_budget_sec;
                             p.w_micro = opt.sa_w_micro;
                             p.w_swap_rot = opt.sa_w_swap_rot;
                             p.w_relocate = opt.sa_w_relocate;
@@ -2711,6 +3058,8 @@ int main(int argc, char** argv) {
                             p.w_lns = opt.sa_w_lns;
                             p.w_push_contact = opt.sa_w_push_contact;
                             p.w_squeeze = opt.sa_w_squeeze;
+                            p.w_global_rotate = opt.sa_w_global_rotate;
+                            p.w_eject_chain = opt.sa_w_eject_chain;
                             p.block_size = opt.sa_block_size;
                             p.lns_remove = opt.sa_lns_remove;
                             p.lns_candidates = opt.sa_lns_candidates;
@@ -2735,6 +3084,14 @@ int main(int argc, char** argv) {
                             p.push_bisect_iters = opt.sa_push_bisect_iters;
                             p.push_overshoot_frac = opt.sa_push_overshoot_frac;
                             p.squeeze_pushes = opt.sa_squeeze_pushes;
+                            p.global_rot_deg = opt.sa_global_rot_deg;
+                            p.eject_center_topk = opt.sa_eject_center_topk;
+                            p.eject_relax_iters = opt.sa_eject_relax_iters;
+                            p.eject_step_frac = opt.sa_eject_step_frac;
+                            p.eject_reinsert_attempts = opt.sa_eject_reinsert_attempts;
+                            p.eject_reinsert_noise_frac = opt.sa_eject_reinsert_noise_frac;
+                            p.eject_reinsert_rot_deg = opt.sa_eject_reinsert_rot_deg;
+                            p.eject_reinsert_p_rot = opt.sa_eject_reinsert_p_rot;
                             if (opt.sa_aggressive) {
                                 SARefiner::apply_aggressive_preset(p);
                             }
@@ -2848,6 +3205,7 @@ int main(int argc, char** argv) {
                                 p.reheat_mult = opt.sa_reheat_mult;
                                 p.reheat_step_mult = opt.sa_reheat_step_mult;
                                 p.reheat_max = opt.sa_reheat_max;
+                                p.time_budget_sec = opt.sa_time_budget_sec;
                                 p.w_micro = opt.sa_w_micro;
                                 p.w_swap_rot = opt.sa_w_swap_rot;
                                 p.w_relocate = opt.sa_w_relocate;
@@ -2856,6 +3214,8 @@ int main(int argc, char** argv) {
                                 p.w_lns = opt.sa_w_lns;
                                 p.w_push_contact = opt.sa_w_push_contact;
                                 p.w_squeeze = opt.sa_w_squeeze;
+                                p.w_global_rotate = opt.sa_w_global_rotate;
+                                p.w_eject_chain = opt.sa_w_eject_chain;
                                 p.block_size = opt.sa_block_size;
                                 p.lns_remove = opt.sa_lns_remove;
                                 p.lns_candidates = opt.sa_lns_candidates;
@@ -2880,6 +3240,14 @@ int main(int argc, char** argv) {
                                 p.push_bisect_iters = opt.sa_push_bisect_iters;
                                 p.push_overshoot_frac = opt.sa_push_overshoot_frac;
                                 p.squeeze_pushes = opt.sa_squeeze_pushes;
+                                p.global_rot_deg = opt.sa_global_rot_deg;
+                                p.eject_center_topk = opt.sa_eject_center_topk;
+                                p.eject_relax_iters = opt.sa_eject_relax_iters;
+                                p.eject_step_frac = opt.sa_eject_step_frac;
+                                p.eject_reinsert_attempts = opt.sa_eject_reinsert_attempts;
+                                p.eject_reinsert_noise_frac = opt.sa_eject_reinsert_noise_frac;
+                                p.eject_reinsert_rot_deg = opt.sa_eject_reinsert_rot_deg;
+                                p.eject_reinsert_p_rot = opt.sa_eject_reinsert_p_rot;
                                 if (opt.sa_aggressive) {
                                     SARefiner::apply_aggressive_preset(p);
                                 }
@@ -2967,6 +3335,14 @@ int main(int argc, char** argv) {
                   << ", patience=" << opt.squeeze_patience
                   << ", alt_axis=" << (opt.squeeze_alt_axis ? "on" : "off")
                   << ", repair_passes=" << opt.squeeze_repair_passes << ")\n";
+        std::cout << "Global contraction: " << (opt.global_contract_steps > 0 ? "on" : "off")
+                  << " (steps=" << opt.global_contract_steps
+                  << ", scale=" << opt.global_contract_scale
+                  << ", relax_iters=" << opt.global_contract_relax_iters
+                  << ", overlap_force=" << opt.global_contract_overlap_force
+                  << ", center_force=" << opt.global_contract_center_force
+                  << ", step_frac=" << opt.global_contract_step_frac
+                  << ", repair_passes=" << opt.global_contract_repair_passes << ")\n";
         std::cout << "SA: " << (opt.sa_iters > 0 && opt.sa_restarts > 0 ? "on" : "off")
                   << " (iters=" << opt.sa_iters
                   << ", restarts=" << opt.sa_restarts

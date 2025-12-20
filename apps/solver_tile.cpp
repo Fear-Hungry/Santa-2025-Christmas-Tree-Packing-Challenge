@@ -12,6 +12,7 @@
 #include "collision.hpp"
 #include "boundary_refine.hpp"
 #include "geom.hpp"
+#include "micro_adjust.hpp"
 #include "prefix_prune.hpp"
 #include "sa.hpp"
 #include "solver_tile_cli.hpp"
@@ -668,6 +669,42 @@ int main(int argc, char** argv) {
             total_score = total_score_rigid;
         }
 
+        const bool use_micro =
+            (opt.micro_rot_steps > 0 && opt.micro_rot_eps > 0.0) ||
+            (opt.micro_shift_steps > 0 && opt.micro_shift_eps > 0.0);
+        int micro_improved = 0;
+        if (use_micro) {
+            double total_score_micro = 0.0;
+            const MicroAdjustOptions micro_opt{
+                opt.micro_rot_eps,
+                opt.micro_rot_steps,
+                opt.micro_shift_eps,
+                opt.micro_shift_steps,
+                9
+            };
+
+            for (int n = 1; n <= opt.n_max; ++n) {
+                std::vector<TreePose> best_sol =
+                    solutions_by_n[static_cast<size_t>(n)];
+                double best_side = bounding_square_side(
+                    transformed_polygons(base_poly, best_sol));
+
+                MicroAdjustOutcome micro_out = apply_micro_adjustments(
+                    base_poly, best_sol, radius, micro_opt);
+                if (micro_out.result.improved &&
+                    micro_out.result.best_side + 1e-15 < best_side) {
+                    best_side = micro_out.result.best_side;
+                    best_sol = std::move(micro_out.poses);
+                    ++micro_improved;
+                }
+
+                solutions_by_n[static_cast<size_t>(n)] = std::move(best_sol);
+                total_score_micro += (best_side * best_side) /
+                                     static_cast<double>(n);
+            }
+            total_score = total_score_micro;
+        }
+
         std::ofstream out(opt.output_path);
         if (!out) {
             throw std::runtime_error("Erro ao abrir arquivo de saída: " + opt.output_path);
@@ -705,6 +742,15 @@ int main(int argc, char** argv) {
         std::cout << "Score (local): " << std::fixed << std::setprecision(9) << total_score << "\n";
         std::cout << "Prune: " << (opt.prune ? "on" : "off") << "\n";
         std::cout << "Final rigid: " << (opt.final_rigid ? "on" : "off") << "\n";
+        std::cout << "Micro adjust: " << (use_micro ? "on" : "off");
+        if (use_micro) {
+            std::cout << " (rot_eps=" << opt.micro_rot_eps
+                      << ", rot_steps=" << opt.micro_rot_steps
+                      << ", shift_eps=" << opt.micro_shift_eps
+                      << ", shift_steps=" << opt.micro_shift_steps
+                      << ", improved=" << micro_improved << ")";
+        }
+        std::cout << "\n";
         if (opt.sa_beam) {
             std::cout << "SA beam: on (width=" << opt.sa_beam_width
                       << ", remove=" << opt.sa_beam_remove

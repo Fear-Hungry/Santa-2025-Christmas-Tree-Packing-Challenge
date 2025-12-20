@@ -4,7 +4,8 @@ LDFLAGS ?=
 
 BIN_DIR := bin
 
-SRC_COMMON := src/geom.cpp src/collision.cpp src/collision_polygons.cpp
+SRC_COMMON := src/geom.cpp src/collision.cpp src/collision_polygons.cpp \
+	src/micro_adjust.cpp
 SRC_SUBMISSION := src/submission_io.cpp
 SRC_SA := src/sa.cpp
 SRC_PREFIX_PRUNE := src/prefix_prune.cpp
@@ -18,7 +19,7 @@ SOLVER_TILE_SRC := $(SRC_COMMON) $(SRC_SUBMISSION) $(SRC_SA) \
 	src/solver_tile_cli.cpp
 SOLVER_TESSELLATION_SRC := $(SRC_COMMON) $(SRC_SUBMISSION) $(SRC_SA) $(SRC_GA)
 BLEND_REPAIR_SRC := $(SRC_COMMON) $(SRC_SUBMISSION) $(SRC_SA)
-ENSEMBLE_SRC := $(SRC_COMMON) $(SRC_SUBMISSION)
+ENSEMBLE_SRC := $(SRC_COMMON) $(SRC_SUBMISSION) src/ensemble_submissions_cli.cpp
 SCORE_SRC := $(SRC_COMMON) $(SRC_SUBMISSION)
 BASELINE_SRC := $(SRC_COMMON) $(SRC_SUBMISSION) $(SRC_BASELINE)
 COMPACT_CONTACT_SRC := $(SRC_COMMON) $(SRC_SUBMISSION)

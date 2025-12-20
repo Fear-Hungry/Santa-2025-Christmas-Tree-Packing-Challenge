@@ -120,6 +120,10 @@ struct Options {
     double mz_w_resolve_overlap_b = 10.0;
 
     bool final_rigid = true;
+    double micro_rot_eps = 0.0;
+    int micro_rot_steps = 0;
+    double micro_shift_eps = 0.0;
+    int micro_shift_steps = 0;
     uint64_t seed = 123456789ULL;
     double spacing_safety = 1.001;
     double shift_a = 0.0;

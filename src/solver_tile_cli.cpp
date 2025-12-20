@@ -254,6 +254,14 @@ Options parse_args(int argc, char** argv) {
             opt.mz_w_resolve_overlap_b = parse_double(need(arg));
         } else if (arg == "--no-final-rigid" || arg == "--no-sa-rigid") {
             opt.final_rigid = false;
+        } else if (arg == "--micro-rot-eps") {
+            opt.micro_rot_eps = parse_double(need(arg));
+        } else if (arg == "--micro-rot-steps") {
+            opt.micro_rot_steps = parse_int(need(arg));
+        } else if (arg == "--micro-shift-eps") {
+            opt.micro_shift_eps = parse_double(need(arg));
+        } else if (arg == "--micro-shift-steps") {
+            opt.micro_shift_steps = parse_int(need(arg));
         } else if (arg == "--seed") {
             opt.seed = parse_u64(need(arg));
         } else if (arg == "--spacing-safety") {
@@ -530,6 +538,18 @@ Options parse_args(int argc, char** argv) {
         if (opt.mz_w_resolve_overlap_b < 0.0) {
             throw std::runtime_error("--mz-w-resolve-overlap-b precisa ser >= 0.");
         }
+    }
+    if (opt.micro_rot_steps < 0 || opt.micro_shift_steps < 0) {
+        throw std::runtime_error("--micro-rot-steps/--micro-shift-steps precisam ser >= 0.");
+    }
+    if (opt.micro_rot_eps < 0.0 || opt.micro_shift_eps < 0.0) {
+        throw std::runtime_error("--micro-rot-eps/--micro-shift-eps precisam ser >= 0.");
+    }
+    if (opt.micro_rot_steps > 0 && !(opt.micro_rot_eps > 0.0)) {
+        throw std::runtime_error("--micro-rot-eps precisa ser > 0 quando steps > 0.");
+    }
+    if (opt.micro_shift_steps > 0 && !(opt.micro_shift_eps > 0.0)) {
+        throw std::runtime_error("--micro-shift-eps precisa ser > 0 quando steps > 0.");
     }
     return opt;
 }
