@@ -286,29 +286,35 @@ namespace {
                 }
             };
 
-            	        double curr_overlap = 0.0;
-            	        if (soft_overlap) {
-            	            for (int i = 0; i < n; ++i) {
-            	                for (int j = i + 1; j < n; ++j) {
-            	                    double dx = poses[static_cast<size_t>(i)].x - poses[static_cast<size_t>(j)].x;
-            	                    double dy = poses[static_cast<size_t>(i)].y - poses[static_cast<size_t>(j)].y;
-            	                    if (dx * dx + dy * dy > thr_sq) {
-            	                        continue;
-            	                    }
-            	                    if (!aabb_overlap(bbs[static_cast<size_t>(i)], bbs[static_cast<size_t>(j)])) {
-            	                        continue;
-            	                    }
-            	                    if (!polygons_intersect(polys[static_cast<size_t>(i)],
-            	                                            polys[static_cast<size_t>(j)])) {
-            	                        continue;
-            	                    }
-            	                    curr_overlap +=
-            	                        overlap_metric(poses[static_cast<size_t>(i)],
-            	                                       poses[static_cast<size_t>(j)]);
-            	                }
-            	            }
-            	            curr_overlap = clamp_overlap(curr_overlap);
-            	        }
+            double curr_overlap = 0.0;
+            if (soft_overlap) {
+                for (int i = 0; i < n; ++i) {
+                    const auto& pi = poses[static_cast<size_t>(i)];
+                    grid.gather(pi.x, pi.y, neigh);
+                    std::sort(neigh.begin(), neigh.end());
+                    for (int j : neigh) {
+                        if (j <= i) {
+                            continue;
+                        }
+                        const auto& pj = poses[static_cast<size_t>(j)];
+                        double dx = pi.x - pj.x;
+                        double dy = pi.y - pj.y;
+                        if (dx * dx + dy * dy > thr_sq) {
+                            continue;
+                        }
+                        if (!aabb_overlap(bbs[static_cast<size_t>(i)],
+                                          bbs[static_cast<size_t>(j)])) {
+                            continue;
+                        }
+                        if (!polygons_intersect(polys[static_cast<size_t>(i)],
+                                                polys[static_cast<size_t>(j)])) {
+                            continue;
+                        }
+                        curr_overlap += overlap_metric(pi, pj);
+                    }
+                }
+                curr_overlap = clamp_overlap(curr_overlap);
+            }
             const double curr_width = gmxx - gmnx;
             const double curr_height = gmxy - gmny;
             double curr_cost = cost_from(curr_width, curr_height, curr_overlap);

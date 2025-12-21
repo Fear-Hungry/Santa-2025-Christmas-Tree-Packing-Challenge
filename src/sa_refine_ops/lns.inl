@@ -511,14 +511,28 @@
                     std::vector<Polygon> cand_polys = polys;
                     std::vector<BoundingBox> cand_bbs = bbs;
 
+                    sa_refine::UniformGrid lns_grid(n, thr);
+                    for (int j = 0; j < n; ++j) {
+                        if (!active[static_cast<size_t>(j)]) {
+                            continue;
+                        }
+                        lns_grid.insert(j,
+                                        cand_poses[static_cast<size_t>(j)].x,
+                                        cand_poses[static_cast<size_t>(j)].y);
+                    }
+
                     double active_overlap = 0.0;
                     if (soft_overlap) {
                         for (int i = 0; i < n; ++i) {
                             if (!active[static_cast<size_t>(i)]) {
                                 continue;
                             }
-                            for (int j = i + 1; j < n; ++j) {
-                                if (!active[static_cast<size_t>(j)]) {
+                            lns_grid.gather(cand_poses[static_cast<size_t>(i)].x,
+                                            cand_poses[static_cast<size_t>(i)].y,
+                                            neigh);
+                            std::sort(neigh.begin(), neigh.end());
+                            for (int j : neigh) {
+                                if (j <= i) {
                                     continue;
                                 }
                                 double dx = cand_poses[static_cast<size_t>(i)].x -
@@ -542,16 +556,6 @@
                             }
                         }
                         active_overlap = clamp_overlap(active_overlap);
-                    }
-
-                    sa_refine::UniformGrid lns_grid(n, thr);
-                    for (int j = 0; j < n; ++j) {
-                        if (!active[static_cast<size_t>(j)]) {
-                            continue;
-                        }
-                        lns_grid.insert(j,
-                                        cand_poses[static_cast<size_t>(j)].x,
-                                        cand_poses[static_cast<size_t>(j)].y);
                     }
 
                     std::vector<int> remove = remove_set;

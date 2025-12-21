@@ -1,5 +1,6 @@
 #include "submission_io.hpp"
 
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
@@ -8,6 +9,40 @@
 #include <stdexcept>
 
 #include "wrap_utils.hpp"
+
+namespace {
+
+constexpr std::array<double, 19> kPow10 = {
+    1e0,
+    1e1,
+    1e2,
+    1e3,
+    1e4,
+    1e5,
+    1e6,
+    1e7,
+    1e8,
+    1e9,
+    1e10,
+    1e11,
+    1e12,
+    1e13,
+    1e14,
+    1e15,
+    1e16,
+    1e17,
+    1e18,
+};
+
+double pow10_clamped(int decimals) {
+    if (decimals <= 0) {
+        return 1.0;
+    }
+    const int d = std::min(decimals, static_cast<int>(kPow10.size()) - 1);
+    return kPow10[static_cast<size_t>(d)];
+}
+
+}  // namespace
 
 bool parse_submission_line(const std::string& line,
                            std::string& id,
@@ -127,8 +162,14 @@ SubmissionPoses load_submission_poses(const std::string& path, int n_max) {
 }
 
 double quantize_value(double x, int decimals) {
-    const std::string s = fmt_submission_value(x, decimals);
-    return std::stod(s.substr(1));
+    if (!std::isfinite(x)) {
+        return x;
+    }
+    if (decimals <= 0) {
+        return std::nearbyint(x);
+    }
+    const double scale = pow10_clamped(decimals);
+    return std::nearbyint(x * scale) / scale;
 }
 
 TreePose quantize_pose(const TreePose& pose, int decimals) {
@@ -160,4 +201,3 @@ std::vector<TreePose> quantize_poses_wrap_deg(const std::vector<TreePose>& poses
     }
     return out;
 }
-

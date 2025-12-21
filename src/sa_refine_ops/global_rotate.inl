@@ -58,10 +58,20 @@
                     cand_bbs.push_back(bounding_box(cand_polys.back()));
                 }
 
+                sa_refine::UniformGrid cand_grid(n, thr);
+                cand_grid.rebuild(cand_poses);
+
                 bool ok = true;
                 double new_overlap = 0.0;
                 for (int i = 0; i < n && ok; ++i) {
-                    for (int j = i + 1; j < n; ++j) {
+                    cand_grid.gather(cand_poses[static_cast<size_t>(i)].x,
+                                     cand_poses[static_cast<size_t>(i)].y,
+                                     neigh);
+                    std::sort(neigh.begin(), neigh.end());
+                    for (int j : neigh) {
+                        if (j <= i) {
+                            continue;
+                        }
                         const double dx = cand_poses[static_cast<size_t>(i)].x -
                                           cand_poses[static_cast<size_t>(j)].x;
                         const double dy = cand_poses[static_cast<size_t>(i)].y -

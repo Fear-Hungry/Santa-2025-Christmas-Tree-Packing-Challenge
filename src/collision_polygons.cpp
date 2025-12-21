@@ -18,18 +18,6 @@ struct OrientationSet {
     double o4;
 };
 
-std::vector<Segment> make_segments(const Polygon& poly) {
-    std::vector<Segment> segs;
-    if (poly.size() < 2) {
-        return segs;
-    }
-    segs.reserve(poly.size());
-    for (size_t i = 0; i < poly.size(); ++i) {
-        segs.emplace_back(poly[i], poly[(i + 1) % poly.size()]);
-    }
-    return segs;
-}
-
 double orient(const Point& a, const Point& b, const Point& c) {
     return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
 }
@@ -155,19 +143,6 @@ bool point_in_polygon_strict(const Point& pt, const Polygon& poly, const Toleran
     return point_in_polygon_ray_cast(pt, poly);
 }
 
-bool segments_overlap_any(const std::vector<Segment>& segs1,
-                          const std::vector<Segment>& segs2,
-                          const Tolerance& tol) {
-    for (const auto& s1 : segs1) {
-        for (const auto& s2 : segs2) {
-            if (segments_overlap_strict(s1, s2, tol)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 bool polygon_contains_point_strict(const Polygon& container,
                                    const Polygon& candidate,
                                    const Tolerance& tol) {
@@ -178,12 +153,17 @@ bool polygon_contains_point_strict(const Polygon& container,
 }
 
 bool polygons_intersect_impl(const Polygon& p1, const Polygon& p2) {
-    auto segs1 = make_segments(p1);
-    auto segs2 = make_segments(p2);
-
     const Tolerance tol{1e-12};
-    if (segments_overlap_any(segs1, segs2, tol)) {
-        return true;
+    if (p1.size() >= 2 && p2.size() >= 2) {
+        for (size_t i = 0; i < p1.size(); ++i) {
+            const Segment s1{p1[i], p1[(i + 1) % p1.size()]};
+            for (size_t j = 0; j < p2.size(); ++j) {
+                const Segment s2{p2[j], p2[(j + 1) % p2.size()]};
+                if (segments_overlap_strict(s1, s2, tol)) {
+                    return true;
+                }
+            }
+        }
     }
     if (polygon_contains_point_strict(p2, p1, tol)) {
         return true;

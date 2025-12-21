@@ -10,6 +10,7 @@
 
 #include "collision.hpp"
 #include "sa.hpp"
+#include "spatial_grid.hpp"
 #include "submission_io.hpp"
 
 namespace {
@@ -196,49 +197,61 @@ ILSResult ils_basin_hop_compact_impl(const Polygon& base_poly,
         return true;
     };
 
-    auto repair_mtv = [&](std::vector<TreePose>& p, uint64_t rseed) -> bool {
-        if (opt.ils_repair_mtv_passes <= 0) {
-            return !any_overlap(base_poly, p, radius);
-        }
+	    auto repair_mtv = [&](std::vector<TreePose>& p, uint64_t rseed) -> bool {
+	        if (opt.ils_repair_mtv_passes <= 0) {
+	            return !any_overlap(base_poly, p, radius);
+	        }
 
-        const double thr = 2.0 * radius + 1e-9;
-        const double limit_sq = thr * thr;
+	        const double thr = 2.0 * radius + 1e-9;
+	        const double limit_sq = thr * thr;
 
-        std::vector<Point> centers;
-        centers.reserve(p.size());
-        std::vector<Polygon> polys;
-        polys.reserve(p.size());
-        std::vector<BoundingBox> bbs;
-        bbs.reserve(p.size());
-        for (const auto& pose : p) {
-            centers.push_back(Point{pose.x, pose.y});
-            Polygon poly = transform_polygon(base_poly, pose);
-            polys.push_back(std::move(poly));
-            bbs.push_back(bounding_box(polys.back()));
-        }
+	        std::vector<Point> centers;
+	        centers.reserve(p.size());
+	        std::vector<Polygon> polys;
+	        polys.reserve(p.size());
+	        std::vector<BoundingBox> bbs;
+	        bbs.reserve(p.size());
+	        UniformGridIndex grid(n, thr);
+	        std::vector<int> neigh;
+	        neigh.reserve(64);
+	        for (int i = 0; i < n; ++i) {
+	            const auto& pose = p[static_cast<size_t>(i)];
+	            centers.push_back(Point{pose.x, pose.y});
+	            Polygon poly = transform_polygon(base_poly, pose);
+	            polys.push_back(std::move(poly));
+	            bbs.push_back(bounding_box(polys.back()));
+	            grid.insert(i, pose.x, pose.y);
+	        }
 
-        auto find_first = [&]() -> std::pair<int, int> {
-            for (int i = 0; i < n; ++i) {
-                for (int j = i + 1; j < n; ++j) {
-                    const double dx =
-                        centers[static_cast<size_t>(i)].x - centers[static_cast<size_t>(j)].x;
-                    const double dy =
-                        centers[static_cast<size_t>(i)].y - centers[static_cast<size_t>(j)].y;
-                    if (dx * dx + dy * dy > limit_sq) {
+	        auto find_first = [&]() -> std::pair<int, int> {
+	            for (int i = 0; i < n; ++i) {
+	                grid.gather(centers[static_cast<size_t>(i)].x,
+	                            centers[static_cast<size_t>(i)].y,
+	                            neigh);
+	                std::sort(neigh.begin(), neigh.end());
+	                for (int j : neigh) {
+	                    if (j <= i) {
+	                        continue;
+	                    }
+	                    const double dx =
+	                        centers[static_cast<size_t>(i)].x - centers[static_cast<size_t>(j)].x;
+	                    const double dy =
+	                        centers[static_cast<size_t>(i)].y - centers[static_cast<size_t>(j)].y;
+	                    if (dx * dx + dy * dy > limit_sq) {
                         continue;
                     }
                     if (!aabb_overlap(bbs[static_cast<size_t>(i)],
                                       bbs[static_cast<size_t>(j)])) {
                         continue;
                     }
-                    if (polygons_intersect(polys[static_cast<size_t>(i)],
-                                           polys[static_cast<size_t>(j)])) {
-                        return {i, j};
-                    }
-                }
-            }
-            return {-1, -1};
-        };
+	                    if (polygons_intersect(polys[static_cast<size_t>(i)],
+	                                           polys[static_cast<size_t>(j)])) {
+	                        return {i, j};
+	                    }
+	                }
+	            }
+	            return {-1, -1};
+	        };
 
         auto centrality_key = [&](const TreePose& pose) -> double {
             return std::max(std::abs(pose.x), std::abs(pose.y));
@@ -325,21 +338,23 @@ ILSResult ils_basin_hop_compact_impl(const Polygon& base_poly,
                     continue;
                 }
 
-                p[static_cast<size_t>(idx)] = cand_idx;
-                centers[static_cast<size_t>(idx)] = Point{cand_idx.x, cand_idx.y};
-                polys[static_cast<size_t>(idx)] = transform_polygon(base_poly, cand_idx);
-                bbs[static_cast<size_t>(idx)] = bounding_box(polys[static_cast<size_t>(idx)]);
+	                p[static_cast<size_t>(idx)] = cand_idx;
+	                centers[static_cast<size_t>(idx)] = Point{cand_idx.x, cand_idx.y};
+	                polys[static_cast<size_t>(idx)] = transform_polygon(base_poly, cand_idx);
+	                bbs[static_cast<size_t>(idx)] = bounding_box(polys[static_cast<size_t>(idx)]);
+	                grid.update_position(idx, cand_idx.x, cand_idx.y);
 
-                if (split) {
-                    p[static_cast<size_t>(other)] = cand_other;
-                    centers[static_cast<size_t>(other)] = Point{cand_other.x, cand_other.y};
-                    polys[static_cast<size_t>(other)] = transform_polygon(base_poly, cand_other);
-                    bbs[static_cast<size_t>(other)] =
-                        bounding_box(polys[static_cast<size_t>(other)]);
-                }
+	                if (split) {
+	                    p[static_cast<size_t>(other)] = cand_other;
+	                    centers[static_cast<size_t>(other)] = Point{cand_other.x, cand_other.y};
+	                    polys[static_cast<size_t>(other)] = transform_polygon(base_poly, cand_other);
+	                    bbs[static_cast<size_t>(other)] =
+	                        bounding_box(polys[static_cast<size_t>(other)]);
+	                    grid.update_position(other, cand_other.x, cand_other.y);
+	                }
 
-                moved = true;
-            }
+	                moved = true;
+	            }
 
             if (!moved) {
                 break;
@@ -766,6 +781,76 @@ Extents extents_without_index(const std::vector<BoundingBox>& bbs, int skip) {
     return e;
 }
 
+struct ExtremeMin2 {
+    double v1 = std::numeric_limits<double>::infinity();
+    int i1 = -1;
+    double v2 = std::numeric_limits<double>::infinity();
+    int i2 = -1;
+
+    void consider(double v, int idx) {
+        if (v < v1) {
+            v2 = v1;
+            i2 = i1;
+            v1 = v;
+            i1 = idx;
+        } else if (v < v2) {
+            v2 = v;
+            i2 = idx;
+        }
+    }
+};
+
+struct ExtremeMax2 {
+    double v1 = -std::numeric_limits<double>::infinity();
+    int i1 = -1;
+    double v2 = -std::numeric_limits<double>::infinity();
+    int i2 = -1;
+
+    void consider(double v, int idx) {
+        if (v > v1) {
+            v2 = v1;
+            i2 = i1;
+            v1 = v;
+            i1 = idx;
+        } else if (v > v2) {
+            v2 = v;
+            i2 = idx;
+        }
+    }
+};
+
+struct ExtentsSupport {
+    ExtremeMin2 min_x;
+    ExtremeMax2 max_x;
+    ExtremeMin2 min_y;
+    ExtremeMax2 max_y;
+
+    Extents extents() const {
+        return Extents{min_x.v1, max_x.v1, min_y.v1, max_y.v1};
+    }
+};
+
+ExtentsSupport compute_extents_support(const std::vector<BoundingBox>& bbs) {
+    ExtentsSupport out;
+    for (size_t i = 0; i < bbs.size(); ++i) {
+        const int idx = static_cast<int>(i);
+        const auto& bb = bbs[i];
+        out.min_x.consider(bb.min_x, idx);
+        out.max_x.consider(bb.max_x, idx);
+        out.min_y.consider(bb.min_y, idx);
+        out.max_y.consider(bb.max_y, idx);
+    }
+    return out;
+}
+
+Extents extents_without_index(const ExtentsSupport& support, int skip) {
+    const double min_x = (skip == support.min_x.i1) ? support.min_x.v2 : support.min_x.v1;
+    const double max_x = (skip == support.max_x.i1) ? support.max_x.v2 : support.max_x.v1;
+    const double min_y = (skip == support.min_y.i1) ? support.min_y.v2 : support.min_y.v1;
+    const double max_y = (skip == support.max_y.i1) ? support.max_y.v2 : support.max_y.v1;
+    return Extents{min_x, max_x, min_y, max_y};
+}
+
 Extents extents_from_bb(const BoundingBox& bb) {
     return Extents{bb.min_x, bb.max_x, bb.min_y, bb.max_y};
 }
@@ -820,6 +905,7 @@ int pick_greedy_boundary_removal(const std::vector<BoundingBox>& bbs,
     if (bbs.empty()) {
         return -1;
     }
+    const ExtentsSupport support = compute_extents_support(bbs);
     std::vector<int> candidates = boundary_indices(bbs, e, tol);
     if (candidates.empty()) {
         candidates.resize(bbs.size());
@@ -834,7 +920,7 @@ int pick_greedy_boundary_removal(const std::vector<BoundingBox>& bbs,
     double best_key2 = -std::numeric_limits<double>::infinity();
 
     for (int idx : candidates) {
-        Extents e2 = extents_without_index(bbs, idx);
+        Extents e2 = extents_without_index(support, idx);
         double s2 = side_from_extents(e2);
         const auto& bb = bbs[static_cast<size_t>(idx)];
         const double cx = 0.5 * (bb.min_x + bb.max_x);
@@ -886,10 +972,11 @@ std::vector<int> pick_removal_candidates(const std::vector<BoundingBox>& bbs,
         }
     }
 
+    const ExtentsSupport support = compute_extents_support(bbs);
     std::vector<RemovalCandidate> scored;
     scored.reserve(candidates.size());
     for (int idx : candidates) {
-        Extents e2 = extents_without_index(bbs, idx);
+        Extents e2 = extents_without_index(support, idx);
         double s2 = side_from_extents(e2);
         const auto& bb = bbs[static_cast<size_t>(idx)];
         const double cx = 0.5 * (bb.min_x + bb.max_x);
@@ -991,7 +1078,8 @@ std::vector<double> greedy_pruned_sides(const std::vector<BoundingBox>& bbs_in,
     side_by_n.resize(static_cast<size_t>(n_max + 1), 0.0);
 
     for (int m = static_cast<int>(bbs.size()); m >= 1; --m) {
-        Extents e = compute_extents(bbs);
+        ExtentsSupport support = compute_extents_support(bbs);
+        Extents e = support.extents();
         double s = side_from_extents(e);
         if (m <= n_max) {
             side_by_n[static_cast<size_t>(m)] = s;
@@ -1015,7 +1103,7 @@ std::vector<double> greedy_pruned_sides(const std::vector<BoundingBox>& bbs_in,
         double best_key2 = -std::numeric_limits<double>::infinity();
 
         for (int idx : candidates) {
-            Extents e2 = extents_without_index(bbs, idx);
+            Extents e2 = extents_without_index(support, idx);
             double s2 = side_from_extents(e2);
             const auto& bb = bbs[static_cast<size_t>(idx)];
             const double cx = 0.5 * (bb.min_x + bb.max_x);
@@ -1148,7 +1236,8 @@ PruneResult build_greedy_pruned_solutions(const Polygon& base_poly,
     res.side_by_n.resize(static_cast<size_t>(n_max + 1), 0.0);
 
     for (int m = static_cast<int>(poses.size()); m >= 1; --m) {
-        Extents e = compute_extents(bbs);
+        ExtentsSupport support = compute_extents_support(bbs);
+        Extents e = support.extents();
         double s = side_from_extents(e);
         if (m <= n_max) {
             res.total_score += (s * s) / static_cast<double>(m);
@@ -1174,7 +1263,7 @@ PruneResult build_greedy_pruned_solutions(const Polygon& base_poly,
         double best_key2 = -std::numeric_limits<double>::infinity();
 
         for (int idx : candidates) {
-            Extents e2 = extents_without_index(bbs, idx);
+            Extents e2 = extents_without_index(support, idx);
             double s2 = side_from_extents(e2);
             const auto& bb = bbs[static_cast<size_t>(idx)];
             const double cx = 0.5 * (bb.min_x + bb.max_x);
