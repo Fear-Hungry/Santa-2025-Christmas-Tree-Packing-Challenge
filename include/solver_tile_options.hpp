@@ -67,6 +67,7 @@ struct Options {
     double sa_plateau_eps = 0.0;
     double sa_w_resolve_overlap = 0.0;
     double sa_w_push_contact = 0.0;
+    double sa_w_slide_contact = 0.0;
     double sa_w_squeeze = 0.0;
     int sa_resolve_attempts = 6;
     double sa_resolve_step_frac_max = 0.20;
@@ -75,6 +76,12 @@ struct Options {
     double sa_push_max_step_frac = 0.60;
     int sa_push_bisect_iters = 10;
     double sa_push_overshoot_frac = 0.0;
+    int sa_slide_dirs = 8;
+    double sa_slide_dir_bias = 2.0;
+    double sa_slide_max_step_frac = 0.60;
+    int sa_slide_bisect_iters = 10;
+    double sa_slide_min_gain = 1e-4;
+    double sa_slide_schedule_max_frac = 0.0;
     int sa_squeeze_pushes = 6;
     bool sa_aggressive = false;
 
@@ -124,6 +131,19 @@ struct Options {
     int micro_rot_steps = 0;
     double micro_shift_eps = 0.0;
     int micro_shift_steps = 0;
+    bool target_refine = false;
+    double target_cover = 0.78;
+    int target_m_min = 24;
+    int target_m_max = 64;
+    int target_m = 0;
+    int target_tier_a = 12;
+    int target_tier_b = 24;
+    double target_budget_scale = 1.0;
+    bool target_soft_overlap = false;
+    bool target_soft_overlap_tier_a_only = true;
+    double target_soft_overlap_cut = 0.8;
+    bool target_early_stop = true;
+    int target_sa_check_interval = 200;
     uint64_t seed = 123456789ULL;
     double spacing_safety = 1.001;
     double shift_a = 0.0;

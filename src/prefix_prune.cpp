@@ -380,6 +380,7 @@ ILSResult ils_basin_hop_compact_impl(const Polygon& base_poly,
             p.w_block_rotate = opt.sa_w_block_rotate;
             p.w_lns = opt.sa_w_lns;
             p.w_push_contact = opt.sa_w_push_contact;
+            p.w_slide_contact = opt.sa_w_slide_contact;
             p.w_squeeze = opt.sa_w_squeeze;
             p.block_size = opt.sa_block_size;
             p.lns_remove = opt.sa_lns_remove;
@@ -404,6 +405,12 @@ ILSResult ils_basin_hop_compact_impl(const Polygon& base_poly,
             p.push_max_step_frac = opt.sa_push_max_step_frac;
             p.push_bisect_iters = opt.sa_push_bisect_iters;
             p.push_overshoot_frac = opt.sa_push_overshoot_frac;
+            p.slide_dirs = opt.sa_slide_dirs;
+            p.slide_dir_bias = opt.sa_slide_dir_bias;
+            p.slide_max_step_frac = opt.sa_slide_max_step_frac;
+            p.slide_bisect_iters = opt.sa_slide_bisect_iters;
+            p.slide_min_gain = opt.sa_slide_min_gain;
+            p.slide_schedule_max_frac = opt.sa_slide_schedule_max_frac;
             p.squeeze_pushes = opt.sa_squeeze_pushes;
             if (opt.sa_aggressive) {
                 SARefiner::apply_aggressive_preset(p);
@@ -509,6 +516,9 @@ ILSResult mz_its_soft_compact_impl(const Polygon& base_poly,
         p.w_block_translate = opt.sa_w_block_translate;
         p.w_block_rotate = opt.sa_w_block_rotate;
         p.w_lns = opt.sa_w_lns;
+        p.w_push_contact = opt.sa_w_push_contact;
+        p.w_slide_contact = opt.sa_w_slide_contact;
+        p.w_squeeze = opt.sa_w_squeeze;
         p.block_size = opt.sa_block_size;
         p.lns_remove = opt.sa_lns_remove;
         p.lns_candidates = opt.sa_lns_candidates;
@@ -526,6 +536,12 @@ ILSResult mz_its_soft_compact_impl(const Polygon& base_poly,
         p.push_max_step_frac = opt.sa_push_max_step_frac;
         p.push_bisect_iters = opt.sa_push_bisect_iters;
         p.push_overshoot_frac = opt.sa_push_overshoot_frac;
+        p.slide_dirs = opt.sa_slide_dirs;
+        p.slide_dir_bias = opt.sa_slide_dir_bias;
+        p.slide_max_step_frac = opt.sa_slide_max_step_frac;
+        p.slide_bisect_iters = opt.sa_slide_bisect_iters;
+        p.slide_min_gain = opt.sa_slide_min_gain;
+        p.slide_schedule_max_frac = opt.sa_slide_schedule_max_frac;
         p.squeeze_pushes = opt.sa_squeeze_pushes;
         if (opt.sa_aggressive) {
             SARefiner::apply_aggressive_preset(p);
@@ -1233,6 +1249,7 @@ ChainResult build_sa_chain_solutions(const Polygon& base_poly,
             p.w_block_rotate = opt.sa_w_block_rotate;
             p.w_lns = opt.sa_w_lns;
             p.w_push_contact = opt.sa_w_push_contact;
+            p.w_slide_contact = opt.sa_w_slide_contact;
             p.w_squeeze = opt.sa_w_squeeze;
             p.block_size = opt.sa_block_size;
             p.lns_remove = opt.sa_lns_remove;
@@ -1257,6 +1274,12 @@ ChainResult build_sa_chain_solutions(const Polygon& base_poly,
             p.push_max_step_frac = opt.sa_push_max_step_frac;
             p.push_bisect_iters = opt.sa_push_bisect_iters;
             p.push_overshoot_frac = opt.sa_push_overshoot_frac;
+            p.slide_dirs = opt.sa_slide_dirs;
+            p.slide_dir_bias = opt.sa_slide_dir_bias;
+            p.slide_max_step_frac = opt.sa_slide_max_step_frac;
+            p.slide_bisect_iters = opt.sa_slide_bisect_iters;
+            p.slide_min_gain = opt.sa_slide_min_gain;
+            p.slide_schedule_max_frac = opt.sa_slide_schedule_max_frac;
             p.squeeze_pushes = opt.sa_squeeze_pushes;
             if (opt.sa_aggressive) {
                 SARefiner::apply_aggressive_preset(p);
@@ -1353,6 +1376,7 @@ ChainResult build_sa_beam_chain_solutions(const Polygon& base_poly,
         p.w_block_rotate = opt.sa_w_block_rotate;
         p.w_lns = opt.sa_w_lns;
         p.w_push_contact = opt.sa_w_push_contact;
+        p.w_slide_contact = opt.sa_w_slide_contact;
         p.w_squeeze = opt.sa_w_squeeze;
         p.block_size = opt.sa_block_size;
         p.lns_remove = opt.sa_lns_remove;
@@ -1377,6 +1401,12 @@ ChainResult build_sa_beam_chain_solutions(const Polygon& base_poly,
         p.push_max_step_frac = opt.sa_push_max_step_frac;
         p.push_bisect_iters = opt.sa_push_bisect_iters;
         p.push_overshoot_frac = opt.sa_push_overshoot_frac;
+        p.slide_dirs = opt.sa_slide_dirs;
+        p.slide_dir_bias = opt.sa_slide_dir_bias;
+        p.slide_max_step_frac = opt.sa_slide_max_step_frac;
+        p.slide_bisect_iters = opt.sa_slide_bisect_iters;
+        p.slide_min_gain = opt.sa_slide_min_gain;
+        p.slide_schedule_max_frac = opt.sa_slide_schedule_max_frac;
         p.squeeze_pushes = opt.sa_squeeze_pushes;
         if (opt.sa_aggressive) {
             SARefiner::apply_aggressive_preset(p);
