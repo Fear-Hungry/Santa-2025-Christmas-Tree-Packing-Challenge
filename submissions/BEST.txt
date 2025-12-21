@@ -1,2 +1,0 @@
-best_file	submissions/submission_best.csv
-best_score	83.527478425000
