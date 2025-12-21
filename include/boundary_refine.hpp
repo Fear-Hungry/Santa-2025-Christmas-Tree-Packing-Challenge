@@ -5,10 +5,13 @@
 
 #include "geom.hpp"
 
-void refine_boundary(const Polygon& base_poly,
-                     double radius,
-                     std::vector<TreePose>& poses,
-                     int iters,
-                     uint64_t seed,
-                     double step_hint);
+struct BoundaryRefineParams {
+    double radius = 0.0;
+    int iters = 0;
+    uint64_t seed = 0;
+    double step_hint = 0.0;
+};
 
+void refine_boundary(const Polygon& base_poly,
+                     std::vector<TreePose>& poses,
+                     const BoundaryRefineParams& params);

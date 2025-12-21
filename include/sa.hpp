@@ -37,6 +37,12 @@ public:
         // Tempo máximo (segundos). 0 => usa apenas `iters`.
         double time_budget_sec = 0.0;
 
+        // Early-stop por estagnação: avalia a cada `early_stop_check_interval`.
+        bool early_stop = false;
+        int early_stop_check_interval = 200;
+        int early_stop_min_iters = 0;
+        int early_stop_patience_iters = 0;
+
         // Quantização no espaço do CSV. Se `quantize_decimals >= 0`, o SA
         // avalia candidatos já quantizados e mantém o estado quantizado após
         // movimentos aceitos, evitando "ganhos" que somem no arredondamento do
@@ -52,6 +58,7 @@ public:
         double w_block_rotate = 0.02;
         double w_lns = 0.001;
         double w_push_contact = 0.0;
+        double w_slide_contact = 0.0;
         double w_squeeze = 0.0;
         double w_global_rotate = 0.0;
         double w_eject_chain = 0.0;
@@ -125,6 +132,14 @@ public:
         double push_max_step_frac = 0.60;  // limite do step inicial (relativo a curr_side)
         int push_bisect_iters = 10;        // número de checagens na busca binária
         double push_overshoot_frac = 0.0;  // fração de max_step para "atravessar" o contato (soft)
+
+        // Slide-to-contact (hard constraint): move uma árvore em direção discreta até contato.
+        int slide_dirs = 8;                // 4 ou 8 direções discretas
+        double slide_dir_bias = 2.0;       // viés para o centro (0 => uniforme)
+        double slide_max_step_frac = 0.60; // limite do step inicial (relativo a curr_side)
+        int slide_bisect_iters = 10;       // checagens na busca binária
+        double slide_min_gain = 1e-4;      // ignora movimentos muito pequenos
+        double slide_schedule_max_frac = 0.0;  // 0 => desliga; senão rampa 0..max
 
         // Squeeze: repete `push_to_contact` algumas vezes no eixo dominante.
         int squeeze_pushes = 6;

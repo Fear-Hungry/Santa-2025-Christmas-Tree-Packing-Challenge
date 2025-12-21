@@ -202,6 +202,7 @@ Saída padrão: `submission_tessellation_cpp.csv`. No exemplo acima: `runs/tmp/s
 
 Opções úteis (SA é opcional; padrão = desligado):
 
+* `--preset quick|balanced|quality` (atalhos de orçamento; aliases: `fast`, `medium`, `moderate`, `slow`)
 * `--use-ga` (ativa GA como busca global; gera um candidato extra via GA e compara com a tesselação padrão)
 * `--ga-pop 40` / `--ga-gens 60` / `--ga-elite 2` / `--ga-tournament 3`
 * `--ga-spacing-min 1.000` / `--ga-spacing-max 1.010`
@@ -223,6 +224,12 @@ Opções úteis (SA é opcional; padrão = desligado):
 * `--spacing-safety 1.001`
 * `--shift-a 0.0` / `--shift-b 0.0` / `--shift a,b` (offset da lattice; ótimo pra sweeps/ensembling)
 * `--output submission_tessellation_cpp.csv`
+
+Auto-seleção simples (escolhe o melhor preset pelo score local):
+
+```bash
+python3 scripts/auto_tessellation.py --output runs/tmp/submission_tessellation_auto.csv
+```
 
 ### Solver de tile (motif) + translação (+ refino de fronteiras)
 

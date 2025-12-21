@@ -11,6 +11,7 @@
 
 #include "collision.hpp"
 #include "boundary_refine.hpp"
+#include "compaction_contact.hpp"
 #include "geom.hpp"
 #include "micro_adjust.hpp"
 #include "prefix_prune.hpp"
@@ -34,6 +35,447 @@ struct Eval {
     double best_angle = 0.0;
     std::vector<TreePose> best_poses;
 };
+
+enum class TargetTier {
+    kA,
+    kB,
+    kC,
+};
+
+struct SideArea {
+    double side = 0.0;
+    double area = 0.0;
+};
+
+struct TargetEntry {
+    int n = 0;
+    double term = 0.0;
+    TargetTier tier = TargetTier::kC;
+};
+
+int clamp_int(int value, int lo, int hi) {
+    return std::min(hi, std::max(lo, value));
+}
+
+double normalized_budget_scale(double scale) {
+    return (scale > 0.0) ? scale : 1.0;
+}
+
+SideArea eval_side_area(const Polygon& base_poly,
+                        const std::vector<TreePose>& poses) {
+    if (poses.empty()) {
+        return {};
+    }
+    double min_x = std::numeric_limits<double>::infinity();
+    double max_x = -std::numeric_limits<double>::infinity();
+    double min_y = std::numeric_limits<double>::infinity();
+    double max_y = -std::numeric_limits<double>::infinity();
+    for (const auto& pose : poses) {
+        BoundingBox bb = bounding_box(transform_polygon(base_poly, pose));
+        min_x = std::min(min_x, bb.min_x);
+        max_x = std::max(max_x, bb.max_x);
+        min_y = std::min(min_y, bb.min_y);
+        max_y = std::max(max_y, bb.max_y);
+    }
+    const double width = max_x - min_x;
+    const double height = max_y - min_y;
+    SideArea out;
+    out.side = std::max(width, height);
+    out.area = width * height;
+    return out;
+}
+
+bool improves_side_area(const SideArea& cand,
+                        const SideArea& best,
+                        double plateau_eps) {
+    if (!std::isfinite(best.side)) {
+        return std::isfinite(cand.side);
+    }
+    if (cand.side < best.side - 1e-12) {
+        return true;
+    }
+    if (cand.side <= best.side + plateau_eps && cand.area < best.area - 1e-12) {
+        return true;
+    }
+    return false;
+}
+
+TargetTier tier_for_rank(int idx, int tier_a, int tier_b) {
+    if (idx < tier_a) {
+        return TargetTier::kA;
+    }
+    if (idx < tier_a + tier_b) {
+        return TargetTier::kB;
+    }
+    return TargetTier::kC;
+}
+
+int scale_count(int base, double scale, int min_floor, int max_cap) {
+    const double s = normalized_budget_scale(scale);
+    int scaled = static_cast<int>(std::round(static_cast<double>(base) * s));
+    scaled = std::max(min_floor, scaled);
+    if (max_cap > 0) {
+        scaled = std::min(max_cap, scaled);
+    }
+    return scaled;
+}
+
+std::vector<TargetEntry> select_target_entries(
+    const Polygon& base_poly,
+    const std::vector<std::vector<TreePose>>& solutions_by_n,
+    const Options& opt,
+    double* total_score_out) {
+    struct TermRow {
+        int n = 0;
+        double term = 0.0;
+    };
+    std::vector<TermRow> rows;
+    rows.reserve(static_cast<size_t>(opt.n_max));
+    double total_score = 0.0;
+    for (int n = 1; n <= opt.n_max; ++n) {
+        const auto& sol = solutions_by_n[static_cast<size_t>(n)];
+        if (static_cast<int>(sol.size()) != n) {
+            continue;
+        }
+        auto sol_q = quantize_poses(sol);
+        const double side =
+            bounding_square_side(transformed_polygons(base_poly, sol_q));
+        const double term = (side * side) / static_cast<double>(n);
+        total_score += term;
+        rows.push_back(TermRow{n, term});
+    }
+    if (total_score_out) {
+        *total_score_out = total_score;
+    }
+    if (rows.empty()) {
+        return {};
+    }
+    std::sort(rows.begin(), rows.end(), [](const TermRow& a, const TermRow& b) {
+        return a.term > b.term;
+    });
+
+    int target_count = 0;
+    if (opt.target_m > 0) {
+        target_count = clamp_int(opt.target_m, opt.target_m_min, opt.target_m_max);
+    } else {
+        const double cover = std::max(0.0, std::min(1.0, opt.target_cover));
+        const double target_score = cover * total_score;
+        double acc = 0.0;
+        for (const auto& row : rows) {
+            acc += row.term;
+            ++target_count;
+            if (acc >= target_score) {
+                break;
+            }
+        }
+        target_count = clamp_int(target_count, opt.target_m_min, opt.target_m_max);
+    }
+    const double scale = normalized_budget_scale(opt.target_budget_scale);
+    if (std::abs(scale - 1.0) > 1e-12) {
+        int scaled = static_cast<int>(std::round(target_count * std::sqrt(scale)));
+        target_count = clamp_int(scaled, opt.target_m_min, opt.target_m_max);
+    }
+    target_count = std::min(target_count, static_cast<int>(rows.size()));
+
+    const int tier_a = std::min(opt.target_tier_a, target_count);
+    const int tier_b =
+        std::min(opt.target_tier_b, std::max(0, target_count - tier_a));
+
+    std::vector<TargetEntry> entries;
+    entries.reserve(static_cast<size_t>(target_count));
+    for (int i = 0; i < target_count; ++i) {
+        entries.push_back(TargetEntry{
+            rows[static_cast<size_t>(i)].n,
+            rows[static_cast<size_t>(i)].term,
+            tier_for_rank(i, tier_a, tier_b)});
+    }
+    return entries;
+}
+
+struct TierEarlyStop {
+    int min_passes = 0;
+    int patience_passes = 0;
+    int min_iters = 0;
+    int patience_iters = 0;
+};
+
+TierEarlyStop early_stop_defaults(TargetTier tier) {
+    switch (tier) {
+    case TargetTier::kA:
+        return TierEarlyStop{6, 3, 3000, 1200};
+    case TargetTier::kB:
+        return TierEarlyStop{4, 2, 1500, 800};
+    case TargetTier::kC:
+        return TierEarlyStop{3, 2, 800, 600};
+    }
+    return TierEarlyStop{};
+}
+
+void apply_compact_early_stop(compaction_contact::Params& params,
+                              TargetTier tier,
+                              const Options& opt) {
+    if (!opt.target_early_stop) {
+        params.early_stop.enabled = false;
+        return;
+    }
+    TierEarlyStop base = early_stop_defaults(tier);
+    params.early_stop.enabled = true;
+    params.early_stop.min_passes =
+        scale_count(base.min_passes, opt.target_budget_scale, 2, params.passes);
+    params.early_stop.patience_passes =
+        scale_count(base.patience_passes, opt.target_budget_scale, 1, params.passes);
+}
+
+void apply_sa_early_stop(SARefiner::Params& params,
+                         TargetTier tier,
+                         const Options& opt) {
+    if (!opt.target_early_stop) {
+        params.early_stop = false;
+        return;
+    }
+    TierEarlyStop base = early_stop_defaults(tier);
+    params.early_stop = true;
+    params.early_stop_check_interval = opt.target_sa_check_interval;
+    params.early_stop_min_iters =
+        scale_count(base.min_iters, opt.target_budget_scale, 400, params.iters);
+    params.early_stop_patience_iters =
+        scale_count(base.patience_iters, opt.target_budget_scale, 200, params.iters);
+}
+
+compaction_contact::Params make_compact_params(TargetTier tier, const Options& opt) {
+    compaction_contact::Params params;
+    params.passes = 12;
+    params.attempts_per_pass = 32;
+    params.patience = 4;
+    params.boundary_topk = 14;
+    params.push_bisect_iters = 12;
+    params.push_max_step_frac = 0.9;
+    params.plateau_eps = 1e-4;
+    params.alt_axis = true;
+    params.final_rigid = false;
+    params.quantize_decimals = 9;
+    apply_compact_early_stop(params, tier, opt);
+    return params;
+}
+
+double tier_scale(TargetTier tier) {
+    switch (tier) {
+    case TargetTier::kA:
+        return 1.0;
+    case TargetTier::kB:
+        return 0.70;
+    case TargetTier::kC:
+        return 0.50;
+    }
+    return 1.0;
+}
+
+SARefiner::Params make_targeted_sa_params(TargetTier tier,
+                                          const Options& opt,
+                                          int n) {
+    SARefiner::Params p;
+    const int base_iters = 2500 + 10 * n;
+    const double scale = normalized_budget_scale(opt.target_budget_scale);
+    p.iters = static_cast<int>(std::round(base_iters * tier_scale(tier) * scale));
+    p.t0 = 0.15;
+    p.t1 = 0.01;
+    p.w_micro = 0.8;
+    p.w_swap_rot = 0.25;
+    p.w_relocate = 0.15;
+    p.w_block_translate = (tier == TargetTier::kA) ? 0.08 : (tier == TargetTier::kB ? 0.06 : 0.04);
+    p.w_block_rotate = (tier == TargetTier::kA) ? 0.03 : (tier == TargetTier::kB ? 0.02 : 0.015);
+    p.w_lns = (tier == TargetTier::kA) ? 0.02 : (tier == TargetTier::kB ? 0.015 : 0.01);
+    p.w_push_contact = (tier == TargetTier::kA) ? 0.20 : (tier == TargetTier::kB ? 0.15 : 0.10);
+    p.w_squeeze = (tier == TargetTier::kA) ? 0.08 : (tier == TargetTier::kB ? 0.06 : 0.04);
+    p.block_size = 6;
+    p.lns_remove = std::max(6, n / 25);
+    p.lns_attempts_per_tree = (tier == TargetTier::kA) ? 40 : (tier == TargetTier::kB ? 30 : 20);
+    p.lns_candidates = (tier == TargetTier::kA) ? 3 : (tier == TargetTier::kB ? 2 : 1);
+    p.lns_p_contact = 0.55;
+    p.lns_p_uniform = 0.15;
+    p.push_bisect_iters = 12;
+    p.push_max_step_frac = 0.9;
+    p.plateau_eps = 1e-4;
+    p.quantize_decimals = 9;
+    return p;
+}
+
+bool use_soft_overlap(TargetTier tier, const Options& opt) {
+    if (!opt.target_soft_overlap) {
+        return false;
+    }
+    if (!opt.target_soft_overlap_tier_a_only) {
+        return true;
+    }
+    return tier == TargetTier::kA;
+}
+
+std::vector<TreePose> run_targeted_sa(SARefiner& sa,
+                                      const std::vector<TreePose>& start,
+                                      const Options& opt,
+                                      TargetTier tier,
+                                      int n,
+                                      uint64_t seed_base) {
+    SARefiner::Params base = make_targeted_sa_params(tier, opt, n);
+    if (base.iters <= 0) {
+        return start;
+    }
+
+    if (use_soft_overlap(tier, opt)) {
+        const int total_iters = base.iters;
+        const int soft_iters = std::max(
+            1, std::min(total_iters,
+                        static_cast<int>(std::round(total_iters * opt.target_soft_overlap_cut))));
+        const int hard_iters = total_iters - soft_iters;
+
+        std::vector<TreePose> seed_poses = start;
+        if (soft_iters > 0) {
+            SARefiner::Params soft = base;
+            soft.iters = soft_iters;
+            soft.overlap_metric = SARefiner::OverlapMetric::kArea;
+            soft.overlap_weight = 0.2;
+            soft.overlap_weight_start = 0.2;
+            soft.overlap_weight_end = 2e4;
+            soft.overlap_weight_geometric = true;
+            soft.w_resolve_overlap = 0.05;
+            soft.push_overshoot_frac = 0.10;
+            apply_sa_early_stop(soft, tier, opt);
+            SARefiner::Result res =
+                sa.refine_min_side(seed_poses, seed_base ^ 0xB5C8D57A3E4F29B1ULL, soft);
+            seed_poses = res.best_poses;
+        }
+
+        if (hard_iters > 0) {
+            SARefiner::Params hard = base;
+            hard.iters = hard_iters;
+            hard.overlap_weight = 0.0;
+            hard.overlap_weight_start = -1.0;
+            hard.overlap_weight_end = -1.0;
+            hard.overlap_weight_geometric = false;
+            hard.push_overshoot_frac = 0.0;
+            hard.w_resolve_overlap = 0.0;
+            apply_sa_early_stop(hard, tier, opt);
+            SARefiner::Result res =
+                sa.refine_min_side(seed_poses, seed_base ^ 0x8D1F5A9C7E3B2A41ULL, hard);
+            return res.best_poses;
+        }
+        return seed_poses;
+    }
+
+    apply_sa_early_stop(base, tier, opt);
+    SARefiner::Result res = sa.refine_min_side(start, seed_base, base);
+    return res.best_poses;
+}
+
+double recompute_total_score(const Polygon& base_poly,
+                             const std::vector<std::vector<TreePose>>& solutions_by_n,
+                             int n_max) {
+    double total = 0.0;
+    for (int n = 1; n <= n_max; ++n) {
+        const auto& sol = solutions_by_n[static_cast<size_t>(n)];
+        if (static_cast<int>(sol.size()) != n) {
+            continue;
+        }
+        const double side =
+            bounding_square_side(transformed_polygons(base_poly, sol));
+        total += (side * side) / static_cast<double>(n);
+    }
+    return total;
+}
+
+void run_targeted_refine(const Polygon& base_poly,
+                         double radius,
+                         std::vector<std::vector<TreePose>>& solutions_by_n,
+                         const Options& opt,
+                         double& total_score) {
+    if (!opt.target_refine) {
+        return;
+    }
+
+    double total_score_est = 0.0;
+    std::vector<TargetEntry> targets =
+        select_target_entries(base_poly, solutions_by_n, opt, &total_score_est);
+    if (targets.empty()) {
+        return;
+    }
+
+    const double plateau_eps = 1e-4;
+    SARefiner sa(base_poly, radius);
+    int improved_count = 0;
+    int tier_a = 0;
+    int tier_b = 0;
+    for (const auto& entry : targets) {
+        auto& sol = solutions_by_n[static_cast<size_t>(entry.n)];
+        if (static_cast<int>(sol.size()) != entry.n) {
+            continue;
+        }
+
+        if (entry.tier == TargetTier::kA) {
+            ++tier_a;
+        } else if (entry.tier == TargetTier::kB) {
+            ++tier_b;
+        }
+
+        auto base_q = quantize_poses(sol);
+        if (any_overlap(base_poly, base_q, radius)) {
+            continue;
+        }
+
+        SideArea best_eval = eval_side_area(base_poly, base_q);
+        SideArea orig_eval = best_eval;
+        std::vector<TreePose> best_sol = base_q;
+
+        uint64_t seed = opt.seed ^
+                        (0xC6BC279692B5CC83ULL +
+                         static_cast<uint64_t>(entry.n) * 0x9E3779B97F4A7C15ULL);
+        std::mt19937_64 rng(seed);
+        compaction_contact::Params cparams = make_compact_params(entry.tier, opt);
+        std::vector<TreePose> cand = best_sol;
+        compaction_contact::Stats cstats =
+            compaction_contact::compact_contact(base_poly, cand, cparams, rng);
+        if (cstats.ok) {
+            auto cand_q = quantize_poses(cand);
+            if (!any_overlap(base_poly, cand_q, radius)) {
+                SideArea cand_eval = eval_side_area(base_poly, cand_q);
+                if (improves_side_area(cand_eval, best_eval, plateau_eps)) {
+                    best_eval = cand_eval;
+                    best_sol = std::move(cand_q);
+                }
+            }
+        }
+
+        uint64_t sa_seed = opt.seed ^
+                           (0x9E3779B97F4A7C15ULL +
+                            static_cast<uint64_t>(entry.n) * 0xBF58476D1CE4E5B9ULL);
+        std::vector<TreePose> sa_out =
+            run_targeted_sa(sa, best_sol, opt, entry.tier, entry.n, sa_seed);
+        if (!sa_out.empty()) {
+            auto sa_q = quantize_poses(sa_out);
+            if (!any_overlap(base_poly, sa_q, radius)) {
+                SideArea sa_eval = eval_side_area(base_poly, sa_q);
+                if (improves_side_area(sa_eval, best_eval, plateau_eps)) {
+                    best_eval = sa_eval;
+                    best_sol = std::move(sa_q);
+                }
+            }
+        }
+
+        if (improves_side_area(best_eval, orig_eval, plateau_eps)) {
+            ++improved_count;
+        }
+        sol = std::move(best_sol);
+    }
+
+    const int tier_c = static_cast<int>(targets.size()) - tier_a - tier_b;
+    std::cout << "Targeted refine: " << targets.size() << " targets"
+              << " (tierA=" << tier_a
+              << ", tierB=" << tier_b
+              << ", tierC=" << tier_c
+              << ", cover=" << std::fixed << std::setprecision(3)
+              << std::min(1.0, std::max(0.0, opt.target_cover))
+              << ", improved=" << improved_count << ")\n";
+    total_score = recompute_total_score(base_poly, solutions_by_n, opt.n_max);
+}
 
 double total_score_min_sides(const std::vector<double>& prefix_side_by_n,
                              const std::vector<double>* prune_side_by_n,
@@ -371,7 +813,12 @@ int main(int argc, char** argv) {
 
         std::vector<TreePose> poses_pool = std::move(chosen.best_poses);
 
-        refine_boundary(base_poly, radius, poses_pool, opt.refine_iters, opt.seed + 999, spacing);
+        BoundaryRefineParams params;
+        params.radius = radius;
+        params.iters = opt.refine_iters;
+        params.seed = opt.seed + 999;
+        params.step_hint = spacing;
+        refine_boundary(base_poly, poses_pool, params);
 
         // Reordena por "centralidade" após o refino (melhora recortes n pequenos).
         {
@@ -578,6 +1025,7 @@ int main(int argc, char** argv) {
                 p.w_block_rotate = opt.sa_w_block_rotate;
                 p.w_lns = opt.sa_w_lns;
                 p.w_push_contact = opt.sa_w_push_contact;
+                p.w_slide_contact = opt.sa_w_slide_contact;
                 p.w_squeeze = opt.sa_w_squeeze;
                 p.block_size = opt.sa_block_size;
                 p.lns_remove = opt.sa_lns_remove;
@@ -602,6 +1050,12 @@ int main(int argc, char** argv) {
                 p.push_max_step_frac = opt.sa_push_max_step_frac;
                 p.push_bisect_iters = opt.sa_push_bisect_iters;
                 p.push_overshoot_frac = opt.sa_push_overshoot_frac;
+                p.slide_dirs = opt.sa_slide_dirs;
+                p.slide_dir_bias = opt.sa_slide_dir_bias;
+                p.slide_max_step_frac = opt.sa_slide_max_step_frac;
+                p.slide_bisect_iters = opt.sa_slide_bisect_iters;
+                p.slide_min_gain = opt.sa_slide_min_gain;
+                p.slide_schedule_max_frac = opt.sa_slide_schedule_max_frac;
                 p.squeeze_pushes = opt.sa_squeeze_pushes;
                 if (opt.sa_aggressive) {
                     SARefiner::apply_aggressive_preset(p);
@@ -640,6 +1094,8 @@ int main(int argc, char** argv) {
 
             total_score = total_score_sa;
         }
+
+        run_targeted_refine(base_poly, radius, solutions_by_n, opt, total_score);
 
         // Pós-processamento "final rigid": otimiza um ângulo global por n.
         if (opt.final_rigid) {
@@ -742,6 +1198,7 @@ int main(int argc, char** argv) {
         std::cout << "Score (local): " << std::fixed << std::setprecision(9) << total_score << "\n";
         std::cout << "Prune: " << (opt.prune ? "on" : "off") << "\n";
         std::cout << "Final rigid: " << (opt.final_rigid ? "on" : "off") << "\n";
+        std::cout << "Target refine: " << (opt.target_refine ? "on" : "off") << "\n";
         std::cout << "Micro adjust: " << (use_micro ? "on" : "off");
         if (use_micro) {
             std::cout << " (rot_eps=" << opt.micro_rot_eps
