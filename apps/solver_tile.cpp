@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -41,6 +42,77 @@ enum class TargetTier {
     kB,
     kC,
 };
+
+constexpr std::array<const char*, SARefiner::kNumOps> kHhOpNames = {
+    "micro",
+    "swap_rot",
+    "relocate",
+    "block_translate",
+    "block_rotate",
+    "lns",
+    "push_contact",
+    "slide_contact",
+    "squeeze",
+    "global_rotate",
+    "eject_chain",
+    "resolve_overlap",
+};
+
+SARefiner::HHState aggregate_hh_states(const std::vector<SARefiner::HHState>& states,
+                                       int n_lo,
+                                       int n_hi) {
+    SARefiner::HHState out;
+    int count = 0;
+    for (int n = n_lo; n <= n_hi; ++n) {
+        if (n < 0 || n >= static_cast<int>(states.size())) {
+            continue;
+        }
+        const SARefiner::HHState& state = states[static_cast<size_t>(n)];
+        if (!state.initialized) {
+            continue;
+        }
+        for (size_t k = 0; k < kHhOpNames.size(); ++k) {
+            out.weights[k] += state.weights[k];
+            out.op_score[k] += state.op_score[k];
+            out.op_uses[k] += state.op_uses[k];
+        }
+        count += 1;
+    }
+    if (count > 0) {
+        for (size_t k = 0; k < kHhOpNames.size(); ++k) {
+            out.weights[k] /= static_cast<double>(count);
+            out.op_score[k] /= static_cast<double>(count);
+        }
+        out.initialized = true;
+    }
+    return out;
+}
+
+void dump_hh_bucket(const char* label, const SARefiner::HHState& state) {
+    if (!state.initialized) {
+        std::cout << "SA HH bucket " << label << ": empty\n";
+        return;
+    }
+    const std::ios::fmtflags flags = std::cout.flags();
+    const std::streamsize precision = std::cout.precision();
+    std::cout.setf(std::ios::fixed);
+    std::cout << std::setprecision(4);
+
+    std::cout << "SA HH bucket " << label << " weights:";
+    for (size_t k = 0; k < kHhOpNames.size(); ++k) {
+        std::cout << " " << kHhOpNames[k] << "=" << state.weights[k];
+    }
+    std::cout << "\n";
+
+    std::cout << "SA HH bucket " << label << " uses:";
+    for (size_t k = 0; k < kHhOpNames.size(); ++k) {
+        std::cout << " " << kHhOpNames[k] << "=" << state.op_uses[k];
+    }
+    std::cout << "\n";
+
+    std::cout.flags(flags);
+    std::cout.precision(precision);
+}
 
 struct SideArea {
     double side = 0.0;
@@ -1014,6 +1086,8 @@ int main(int argc, char** argv) {
         if (opt.sa_restarts > 0 && opt.sa_base_iters > 0) {
             double total_score_sa = 0.0;
             SARefiner sa(base_poly, radius);
+            std::vector<SARefiner::HHState> hh_states(
+                static_cast<size_t>(std::max(0, opt.n_max) + 1));
 
             for (int n = 1; n <= opt.n_max; ++n) {
                 SARefiner::Params p;
@@ -1033,6 +1107,7 @@ int main(int argc, char** argv) {
                 p.lns_eval_attempts_per_tree = opt.sa_lns_eval_attempts_per_tree;
                 p.hh_segment = opt.sa_hh_segment;
                 p.hh_reaction = opt.sa_hh_reaction;
+                p.hh_auto = opt.sa_hh_auto;
                 p.overlap_metric = opt.sa_overlap_metric;
                 p.overlap_weight = opt.sa_overlap_weight;
                 p.overlap_weight_start = opt.sa_overlap_weight_start;
@@ -1060,6 +1135,9 @@ int main(int argc, char** argv) {
                 if (opt.sa_aggressive) {
                     SARefiner::apply_aggressive_preset(p);
                 }
+                if (opt.sa_hh_auto) {
+                    SARefiner::apply_hh_auto_preset(p);
+                }
 
                 std::vector<TreePose> best_sol =
                     solutions_by_n[static_cast<size_t>(n)];
@@ -1072,8 +1150,10 @@ int main(int argc, char** argv) {
                         (0x9e3779b97f4a7c15ULL +
                          static_cast<uint64_t>(n) * 0xbf58476d1ce4e5b9ULL +
                          static_cast<uint64_t>(r) * 0x94d049bb133111ebULL);
+                    SARefiner::HHState* hh_state =
+                        opt.sa_hh_auto ? &hh_states[static_cast<size_t>(n)] : nullptr;
                     SARefiner::Result res =
-                        sa.refine_min_side(best_sol, seed, p);
+                        sa.refine_min_side(best_sol, seed, p, nullptr, hh_state);
 
                     auto cand_q = quantize_poses(res.best_poses);
                     if (any_overlap(base_poly, cand_q, radius)) {
@@ -1090,6 +1170,12 @@ int main(int argc, char** argv) {
                 solutions_by_n[static_cast<size_t>(n)] = best_sol;
                 total_score_sa += (best_side * best_side) /
                                   static_cast<double>(n);
+            }
+
+            if (opt.sa_hh_auto) {
+                dump_hh_bucket("1-25", aggregate_hh_states(hh_states, 1, 25));
+                dump_hh_bucket("26-80", aggregate_hh_states(hh_states, 26, 80));
+                dump_hh_bucket("81-200", aggregate_hh_states(hh_states, 81, opt.n_max));
             }
 
             total_score = total_score_sa;
@@ -1227,6 +1313,7 @@ int main(int argc, char** argv) {
         } else if (!opt.sa_beam) {
             std::cout << "SA chain: off\n";
         }
+        std::cout << "SA HH mode: " << (opt.sa_hh_auto ? "auto" : "off") << "\n";
         std::cout << "SA aggressive: " << (opt.sa_aggressive ? "on" : "off") << "\n";
 
     } catch (const std::exception& ex) {

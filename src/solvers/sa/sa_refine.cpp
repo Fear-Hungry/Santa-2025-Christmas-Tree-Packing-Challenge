@@ -64,6 +64,7 @@ namespace {
         using Result = SARefiner::Result;
         using Params = SARefiner::Params;
         using OverlapMetric = SARefiner::OverlapMetric;
+        using HHState = SARefiner::HHState;
 
         RefineContext(const SARefiner& refiner,
                       const Polygon& base_poly,
@@ -72,7 +73,8 @@ namespace {
                       const std::vector<TreePose>& start,
                       uint64_t seed,
                       const Params& params,
-                      const std::vector<char>* active_mask)
+                      const std::vector<char>* active_mask,
+                      HHState* hh_state)
             : refiner(refiner),
               base_poly_(base_poly),
               base_tris_(base_tris),
@@ -80,7 +82,8 @@ namespace {
               start(start),
               seed(seed),
               p(params),
-              active_mask(active_mask) {}
+              active_mask(active_mask),
+              hh_state(hh_state) {}
 
         Result run() {
             const int n = static_cast<int>(start.size());
@@ -369,13 +372,26 @@ namespace {
             	            weights[kSlideContact] = 0.0;
             	            weights[kSqueeze] = 0.0;
             	        }
+            const bool hh_auto = p.hh_auto;
+            auto lns_effective_remove = [&](int want_remove) -> int {
+                if (n <= 2 || want_remove <= 0) {
+                    return 0;
+                }
+                int m = std::min(std::max(1, want_remove), n - 1);
+                if (hh_auto && n <= 8) {
+                    m = std::min(m, std::max(1, n / 3));
+                }
+                return m;
+            };
+            const int lns_remove_effective = lns_effective_remove(p.lns_remove);
+
             	        std::array<double, kNumOps> op_cost = {
             	            1.0,
             	            2.0,
             	            static_cast<double>(std::max(1, p.relocate_attempts)),
                 static_cast<double>(std::max(1, p.block_size)),
                 static_cast<double>(std::max(1, p.block_size)),
-                static_cast<double>(std::max(1, p.lns_remove)) *
+                static_cast<double>(std::max(1, lns_remove_effective)) *
                     static_cast<double>(std::max(1, p.lns_attempts_per_tree)) *
                     static_cast<double>(std::max(1, p.lns_candidates)),
                 static_cast<double>(std::max(1, p.push_bisect_iters)),
@@ -410,9 +426,31 @@ namespace {
             	            weights[kMicro] = 1.0;
             	        }
 
+            HHState* state = hh_auto ? hh_state : nullptr;
+            if (state && state->initialized) {
+                for (int k = 0; k < kNumOps; ++k) {
+                    if (enabled[static_cast<size_t>(k)]) {
+                        weights[static_cast<size_t>(k)] =
+                            std::max(0.0, state->weights[static_cast<size_t>(k)]);
+                    } else {
+                        weights[static_cast<size_t>(k)] = 0.0;
+                    }
+                }
+            }
+
             	        std::array<double, kNumOps> op_score = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             	                                               0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
             	        std::array<int, kNumOps> op_uses = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+            if (state && state->initialized) {
+                op_score = state->op_score;
+                op_uses = state->op_uses;
+                for (int k = 0; k < kNumOps; ++k) {
+                    if (!enabled[static_cast<size_t>(k)]) {
+                        op_score[static_cast<size_t>(k)] = 0.0;
+                        op_uses[static_cast<size_t>(k)] = 0;
+                    }
+                }
+            }
 
             double slide_schedule_frac = 0.0;
             auto effective_weight = [&](int op) -> double {
@@ -595,18 +633,14 @@ namespace {
                 }
             };
 
-            	        std::array<double, kNumOps> min_w = {p.hh_min_weight,
-            	                                             p.hh_min_weight,
-            	                                             p.hh_min_weight,
-            	                                             0.0,
-            	                                             0.0,
-            	                                             0.0,
-            	                                             0.0,
-            	                                             0.0,
-            	                                             0.0,
-            	                                             0.0,
-            	                                             0.0,
-            	                                             0.0};
+            std::array<double, kNumOps> min_w{};
+            if (hh_auto) {
+                min_w.fill(p.hh_min_weight);
+            } else {
+                min_w[static_cast<size_t>(kMicro)] = p.hh_min_weight;
+                min_w[static_cast<size_t>(kSwapRot)] = p.hh_min_weight;
+                min_w[static_cast<size_t>(kRelocate)] = p.hh_min_weight;
+            }
             const double max_block_w =
                 (p.hh_max_block_weight > 0.0) ? p.hh_max_block_weight
                                               : std::numeric_limits<double>::infinity();
@@ -625,6 +659,100 @@ namespace {
             	                                             std::numeric_limits<double>::infinity(),
             	                                             max_lns_w,
             	                                             max_lns_w};
+
+            auto normalize_weights = [&]() {
+                std::array<double, kNumOps> base = weights;
+                std::array<char, kNumOps> fixed{};
+                for (int k = 0; k < kNumOps; ++k) {
+                    if (!enabled[static_cast<size_t>(k)]) {
+                        weights[static_cast<size_t>(k)] = 0.0;
+                        base[static_cast<size_t>(k)] = 0.0;
+                        fixed[static_cast<size_t>(k)] = 1;
+                    }
+                }
+                for (int k = 0; k < kNumOps; ++k) {
+                    if (fixed[static_cast<size_t>(k)]) {
+                        continue;
+                    }
+                    base[static_cast<size_t>(k)] =
+                        std::max(base[static_cast<size_t>(k)],
+                                 min_w[static_cast<size_t>(k)]);
+                }
+
+                double remaining = 1.0;
+                for (int iter = 0; iter < kNumOps; ++iter) {
+                    double sum_base = 0.0;
+                    int free_count = 0;
+                    for (int k = 0; k < kNumOps; ++k) {
+                        if (fixed[static_cast<size_t>(k)]) {
+                            continue;
+                        }
+                        sum_base += base[static_cast<size_t>(k)];
+                        free_count += 1;
+                    }
+                    if (free_count == 0) {
+                        break;
+                    }
+                    if (!(sum_base > 0.0)) {
+                        const double share = remaining / static_cast<double>(free_count);
+                        for (int k = 0; k < kNumOps; ++k) {
+                            if (fixed[static_cast<size_t>(k)]) {
+                                continue;
+                            }
+                            weights[static_cast<size_t>(k)] = share;
+                        }
+                        break;
+                    }
+
+                    const double scale = remaining / sum_base;
+                    bool any_fixed = false;
+                    for (int k = 0; k < kNumOps; ++k) {
+                        if (fixed[static_cast<size_t>(k)]) {
+                            continue;
+                        }
+                        double w = base[static_cast<size_t>(k)] * scale;
+                        const double lo = min_w[static_cast<size_t>(k)];
+                        const double hi = max_w[static_cast<size_t>(k)];
+                        if (w < lo) {
+                            w = lo;
+                            fixed[static_cast<size_t>(k)] = 1;
+                            remaining -= w;
+                            any_fixed = true;
+                        } else if (w > hi) {
+                            w = hi;
+                            fixed[static_cast<size_t>(k)] = 1;
+                            remaining -= w;
+                            any_fixed = true;
+                        }
+                        weights[static_cast<size_t>(k)] = w;
+                    }
+
+                    if (remaining < 0.0) {
+                        double sum = 0.0;
+                        for (int k = 0; k < kNumOps; ++k) {
+                            if (enabled[static_cast<size_t>(k)]) {
+                                sum += weights[static_cast<size_t>(k)];
+                            }
+                        }
+                        if (sum > 0.0) {
+                            const double inv = 1.0 / sum;
+                            for (int k = 0; k < kNumOps; ++k) {
+                                if (enabled[static_cast<size_t>(k)]) {
+                                    weights[static_cast<size_t>(k)] *= inv;
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    if (!any_fixed) {
+                        break;
+                    }
+                }
+            };
+
+            if (hh_auto) {
+                normalize_weights();
+            }
 
             auto maybe_update_controller = [&](int t) {
                 if (p.hh_segment <= 0 || p.hh_reaction <= 0.0) {
@@ -645,11 +773,16 @@ namespace {
                                  static_cast<double>(uses);
                     double w = weights[static_cast<size_t>(k)];
                     w = (1.0 - p.hh_reaction) * w + p.hh_reaction * avg;
-                    w = std::max(min_w[static_cast<size_t>(k)],
-                                 std::min(max_w[static_cast<size_t>(k)], w));
+                    if (!hh_auto) {
+                        w = std::max(min_w[static_cast<size_t>(k)],
+                                     std::min(max_w[static_cast<size_t>(k)], w));
+                    }
                     weights[static_cast<size_t>(k)] = w;
                     op_score[static_cast<size_t>(k)] = 0.0;
                     op_uses[static_cast<size_t>(k)] = 0;
+                }
+                if (hh_auto) {
+                    normalize_weights();
                 }
             };
 
@@ -1462,6 +1595,13 @@ namespace {
                 }
             }
 
+            if (state) {
+                state->weights = weights;
+                state->op_score = op_score;
+                state->op_uses = op_uses;
+                state->initialized = true;
+            }
+
             best.final_poses = poses;
             best.final_side = curr_side;
             best.final_overlap = curr_overlap;
@@ -1485,6 +1625,7 @@ namespace {
         const uint64_t seed;
         const Params& p;
         const std::vector<char>* active_mask;
+        HHState* hh_state;
     };
 
 }  // namespace
@@ -1492,7 +1633,9 @@ namespace {
 SARefiner::Result SARefiner::refine_min_side(const std::vector<TreePose>& start,
                                          uint64_t seed,
                                          const Params& p,
-                                         const std::vector<char>* active_mask) const {
-    RefineContext ctx(*this, base_poly_, base_tris_, radius_, start, seed, p, active_mask);
+                                         const std::vector<char>* active_mask,
+                                         HHState* hh_state) const {
+    RefineContext ctx(*this, base_poly_, base_tris_, radius_, start, seed, p, active_mask,
+                      hh_state);
     return ctx.run();
 }

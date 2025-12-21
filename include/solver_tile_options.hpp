@@ -56,6 +56,7 @@ struct Options {
     int sa_lns_eval_attempts_per_tree = 0;
     int sa_hh_segment = 50;
     double sa_hh_reaction = 0.20;
+    bool sa_hh_auto = false;
     SARefiner::OverlapMetric sa_overlap_metric = SARefiner::OverlapMetric::kArea;
     double sa_overlap_weight = 0.0;
     double sa_overlap_weight_start = -1.0;

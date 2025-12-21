@@ -1,27 +1,7 @@
-# Minimal Makefile shim for santa-lab tooling (CMake-backed build).
+# NOTE: CMake is the source of truth for this repository.
+# This Makefile is a small convenience wrapper used by tooling (e.g. santa-lab /
+# santa-pipeline) that expects `make` to exist at the repo root.
+#
+# The actual wrapper rules live in `convenience.mk`.
 
-BUILD_DIR ?= build
-CMAKE ?= cmake
-JOBS ?= 8
-
-TARGETS := solver_tile \
-	solver_tessellation \
-	blend_repair \
-	ensemble_submissions \
-	score_submission \
-	solver_baseline \
-	compact_contact \
-	tile_density_search
-
-.PHONY: all $(TARGETS) clean
-
-all: $(TARGETS)
-
-$(BUILD_DIR)/CMakeCache.txt:
-	$(CMAKE) -S . -B $(BUILD_DIR)
-
-$(TARGETS): $(BUILD_DIR)/CMakeCache.txt
-	$(CMAKE) --build $(BUILD_DIR) -j $(JOBS) --target $@
-
-clean:
-	$(CMAKE) --build $(BUILD_DIR) --target clean
+include convenience.mk

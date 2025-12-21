@@ -75,6 +75,19 @@ def _resolve_exe(candidates: list[str]) -> str:
     return candidates[0]
 
 
+def _default_repair_out(ensemble_out: str) -> str:
+    out_dir = os.path.dirname(ensemble_out)
+    base = os.path.basename(ensemble_out)
+
+    if base == "submission_ensemble.csv":
+        name = "submission_repair.csv"
+    else:
+        stem = base[:-4] if base.lower().endswith(".csv") else base
+        name = f"{stem}_repair.csv"
+
+    return os.path.join(out_dir, name) if out_dir else name
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=(
@@ -162,6 +175,31 @@ def main() -> int:
         "--cross-check-n",
         action="store_true",
         help="Força s_n <= s_{n+1} via remoção de 1 árvore da solução de n+1.",
+    )
+    ap.add_argument(
+        "--blend-repair",
+        action="store_true",
+        help="Roda blend_repair após o ensemble e scoreia o resultado.",
+    )
+    ap.add_argument(
+        "--blend-repair-out",
+        default=None,
+        help="CSV de saída do blend_repair (default: derivado de --out).",
+    )
+    ap.add_argument(
+        "--blend-repair-preset",
+        choices=["default", "hunt"],
+        default="hunt",
+        help=(
+            "Preset para o blend_repair. 'hunt' usa parâmetros fortes e (se existir) "
+            "aplica --base submissions/submission_best.csv --target-top 20."
+        ),
+    )
+    ap.add_argument(
+        "--blend-repair-arg",
+        action="append",
+        default=[],
+        help="Argumento extra para o blend_repair (pode repetir; vem depois do preset).",
     )
     ap.add_argument(
         "--keep-going",
@@ -291,6 +329,7 @@ def main() -> int:
 
     ensemble_bin = _resolve_exe(["./bin/ensemble_submissions", "./ensemble_submissions", "ensemble_submissions"])
     score_bin = _resolve_exe(["./bin/score_submission", "./score_submission", "score_submission"])
+    repair_bin = _resolve_exe(["./bin/blend_repair", "./blend_repair", "blend_repair"])
 
     ensemble_cmd = [ensemble_bin, args.out, *run_paths]
     if args.no_final_rigid:
@@ -300,6 +339,46 @@ def main() -> int:
 
     subprocess.run(ensemble_cmd, check=True)
     subprocess.run([score_bin, args.out], check=True)
+
+    if args.blend_repair:
+        repair_out = args.blend_repair_out or _default_repair_out(args.out)
+        os.makedirs(os.path.dirname(repair_out) or ".", exist_ok=True)
+
+        preset_args: list[str] = []
+        if args.blend_repair_preset == "hunt":
+            preset_args += [
+                "--topk-per-n",
+                "60",
+                "--blend-iters",
+                "1200",
+                "--repair-passes",
+                "900",
+                "--repair-mtv-passes",
+                "200",
+                "--sa-iters",
+                "600",
+                "--sa-restarts",
+                "1",
+            ]
+
+            best_path = os.path.join("submissions", "submission_best.csv")
+            user_args = list(args.blend_repair_arg)
+            if "--base" not in user_args and os.path.exists(best_path):
+                preset_args += ["--base", best_path, "--target-top", "20"]
+
+        repair_inputs: list[str] = list(run_paths)
+        if args.out not in repair_inputs:
+            repair_inputs.append(args.out)
+
+        repair_cmd = [repair_bin, repair_out, *repair_inputs, *preset_args, *args.blend_repair_arg]
+        log_path = os.path.join(os.path.dirname(repair_out) or ".", "blend_repair.log")
+        with open(log_path, "w", encoding="utf-8") as lf:
+            lf.write(" ".join(repair_cmd) + "\n")
+            lf.flush()
+            subprocess.run(repair_cmd, check=True, stdout=lf, stderr=subprocess.STDOUT, text=True)
+
+        subprocess.run([score_bin, repair_out], check=True)
+
     return 0
 
 

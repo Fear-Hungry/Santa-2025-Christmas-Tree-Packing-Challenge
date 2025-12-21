@@ -1,6 +1,7 @@
 #include "prefix_prune.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -32,6 +33,16 @@ Extents compute_extents(const std::vector<BoundingBox>& bbs) {
 
 double side_from_extents(const Extents& e) {
     return std::max(e.max_x - e.min_x, e.max_y - e.min_y);
+}
+
+size_t hh_bucket_for_n(int n) {
+    if (n <= 25) {
+        return 0;
+    }
+    if (n <= 80) {
+        return 1;
+    }
+    return 2;
 }
 
 std::vector<int> boundary_indices(const std::vector<BoundingBox>& bbs,
@@ -365,6 +376,9 @@ ILSResult ils_basin_hop_compact_impl(const Polygon& base_poly,
     };
 
     SARefiner sa(base_poly, radius);
+    std::array<SARefiner::HHState, 3> hh_states;
+    SARefiner::HHState* hh_state =
+        opt.sa_hh_auto ? &hh_states[hh_bucket_for_n(n)] : nullptr;
 
     for (int it = 0; it < opt.ils_iters; ++it) {
         std::vector<TreePose> cand = curr;
@@ -403,6 +417,7 @@ ILSResult ils_basin_hop_compact_impl(const Polygon& base_poly,
             p.lns_eval_attempts_per_tree = opt.sa_lns_eval_attempts_per_tree;
             p.hh_segment = opt.sa_hh_segment;
             p.hh_reaction = opt.sa_hh_reaction;
+            p.hh_auto = opt.sa_hh_auto;
             p.overlap_metric = opt.sa_overlap_metric;
             p.overlap_weight = opt.sa_overlap_weight;
             p.overlap_weight_start = opt.sa_overlap_weight_start;
@@ -430,6 +445,9 @@ ILSResult ils_basin_hop_compact_impl(const Polygon& base_poly,
             if (opt.sa_aggressive) {
                 SARefiner::apply_aggressive_preset(p);
             }
+            if (opt.sa_hh_auto) {
+                SARefiner::apply_hh_auto_preset(p);
+            }
 
             double best_local_side = std::numeric_limits<double>::infinity();
             std::vector<TreePose> best_local = cand;
@@ -437,7 +455,8 @@ ILSResult ils_basin_hop_compact_impl(const Polygon& base_poly,
                 uint64_t sr =
                     cand_seed ^
                     (0x94D049BB133111EBULL + static_cast<uint64_t>(r) * 0xBF58476D1CE4E5B9ULL);
-                SARefiner::Result res = sa.refine_min_side(cand, sr, p);
+                SARefiner::Result res =
+                    sa.refine_min_side(cand, sr, p, nullptr, hh_state);
                 if (!std::isfinite(res.best_side)) {
                     continue;
                 }
@@ -522,6 +541,9 @@ ILSResult mz_its_soft_compact_impl(const Polygon& base_poly,
     out.best_side = start_side;
 
     SARefiner sa(base_poly, radius);
+    std::array<SARefiner::HHState, 3> hh_states;
+    SARefiner::HHState* hh_state =
+        opt.sa_hh_auto ? &hh_states[hh_bucket_for_n(n)] : nullptr;
 
     auto build_common_params = [&]() -> SARefiner::Params {
         SARefiner::Params p;
@@ -540,6 +562,7 @@ ILSResult mz_its_soft_compact_impl(const Polygon& base_poly,
         p.lns_eval_attempts_per_tree = opt.sa_lns_eval_attempts_per_tree;
         p.hh_segment = opt.sa_hh_segment;
         p.hh_reaction = opt.sa_hh_reaction;
+        p.hh_auto = opt.sa_hh_auto;
         p.overlap_metric = opt.sa_overlap_metric;
         p.overlap_eps_area = opt.sa_overlap_eps_area;
         p.overlap_cost_cap = opt.sa_overlap_cost_cap;
@@ -561,6 +584,9 @@ ILSResult mz_its_soft_compact_impl(const Polygon& base_poly,
         if (opt.sa_aggressive) {
             SARefiner::apply_aggressive_preset(p);
         }
+        if (opt.sa_hh_auto) {
+            SARefiner::apply_hh_auto_preset(p);
+        }
         return p;
     };
 
@@ -580,7 +606,8 @@ ILSResult mz_its_soft_compact_impl(const Polygon& base_poly,
         pa.w_push_contact = opt.mz_w_push_contact;
         pa.push_overshoot_frac = std::max(0.0, opt.mz_push_overshoot_a);
 
-        SARefiner::Result ra = sa.refine_min_side(start, s ^ 0xA93F1C2D3E4B5A67ULL, pa);
+        SARefiner::Result ra =
+            sa.refine_min_side(start, s ^ 0xA93F1C2D3E4B5A67ULL, pa, nullptr, hh_state);
         if (ra.final_poses.empty()) {
             return ra;
         }
@@ -599,7 +626,11 @@ ILSResult mz_its_soft_compact_impl(const Polygon& base_poly,
         pb.w_push_contact = opt.mz_w_push_contact;
         pb.push_overshoot_frac = std::max(0.0, opt.mz_push_overshoot_b);
 
-        return sa.refine_min_side(ra.final_poses, s ^ 0x7C3A5D1E9B4F2601ULL, pb);
+        return sa.refine_min_side(ra.final_poses,
+                                  s ^ 0x7C3A5D1E9B4F2601ULL,
+                                  pb,
+                                  nullptr,
+                                  hh_state);
     };
 
     auto swap_tabu_search = [&](const std::vector<TreePose>& start_in,
@@ -1311,6 +1342,7 @@ ChainResult build_sa_chain_solutions(const Polygon& base_poly,
     }
 
     SARefiner sa(base_poly, radius);
+    std::array<SARefiner::HHState, 3> hh_states;
 
     std::vector<TreePose> curr = start_nmax;
     for (int n = n_max; n >= 1; --n) {
@@ -1346,6 +1378,7 @@ ChainResult build_sa_chain_solutions(const Polygon& base_poly,
             p.lns_eval_attempts_per_tree = opt.sa_lns_eval_attempts_per_tree;
             p.hh_segment = opt.sa_hh_segment;
             p.hh_reaction = opt.sa_hh_reaction;
+            p.hh_auto = opt.sa_hh_auto;
             p.overlap_metric = opt.sa_overlap_metric;
             p.overlap_weight = opt.sa_overlap_weight;
             p.overlap_weight_start = opt.sa_overlap_weight_start;
@@ -1373,12 +1406,18 @@ ChainResult build_sa_chain_solutions(const Polygon& base_poly,
             if (opt.sa_aggressive) {
                 SARefiner::apply_aggressive_preset(p);
             }
+            if (opt.sa_hh_auto) {
+                SARefiner::apply_hh_auto_preset(p);
+            }
 
             uint64_t seed =
                 opt.seed ^
                 (0x632be59bd9b4e019ULL +
                  static_cast<uint64_t>(n) * 0xbf58476d1ce4e5b9ULL);
-            SARefiner::Result res = sa.refine_min_side(curr, seed, p, &active);
+            SARefiner::HHState* hh_state =
+                opt.sa_hh_auto ? &hh_states[hh_bucket_for_n(n)] : nullptr;
+            SARefiner::Result res =
+                sa.refine_min_side(curr, seed, p, &active, hh_state);
             auto cand_q = quantize_poses(res.best_poses);
             if (!any_overlap(base_poly, cand_q, radius)) {
                 double old_side =
@@ -1432,6 +1471,7 @@ ChainResult build_sa_beam_chain_solutions(const Polygon& base_poly,
     }
 
     SARefiner sa(base_poly, radius);
+    std::array<SARefiner::HHState, 3> hh_states;
 
     struct BeamState {
         std::vector<TreePose> poses;
@@ -1473,6 +1513,7 @@ ChainResult build_sa_beam_chain_solutions(const Polygon& base_poly,
         p.lns_eval_attempts_per_tree = opt.sa_lns_eval_attempts_per_tree;
         p.hh_segment = opt.sa_hh_segment;
         p.hh_reaction = opt.sa_hh_reaction;
+        p.hh_auto = opt.sa_hh_auto;
         p.overlap_metric = opt.sa_overlap_metric;
         p.overlap_weight = opt.sa_overlap_weight;
         p.overlap_weight_start = opt.sa_overlap_weight_start;
@@ -1500,8 +1541,14 @@ ChainResult build_sa_beam_chain_solutions(const Polygon& base_poly,
         if (opt.sa_aggressive) {
             SARefiner::apply_aggressive_preset(p);
         }
+        if (opt.sa_hh_auto) {
+            SARefiner::apply_hh_auto_preset(p);
+        }
 
-        SARefiner::Result res = sa.refine_min_side(poses, seed, p, &active);
+            SARefiner::HHState* hh_state =
+                opt.sa_hh_auto ? &hh_states[hh_bucket_for_n(n)] : nullptr;
+            SARefiner::Result res =
+                sa.refine_min_side(poses, seed, p, &active, hh_state);
         auto cand_q = quantize_poses(res.best_poses);
         if (!any_overlap(base_poly, cand_q, radius)) {
             double old_side = side_from_extents(e);

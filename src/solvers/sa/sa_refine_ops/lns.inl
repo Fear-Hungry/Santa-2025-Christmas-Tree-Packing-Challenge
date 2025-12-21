@@ -27,7 +27,7 @@
                     continue;
                 }
 
-                int m = std::min(std::max(1, p.lns_remove), n - 1);
+                int m = lns_effective_remove(p.lns_remove);
                 if (static_cast<int>(boundary.size()) < m) {
                     m = static_cast<int>(boundary.size());
                 }

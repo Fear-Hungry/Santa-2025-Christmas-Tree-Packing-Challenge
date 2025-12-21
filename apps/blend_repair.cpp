@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -25,6 +26,16 @@ struct Extents {
     double min_y;
     double max_y;
 };
+
+size_t hh_bucket_for_n(int n) {
+    if (n <= 25) {
+        return 0;
+    }
+    if (n <= 80) {
+        return 1;
+    }
+    return 2;
+}
 
 struct Options {
     int n_min = 1;
@@ -86,6 +97,7 @@ struct Options {
     int sa_lns_eval_attempts_per_tree = 0;
     int sa_hh_segment = 50;
     double sa_hh_reaction = 0.20;
+    bool sa_hh_auto = false;
     double sa_step_frac_max = 0.10;
     double sa_step_frac_min = 0.004;
     double sa_ddeg_max = 20.0;
@@ -1604,6 +1616,7 @@ bool apply_global_contraction(const Polygon& base_poly,
     CandidateSol best = io;
     std::vector<TreePose> curr = io.poses;
     SARefiner sep(base_poly, radius);
+    std::array<SARefiner::HHState, 3> hh_states;
     const double thr = 2.0 * radius + 1e-9;
     const double thr_sq = thr * thr;
 
@@ -1725,6 +1738,7 @@ bool apply_global_contraction(const Polygon& base_poly,
             p.lns_eval_attempts_per_tree = opt.sa_lns_eval_attempts_per_tree;
             p.hh_segment = opt.sa_hh_segment;
             p.hh_reaction = opt.sa_hh_reaction;
+            p.hh_auto = opt.sa_hh_auto;
             p.overlap_metric = opt.sa_overlap_metric;
             p.overlap_weight = opt.sa_overlap_weight;
             p.overlap_weight_start = opt.sa_overlap_weight_start;
@@ -1754,16 +1768,23 @@ bool apply_global_contraction(const Polygon& base_poly,
             if (opt.sa_aggressive) {
                 SARefiner::apply_aggressive_preset(p);
             }
+            if (opt.sa_hh_auto) {
+                SARefiner::apply_hh_auto_preset(p);
+            }
 
             double best_sa_side = std::numeric_limits<double>::infinity();
             std::vector<TreePose> best_sa = curr;
+            SARefiner::HHState* hh_state =
+                opt.sa_hh_auto ? &hh_states[hh_bucket_for_n(static_cast<int>(curr.size()))]
+                               : nullptr;
             for (int r = 0; r < opt.sa_restarts; ++r) {
                 uint64_t sr =
                     seed ^
                     (0x9e3779b97f4a7c15ULL +
                      static_cast<uint64_t>(step) * 0x94d049bb133111ebULL +
                      static_cast<uint64_t>(r) * 0x2545F4914F6CDD1DULL);
-                SARefiner::Result res = sa.refine_min_side(curr, sr, p);
+                SARefiner::Result res =
+                    sa.refine_min_side(curr, sr, p, nullptr, hh_state);
                 CandidateSol cand;
                 std::vector<TreePose> tmp2 = std::move(res.best_poses);
                 if (!finalize_solution(base_poly, radius, tmp2, sr, opt, cand)) {
@@ -1845,6 +1866,17 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
             return SARefiner::OverlapMetric::kMtv2;
         }
         throw std::runtime_error("--sa-overlap-metric precisa ser 'area' ou 'mtv2'.");
+    };
+    auto parse_hh_mode = [&](const std::string& s) {
+        if (s == "auto") {
+            opt.sa_hh_auto = true;
+            return;
+        }
+        if (s == "off" || s == "default") {
+            opt.sa_hh_auto = false;
+            return;
+        }
+        throw std::runtime_error("--sa-hh-mode precisa ser 'off' ou 'auto'.");
     };
 
     for (int i = 2; i < argc; ++i) {
@@ -2006,6 +2038,8 @@ Options parse_args(int argc, char** argv, std::vector<std::string>& inputs) {
             opt.sa_hh_segment = parse_int(need(arg));
         } else if (arg == "--sa-hh-reaction") {
             opt.sa_hh_reaction = parse_double(need(arg));
+        } else if (arg == "--sa-hh-mode") {
+            parse_hh_mode(need(arg));
         } else if (arg == "--sa-overlap-metric") {
             opt.sa_overlap_metric = parse_overlap_metric(need(arg));
         } else if (arg == "--sa-overlap-weight") {
@@ -2487,6 +2521,7 @@ int main(int argc, char** argv) {
         out << "id,x,y,deg\n";
 
         SARefiner sa(base_poly, radius);
+        std::array<SARefiner::HHState, 3> hh_states;
 
         double total_score = 0.0;
         int improved_n = 0;
@@ -2632,6 +2667,7 @@ int main(int argc, char** argv) {
                 p.lns_eval_attempts_per_tree = opt.sa_lns_eval_attempts_per_tree;
                 p.hh_segment = opt.sa_hh_segment;
                 p.hh_reaction = opt.sa_hh_reaction;
+                p.hh_auto = opt.sa_hh_auto;
                 p.overlap_metric = opt.sa_overlap_metric;
                 p.overlap_weight = opt.sa_overlap_weight;
                 p.overlap_weight_start = opt.sa_overlap_weight_start;
@@ -2661,9 +2697,14 @@ int main(int argc, char** argv) {
                 if (opt.sa_aggressive) {
                     SARefiner::apply_aggressive_preset(p);
                 }
+                if (opt.sa_hh_auto) {
+                    SARefiner::apply_hh_auto_preset(p);
+                }
 
                 CandidateSol best_sa;
                 bool have_sa = false;
+                SARefiner::HHState* hh_state =
+                    opt.sa_hh_auto ? &hh_states[hh_bucket_for_n(n)] : nullptr;
                 for (int r = 0; r < opt.sa_restarts; ++r) {
                     uint64_t s =
                         opt.seed ^
@@ -2687,14 +2728,21 @@ int main(int argc, char** argv) {
                         pa.w_resolve_overlap = 0.0;
                         pa.push_overshoot_frac = opt.sa_mz_push_overshoot_a;
 
-                        SARefiner::Result ra = sa.refine_min_side(sa_start.poses,
-                                                                  s ^ 0xA93F1C2D3E4B5A67ULL,
-                                                                  pa);
+                        SARefiner::Result ra =
+                            sa.refine_min_side(sa_start.poses,
+                                               s ^ 0xA93F1C2D3E4B5A67ULL,
+                                               pa,
+                                               nullptr,
+                                               hh_state);
                         const std::vector<TreePose>& start_b =
                             ra.final_poses.empty() ? sa_start.poses : ra.final_poses;
-                        res = sa.refine_min_side(start_b, s ^ 0x7C3A5D1E9B4F2601ULL, p);
+                        res = sa.refine_min_side(start_b,
+                                                 s ^ 0x7C3A5D1E9B4F2601ULL,
+                                                 p,
+                                                 nullptr,
+                                                 hh_state);
                     } else {
-                        res = sa.refine_min_side(sa_start.poses, s, p);
+                        res = sa.refine_min_side(sa_start.poses, s, p, nullptr, hh_state);
                     }
                     CandidateSol cand;
                     std::vector<TreePose> tmp = std::move(res.best_poses);
@@ -2818,6 +2866,7 @@ int main(int argc, char** argv) {
                         p.lns_eval_attempts_per_tree = opt.sa_lns_eval_attempts_per_tree;
                         p.hh_segment = opt.sa_hh_segment;
                         p.hh_reaction = opt.sa_hh_reaction;
+                        p.hh_auto = opt.sa_hh_auto;
                         p.overlap_metric = opt.sa_overlap_metric;
                         p.overlap_weight = opt.sa_overlap_weight;
                         p.overlap_weight_start = opt.sa_overlap_weight_start;
@@ -2847,9 +2896,14 @@ int main(int argc, char** argv) {
                         if (opt.sa_aggressive) {
                             SARefiner::apply_aggressive_preset(p);
                         }
+                        if (opt.sa_hh_auto) {
+                            SARefiner::apply_hh_auto_preset(p);
+                        }
 
                         double best_sa_side = std::numeric_limits<double>::infinity();
                         std::vector<TreePose> best_sa = refined;
+                        SARefiner::HHState* hh_state =
+                            opt.sa_hh_auto ? &hh_states[hh_bucket_for_n(n)] : nullptr;
                         for (int r = 0; r < opt.sa_restarts; ++r) {
                             uint64_t s =
                                 opt.seed ^
@@ -2857,7 +2911,8 @@ int main(int argc, char** argv) {
                                  static_cast<uint64_t>(n) * 0xbf58476d1ce4e5b9ULL +
                                  static_cast<uint64_t>(it) * 0x94d049bb133111ebULL +
                                  static_cast<uint64_t>(r) * 0x2545F4914F6CDD1DULL);
-                            SARefiner::Result res = sa.refine_min_side(refined, s, p);
+                            SARefiner::Result res =
+                                sa.refine_min_side(refined, s, p, nullptr, hh_state);
                             CandidateSol cand;
                             std::vector<TreePose> tmp = std::move(res.best_poses);
                             if (!finalize_solution(base_poly, radius, tmp, s, opt, cand)) {
@@ -3066,6 +3121,7 @@ int main(int argc, char** argv) {
                             p.lns_eval_attempts_per_tree = opt.sa_lns_eval_attempts_per_tree;
                             p.hh_segment = opt.sa_hh_segment;
                             p.hh_reaction = opt.sa_hh_reaction;
+                            p.hh_auto = opt.sa_hh_auto;
                             p.overlap_metric = opt.sa_overlap_metric;
                             p.overlap_weight = opt.sa_overlap_weight;
                             p.overlap_weight_start = opt.sa_overlap_weight_start;
@@ -3095,9 +3151,14 @@ int main(int argc, char** argv) {
                             if (opt.sa_aggressive) {
                                 SARefiner::apply_aggressive_preset(p);
                             }
+                            if (opt.sa_hh_auto) {
+                                SARefiner::apply_hh_auto_preset(p);
+                            }
 
                             double best_sa_side = std::numeric_limits<double>::infinity();
                             std::vector<TreePose> best_sa = tmp;
+                            SARefiner::HHState* hh_state =
+                                opt.sa_hh_auto ? &hh_states[hh_bucket_for_n(n)] : nullptr;
                             for (int r = 0; r < opt.sa_restarts; ++r) {
                                 uint64_t sr =
                                     opt.seed ^
@@ -3106,7 +3167,8 @@ int main(int argc, char** argv) {
                                      static_cast<uint64_t>(r) * 0x94d049bb133111ebULL +
                                      0xD1B54A32D192ED03ULL +
                                      static_cast<uint64_t>(step) * 0xA24BAED4963EE407ULL);
-                                SARefiner::Result res = sa.refine_min_side(tmp, sr, p);
+                                SARefiner::Result res =
+                                    sa.refine_min_side(tmp, sr, p, nullptr, hh_state);
                                 CandidateSol cand;
                                 std::vector<TreePose> tmp2 = std::move(res.best_poses);
                                 if (!finalize_solution(base_poly, radius, tmp2, sr, opt, cand)) {
@@ -3222,6 +3284,7 @@ int main(int argc, char** argv) {
                                 p.lns_eval_attempts_per_tree = opt.sa_lns_eval_attempts_per_tree;
                                 p.hh_segment = opt.sa_hh_segment;
                                 p.hh_reaction = opt.sa_hh_reaction;
+                                p.hh_auto = opt.sa_hh_auto;
                                 p.overlap_metric = opt.sa_overlap_metric;
                                 p.overlap_weight = opt.sa_overlap_weight;
                                 p.overlap_weight_start = opt.sa_overlap_weight_start;
@@ -3251,16 +3314,22 @@ int main(int argc, char** argv) {
                                 if (opt.sa_aggressive) {
                                     SARefiner::apply_aggressive_preset(p);
                                 }
+                                if (opt.sa_hh_auto) {
+                                    SARefiner::apply_hh_auto_preset(p);
+                                }
 
                                 double best_sa_side = std::numeric_limits<double>::infinity();
                                 std::vector<TreePose> best_sa = tmp;
+                                SARefiner::HHState* hh_state =
+                                    opt.sa_hh_auto ? &hh_states[hh_bucket_for_n(n)] : nullptr;
                                 for (int r = 0; r < opt.sa_restarts; ++r) {
                                     uint64_t sr =
                                         s ^
                                         (0x9e3779b97f4a7c15ULL +
                                          static_cast<uint64_t>(n) * 0xbf58476d1ce4e5b9ULL +
                                          static_cast<uint64_t>(r) * 0x94d049bb133111ebULL);
-                                    SARefiner::Result res = sa.refine_min_side(tmp, sr, p);
+                                    SARefiner::Result res =
+                                        sa.refine_min_side(tmp, sr, p, nullptr, hh_state);
                                     CandidateSol cand;
                                     std::vector<TreePose> tmp2 = std::move(res.best_poses);
                                     if (!finalize_solution(base_poly, radius, tmp2, sr, opt, cand)) {

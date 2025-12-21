@@ -20,6 +20,18 @@ SARefiner::OverlapMetric parse_overlap_metric(const std::string& s) {
     throw std::runtime_error("--sa-overlap-metric must be 'area' or 'mtv2'.");
 }
 
+void parse_hh_mode(Options& opt, const std::string& s) {
+    if (s == "auto") {
+        opt.sa_hh_auto = true;
+        return;
+    }
+    if (s == "off" || s == "default") {
+        opt.sa_hh_auto = false;
+        return;
+    }
+    throw std::runtime_error("--sa-hh-mode must be 'off' or 'auto'.");
+}
+
 TileObjective parse_tile_objective(const std::string& s) {
     if (s == "density") {
         return TileObjective::kDensity;
@@ -358,6 +370,9 @@ ArgHandlers make_arg_handlers(Options& opt) {
     });
     handlers.with_value.emplace("--sa-hh-reaction", [&](const std::string& v) {
         opt.sa_hh_reaction = parse_double(v);
+    });
+    handlers.with_value.emplace("--sa-hh-mode", [&](const std::string& v) {
+        parse_hh_mode(opt, v);
     });
     handlers.with_value.emplace("--sa-overlap-metric", [&](const std::string& v) {
         opt.sa_overlap_metric = parse_overlap_metric(v);

@@ -96,6 +96,44 @@ void SARefiner::apply_aggressive_preset(Params& p) {
     p.reheat_max = std::max(p.reheat_max, 3);
 }
 
+void SARefiner::apply_hh_auto_preset(Params& p) {
+    p.hh_auto = true;
+    if (p.hh_segment <= 0) {
+        p.hh_segment = 40;
+    }
+    if (!(p.hh_reaction > 0.0)) {
+        p.hh_reaction = 0.25;
+    }
+    if (!(p.hh_min_weight > 0.0)) {
+        p.hh_min_weight = 0.02;
+    } else {
+        p.hh_min_weight = std::min(p.hh_min_weight, 0.02);
+    }
+    p.hh_reward_best = std::max(p.hh_reward_best, 6.0);
+    p.hh_reward_improve = std::max(p.hh_reward_improve, 2.0);
+    p.hh_reward_accept = 0.0;
+
+    p.w_swap_rot = std::max(p.w_swap_rot, 0.30);
+    p.w_relocate = std::max(p.w_relocate, 0.20);
+    p.w_block_translate = std::max(p.w_block_translate, 0.05);
+    p.w_block_rotate = std::max(p.w_block_rotate, 0.02);
+    p.w_lns = std::max(p.w_lns, 0.005);
+    if (p.w_push_contact > 0.0) {
+        p.w_push_contact = std::max(p.w_push_contact, 0.03);
+    }
+    if (p.w_slide_contact > 0.0) {
+        p.w_slide_contact = std::max(p.w_slide_contact, 0.02);
+    }
+    if (p.w_squeeze > 0.0) {
+        p.w_squeeze = std::max(p.w_squeeze, 0.01);
+    }
+    p.w_global_rotate = std::max(p.w_global_rotate, 0.005);
+    if (p.w_eject_chain > 0.0) {
+        p.w_eject_chain = std::max(p.w_eject_chain, 0.003);
+    }
+    p.w_resolve_overlap = std::max(p.w_resolve_overlap, 0.01);
+}
+
 SARefiner::OverlapInfo SARefiner::overlap_info(const TreePose& a, const TreePose& b) const {
         const double ra = a.deg * 3.14159265358979323846 / 180.0;
         const double rb = b.deg * 3.14159265358979323846 / 180.0;

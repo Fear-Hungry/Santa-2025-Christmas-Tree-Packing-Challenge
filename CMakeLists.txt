@@ -23,25 +23,25 @@ add_compile_options(-O2)
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
 set(SRC_COMMON
-  src/geom.cpp
-  src/collision.cpp
-  src/collision_polygons.cpp
-  src/micro_adjust.cpp
-  src/score.cpp
+  src/geometry/geom.cpp
+  src/geometry/collision.cpp
+  src/geometry/collision_polygons.cpp
+  src/utils/micro_adjust.cpp
+  src/utils/score.cpp
 )
-set(SRC_COMPACTION_CONTACT src/compaction_contact.cpp)
-set(SRC_SUBMISSION src/submission_io.cpp)
+set(SRC_COMPACTION_CONTACT src/solvers/compaction_contact.cpp)
+set(SRC_SUBMISSION src/utils/submission_io.cpp)
 set(SRC_SA
-  src/sa.cpp
-  src/sa_refine.cpp
+  src/solvers/sa/sa.cpp
+  src/solvers/sa/sa_refine.cpp
 )
-set(SRC_PREFIX_PRUNE src/prefix_prune.cpp)
-set(SRC_BOUNDARY_REFINE src/boundary_refine.cpp)
-set(SRC_TILING_POOL src/tiling_pool.cpp)
-set(SRC_GA src/ga.cpp)
-set(SRC_BASELINE src/baseline.cpp)
-set(SRC_SOLVER_TILE_CLI src/solver_tile_cli.cpp)
-set(SRC_ENSEMBLE_CLI src/ensemble_submissions_cli.cpp)
+set(SRC_PREFIX_PRUNE src/solvers/prefix_prune.cpp)
+set(SRC_BOUNDARY_REFINE src/solvers/boundary_refine.cpp)
+set(SRC_TILING_POOL src/solvers/tiling_pool.cpp)
+set(SRC_GA src/solvers/ga.cpp)
+set(SRC_BASELINE src/solvers/baseline.cpp)
+set(SRC_SOLVER_TILE_CLI src/utils/solver_tile_cli.cpp)
+set(SRC_ENSEMBLE_CLI src/utils/ensemble_submissions_cli.cpp)
 
 add_executable(solver_tile
   apps/solver_tile.cpp

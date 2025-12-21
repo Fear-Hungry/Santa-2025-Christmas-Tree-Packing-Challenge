@@ -10,18 +10,19 @@
 
 ## Modules (where the work lives)
 - apps/: thin CLIs that parse flags, call into modules, and write output.
-- src/tiling_pool.cpp: pattern search, spacing, pool generation.
-- src/prefix_prune.cpp: prefix selection + prune + local repair paths.
-- src/sa.cpp: SARefiner implementation and move portfolio.
-- src/boundary_refine.cpp: boundary-only refinements on a pool.
-- src/submission_io.cpp: CSV parsing and quantization helpers.
-- src/geom.cpp + src/collision.cpp + src/collision_polygons.cpp: geometry and overlap checks.
+- src/solvers/tiling_pool.cpp: pattern search, spacing, pool generation.
+- src/solvers/prefix_prune.cpp: prefix selection + prune + local repair paths.
+- src/solvers/sa/sa.cpp: SARefiner implementation and move portfolio.
+- src/solvers/sa/sa_refine.cpp: SARefiner local search and operator implementations.
+- src/solvers/boundary_refine.cpp: boundary-only refinements on a pool.
+- src/utils/submission_io.cpp: CSV parsing and quantization helpers.
+- src/geometry/geom.cpp + src/geometry/collision.cpp + src/geometry/collision_polygons.cpp: geometry and overlap checks.
 
 ## Adding new operators (preferred locations)
-- Tile/pattern moves: src/tiling_pool.cpp (optimize_tile_by_spacing).
-- Prefix / prune logic: src/prefix_prune.cpp (build_* helpers).
-- SA moves or acceptance logic: src/sa.cpp (SARefiner move blocks).
-- Output/quantization tweaks: src/submission_io.cpp.
+- Tile/pattern moves: src/solvers/tiling_pool.cpp (optimize_tile_by_spacing).
+- Prefix / prune logic: src/solvers/prefix_prune.cpp (build_* helpers).
+- SA moves or acceptance logic: src/solvers/sa/sa.cpp (SARefiner move blocks).
+- Output/quantization tweaks: src/utils/submission_io.cpp.
 
 ## Notes
 - Keep CLI flags stable; add new flags instead of changing semantics.

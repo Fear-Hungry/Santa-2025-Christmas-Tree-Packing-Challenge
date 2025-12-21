@@ -14,6 +14,8 @@ public:
         kMtv2 = 1,
     };
 
+    static constexpr int kNumOps = 12;
+
     struct Params {
         int iters = 0;
         double t0 = 0.15;
@@ -66,12 +68,13 @@ public:
         // Controlador adaptativo (ALNS-style).
         int hh_segment = 50;
         double hh_reaction = 0.20;
-	        double hh_min_weight = 0.05;
-	        double hh_max_block_weight = 0.15;
-	        double hh_max_lns_weight = 0.05;
-	        // Escala do reward: recompensa proporcional a Δs / custo do operador.
-	        double hh_reward_scale = 1000.0;
-	        double hh_reward_best = 5.0;
+        bool hh_auto = false;
+        double hh_min_weight = 0.05;
+        double hh_max_block_weight = 0.15;
+        double hh_max_lns_weight = 0.05;
+        // Escala do reward: recompensa proporcional a Δs / custo do operador.
+        double hh_reward_scale = 1000.0;
+        double hh_reward_best = 5.0;
         double hh_reward_improve = 2.0;
         double hh_reward_accept = 0.0;
 
@@ -157,6 +160,13 @@ public:
         double eject_reinsert_p_rot = 0.50;
     };
 
+    struct HHState {
+        std::array<double, kNumOps> weights{};
+        std::array<double, kNumOps> op_score{};
+        std::array<int, kNumOps> op_uses{};
+        bool initialized = false;
+    };
+
     struct Result {
         std::vector<TreePose> best_poses;
         std::vector<TreePose> final_poses;
@@ -171,9 +181,11 @@ public:
     Result refine_min_side(const std::vector<TreePose>& start,
                            uint64_t seed,
                            const Params& p,
-                           const std::vector<char>* active_mask = nullptr) const;
+                           const std::vector<char>* active_mask = nullptr,
+                           HHState* hh_state = nullptr) const;
 
     static void apply_aggressive_preset(Params& p);
+    static void apply_hh_auto_preset(Params& p);
 
     // MTV (minimum translation vector) aproximado via decomposição em triângulos + SAT.
     // Retorna um vetor para mover `a` para fora de `b` (0/false se não houver overlap).

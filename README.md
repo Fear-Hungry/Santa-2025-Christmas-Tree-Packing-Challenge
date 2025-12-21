@@ -172,10 +172,12 @@ cmake --build build -j
 
 Depois de configurar, use `cmake --build build -j --target <alvo>` para compilar um binário específico.
 
+Observação: o build “de verdade” é via CMake; o `Makefile` na raiz é apenas um wrapper de conveniência (ele inclui `convenience.mk`) para compatibilidade com scripts.
+
 * Código em C++ dividido em módulos:
-  * `include/geom.hpp` / `src/geom.cpp`: tipos (`Point`, `Polygon`, `TreePose`), transformação de polígonos, bounding box / bounding square (`s_n`), formatação `s...`.
-  * `include/collision.hpp` / `src/collision.cpp` + `src/collision_polygons.cpp`: checagem de colisão (broad-phase por círculo envolvente + narrow-phase por interseção de segmentos).
-  * `include/baseline.hpp` / `src/baseline.cpp`: baseline em grade que gera posições sem overlap.
+  * `include/geom.hpp` / `src/geometry/geom.cpp`: tipos (`Point`, `Polygon`, `TreePose`), transformação de polígonos, bounding box / bounding square (`s_n`), formatação `s...`.
+  * `include/collision.hpp` / `src/geometry/collision.cpp` + `src/geometry/collision_polygons.cpp`: checagem de colisão (broad-phase por círculo envolvente + narrow-phase por interseção de segmentos).
+  * `include/baseline.hpp` / `src/solvers/baseline.cpp`: baseline em grade que gera posições sem overlap.
   * `apps/solver_baseline.cpp`: `main` que usa os módulos acima e escreve um `submission_baseline_cpp.csv` válido (use `--output` para mudar o caminho).
 
 Para compilar e gerar o submission baseline:
@@ -296,7 +298,7 @@ cmake --build build -j --target score_submission
 ./bin/score_submission submission.csv
 ```
 
-Observação: a forma da árvore é definida em `get_tree_polygon()` (`src/geom.cpp`). Atualmente já usamos o polígono oficial (15 vértices) da árvore; se o Kaggle atualizar a geometria, ajuste aqui.
+Observação: a forma da árvore é definida em `get_tree_polygon()` (`src/geometry/geom.cpp`). Atualmente já usamos o polígono oficial (15 vértices) da árvore; se o Kaggle atualizar a geometria, ajuste aqui.
 
 Depois, vamos evoluir esse baseline em C++ com heurísticas (SA, hill-climb, etc.) em cima das `TreePose`.
 
@@ -313,7 +315,7 @@ cmake --build build -j --target ensemble_submissions
 ```
 
 Observação: `ensemble_submissions` aplica por padrão um pós-processamento “final rigid” por `n` (rotação global que pode reduzir o quadrado axis-aligned). Para desligar: `--no-final-rigid`.
-Detalhe: o “final rigid” é implementado em `src/geom.cpp` usando **convex hull + rotating calipers** (minimum bounding square), evitando depender de ângulos discretos.
+Detalhe: o “final rigid” é implementado em `src/geometry/geom.cpp` usando **convex hull + rotating calipers** (minimum bounding square), evitando depender de ângulos discretos.
 
 ### Sweep + blend (modo simples para ganhar score)
 
@@ -341,6 +343,8 @@ Exemplo variando parâmetros (tesselação + offsets + blocos de SA):
 ```
 
 Dica: você pode passar múltiplos `--cmd` para misturar solvers (por padrão é round-robin; use `--cmd-mode random` para escolher aleatoriamente).
+
+Novo: `scripts/sweep_blend.py --blend-repair` roda `./bin/blend_repair` após o ensemble e scoreia o CSV reparado (saída default: `submission_repair.csv` se `--out submission_ensemble.csv`, senão `<out>_repair.csv`; log em `blend_repair.log`). Por padrão usa um preset forte (`--blend-repair-preset hunt`) e, se existir `submissions/submission_best.csv`, aplica `--base ... --target-top 20` para só mexer em um subconjunto do best.
 
 ### Blend + repair (top-K por n) + (SA curto) + final rigid
 

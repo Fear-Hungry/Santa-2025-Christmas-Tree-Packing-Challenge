@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cctype>
 #include <cstdint>
@@ -62,6 +63,7 @@ struct Options {
     int sa_lns_eval_attempts_per_tree = 0;
     int sa_hh_segment = 50;
     double sa_hh_reaction = 0.20;
+    bool sa_hh_auto = false;
     SARefiner::OverlapMetric sa_overlap_metric = SARefiner::OverlapMetric::kArea;
     double sa_overlap_weight = 0.0;
     double sa_overlap_weight_start = -1.0;
@@ -193,6 +195,19 @@ SARefiner::OverlapMetric parse_overlap_metric(const std::string& s) {
         return SARefiner::OverlapMetric::kMtv2;
     }
     throw std::runtime_error("--sa-overlap-metric must be 'area' or 'mtv2'.");
+}
+
+void parse_hh_mode(Options& opt, const std::string& s) {
+    std::string mode = to_lower_ascii(s);
+    if (mode == "auto") {
+        opt.sa_hh_auto = true;
+        return;
+    }
+    if (mode == "off" || mode == "default") {
+        opt.sa_hh_auto = false;
+        return;
+    }
+    throw std::runtime_error("--sa-hh-mode must be 'off' or 'auto'.");
 }
 
 void parse_shift(Options& opt, const std::string& s) {
@@ -385,6 +400,9 @@ ArgHandlers make_arg_handlers(Options& opt) {
     });
     handlers.with_value.emplace("--sa-hh-reaction", [&](const std::string& v) {
         opt.sa_hh_reaction = parse_double(v);
+    });
+    handlers.with_value.emplace("--sa-hh-mode", [&](const std::string& v) {
+        parse_hh_mode(opt, v);
     });
     handlers.with_value.emplace("--sa-overlap-metric", [&](const std::string& v) {
         opt.sa_overlap_metric = parse_overlap_metric(v);
@@ -696,6 +714,7 @@ struct SAContext {
     SARefiner& sa;
     const Options& opt;
     int n;
+    SARefiner::HHState* hh_state;
 };
 
 struct RigidContext {
@@ -813,6 +832,16 @@ bool sa_enabled(const Options& opt) {
     return opt.sa_restarts > 0 && opt.sa_base_iters > 0;
 }
 
+size_t hh_bucket_for_n(int n) {
+    if (n <= 25) {
+        return 0;
+    }
+    if (n <= 80) {
+        return 1;
+    }
+    return 2;
+}
+
 SARefiner::Params make_sa_params(const Options& opt, int n) {
     SARefiner::Params p;
     p.iters = opt.sa_base_iters + opt.sa_iters_per_n * n;
@@ -831,6 +860,7 @@ SARefiner::Params make_sa_params(const Options& opt, int n) {
     p.lns_eval_attempts_per_tree = opt.sa_lns_eval_attempts_per_tree;
     p.hh_segment = opt.sa_hh_segment;
     p.hh_reaction = opt.sa_hh_reaction;
+    p.hh_auto = opt.sa_hh_auto;
     p.overlap_metric = opt.sa_overlap_metric;
     p.overlap_weight = opt.sa_overlap_weight;
     p.overlap_weight_start = opt.sa_overlap_weight_start;
@@ -858,6 +888,9 @@ SARefiner::Params make_sa_params(const Options& opt, int n) {
     if (opt.sa_aggressive) {
         SARefiner::apply_aggressive_preset(p);
     }
+    if (opt.sa_hh_auto) {
+        SARefiner::apply_hh_auto_preset(p);
+    }
     return p;
 }
 
@@ -873,7 +906,8 @@ void apply_sa_refinement(const SAContext& ctx, BestSolution& best) {
             (0x9e3779b97f4a7c15ULL +
              static_cast<uint64_t>(ctx.n) * 0xbf58476d1ce4e5b9ULL +
              static_cast<uint64_t>(r) * 0x94d049bb133111ebULL);
-        SARefiner::Result res = ctx.sa.refine_min_side(best.poses, seed, p);
+        SARefiner::Result res =
+            ctx.sa.refine_min_side(best.poses, seed, p, nullptr, ctx.hh_state);
         auto cand_q = quantize_poses(res.best_poses);
         if (any_overlap(ctx.geom.base_poly, cand_q, ctx.geom.radius)) {
             continue;
@@ -1157,6 +1191,10 @@ SARefiner::Params make_targeted_sa_params(TargetTier tier,
     p.push_max_step_frac = 0.9;
     p.plateau_eps = 1e-4;
     p.quantize_decimals = kOutputDecimals;
+    p.hh_auto = opt.sa_hh_auto;
+    if (opt.sa_hh_auto) {
+        SARefiner::apply_hh_auto_preset(p);
+    }
     return p;
 }
 
@@ -1175,11 +1213,13 @@ std::vector<TreePose> run_targeted_sa(SARefiner& sa,
                                       const Options& opt,
                                       TargetTier tier,
                                       int n,
-                                      uint64_t seed_base) {
+                                      uint64_t seed_base,
+                                      SARefiner::HHState* hh_state) {
     SARefiner::Params base = make_targeted_sa_params(tier, opt, n);
     if (base.iters <= 0) {
         return start;
     }
+    SARefiner::HHState* state = opt.sa_hh_auto ? hh_state : nullptr;
 
     if (use_soft_overlap(tier, opt)) {
         const int total_iters = base.iters;
@@ -1201,7 +1241,11 @@ std::vector<TreePose> run_targeted_sa(SARefiner& sa,
             soft.push_overshoot_frac = 0.10;
             apply_sa_early_stop(soft, tier, opt);
             SARefiner::Result res =
-                sa.refine_min_side(seed_poses, seed_base ^ 0xB5C8D57A3E4F29B1ULL, soft);
+                sa.refine_min_side(seed_poses,
+                                   seed_base ^ 0xB5C8D57A3E4F29B1ULL,
+                                   soft,
+                                   nullptr,
+                                   state);
             seed_poses = res.best_poses;
         }
 
@@ -1216,14 +1260,18 @@ std::vector<TreePose> run_targeted_sa(SARefiner& sa,
             hard.w_resolve_overlap = 0.0;
             apply_sa_early_stop(hard, tier, opt);
             SARefiner::Result res =
-                sa.refine_min_side(seed_poses, seed_base ^ 0x8D1F5A9C7E3B2A41ULL, hard);
+                sa.refine_min_side(seed_poses,
+                                   seed_base ^ 0x8D1F5A9C7E3B2A41ULL,
+                                   hard,
+                                   nullptr,
+                                   state);
             return res.best_poses;
         }
         return seed_poses;
     }
 
     apply_sa_early_stop(base, tier, opt);
-    SARefiner::Result res = sa.refine_min_side(start, seed_base, base);
+    SARefiner::Result res = sa.refine_min_side(start, seed_base, base, nullptr, state);
     return res.best_poses;
 }
 
@@ -1258,6 +1306,7 @@ void run_targeted_refine(const GeometryContext& geom,
 
     const double plateau_eps = 1e-4;
     SARefiner sa(geom.base_poly, geom.radius);
+    std::array<SARefiner::HHState, 3> hh_states;
     int improved_count = 0;
     int tier_a = 0;
     int tier_b = 0;
@@ -1304,8 +1353,10 @@ void run_targeted_refine(const GeometryContext& geom,
         uint64_t sa_seed = opt.seed ^
                            (0x9E3779B97F4A7C15ULL +
                             static_cast<uint64_t>(entry.n) * 0xBF58476D1CE4E5B9ULL);
+        SARefiner::HHState* hh_state =
+            opt.sa_hh_auto ? &hh_states[hh_bucket_for_n(entry.n)] : nullptr;
         std::vector<TreePose> sa_out =
-            run_targeted_sa(sa, best_sol, opt, entry.tier, entry.n, sa_seed);
+            run_targeted_sa(sa, best_sol, opt, entry.tier, entry.n, sa_seed, hh_state);
         if (!sa_out.empty()) {
             auto sa_q = quantize_poses(sa_out);
             if (!any_overlap(geom.base_poly, sa_q, geom.radius)) {
@@ -1369,6 +1420,7 @@ int main(int argc, char** argv) {
         out << "id,x,y,deg\n";
 
         SARefiner sa(base_poly, radius);
+        std::array<SARefiner::HHState, 3> hh_states;
         std::vector<TreePose> ga_poses_sorted = maybe_run_ga(ga_ctx);
 
         std::vector<std::vector<TreePose>> solutions_by_n;
@@ -1386,7 +1438,9 @@ int main(int argc, char** argv) {
             }
 
             if (!opt.target_refine) {
-                SAContext sa_ctx{geom, sa, opt, n};
+                SARefiner::HHState* hh_state =
+                    opt.sa_hh_auto ? &hh_states[hh_bucket_for_n(n)] : nullptr;
+                SAContext sa_ctx{geom, sa, opt, n, hh_state};
                 apply_sa_refinement(sa_ctx, best);
             }
 
@@ -1434,6 +1488,7 @@ int main(int argc, char** argv) {
         std::cout << "SA restarts: " << opt.sa_restarts << "\n";
         std::cout << "SA base iters: " << opt.sa_base_iters << "\n";
         std::cout << "SA iters per n: " << opt.sa_iters_per_n << "\n";
+        std::cout << "SA HH mode: " << (opt.sa_hh_auto ? "auto" : "off") << "\n";
         std::cout << "SA aggressive: " << (opt.sa_aggressive ? "on" : "off") << "\n";
         std::cout << "Final rigid: " << (opt.final_rigid ? "on" : "off") << "\n";
         std::cout << "Target refine: " << (opt.target_refine ? "on" : "off") << "\n";
