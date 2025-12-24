@@ -1,6 +1,6 @@
-#include "collision.hpp"
+#include "geometry/collision.hpp"
 
-#include "spatial_grid.hpp"
+#include "geometry/spatial_grid.hpp"
 
 namespace {
 

@@ -1,4 +1,4 @@
-#include "submission_io.hpp"
+#include "utils/submission_io.hpp"
 
 #include <array>
 #include <cmath>
@@ -8,7 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 
-#include "wrap_utils.hpp"
+#include "utils/wrap_utils.hpp"
 
 namespace {
 

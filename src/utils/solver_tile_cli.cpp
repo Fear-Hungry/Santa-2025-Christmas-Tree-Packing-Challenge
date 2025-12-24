@@ -1,4 +1,4 @@
-#include "solver_tile_cli.hpp"
+#include "utils/solver_tile_cli.hpp"
 
 #include <functional>
 #include <sstream>
@@ -6,7 +6,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "cli_parse.hpp"
+#include "utils/cli_parse.hpp"
 
 namespace {
 
@@ -52,6 +52,16 @@ ShiftSearchMode parse_shift_search(const std::string& s) {
     throw std::runtime_error("--shift-search must be 'off' or 'multires'.");
 }
 
+ChainDropMode parse_chain_drop_mode(const std::string& s) {
+    if (s == "greedy") {
+        return ChainDropMode::kGreedy;
+    }
+    if (s == "best") {
+        return ChainDropMode::kBest;
+    }
+    throw std::runtime_error("--sa-chain-drop must be 'greedy' or 'best'.");
+}
+
 void parse_shift(Options& opt, const std::string& s) {
     std::stringstream ss(s);
     std::string a;
@@ -87,6 +97,8 @@ void validate_tile_options(const Options& opt) {
     ensure(opt.tile_score_nmax > 0 && opt.tile_score_nmax <= opt.n_max,
            "--tile-score-nmax must be in [1, 200].");
     ensure(opt.tile_score_full_every > 0, "--tile-score-full-every must be > 0.");
+    ensure(opt.tile_score_fast_angles > 0, "--tile-score-fast-angles must be > 0.");
+    ensure(opt.tile_density_warmup_iters >= 0, "--tile-density-warmup-iters must be >= 0.");
 }
 
 void validate_lattice_options(const Options& opt) {
@@ -190,6 +202,35 @@ void validate_ils_options(const Options& opt) {
     }
 }
 
+void validate_global_contract_options(const Options& opt) {
+    ensure(opt.global_contract_steps >= 0, "--global-contract-steps must be >= 0.");
+    ensure(opt.global_contract_scale > 0.0 && opt.global_contract_scale <= 1.0,
+           "--global-contract-scale must be in (0,1].");
+    ensure(opt.global_contract_relax_iters >= 0,
+           "--global-contract-relax-iters must be >= 0.");
+    ensure(opt.global_contract_overlap_force >= 0.0,
+           "--global-contract-overlap-force must be >= 0.");
+    ensure(opt.global_contract_center_force >= 0.0,
+           "--global-contract-center-force must be >= 0.");
+    ensure(opt.global_contract_step_frac >= 0.0,
+           "--global-contract-step-frac must be >= 0.");
+    ensure(opt.global_contract_repair_passes >= 0,
+           "--global-contract-repair-passes must be >= 0.");
+    ensure(opt.global_contract_sa_restarts >= 0,
+           "--global-contract-sa-restarts must be >= 0.");
+    ensure(opt.global_contract_sa_iters >= 0,
+           "--global-contract-sa-iters must be >= 0.");
+
+    if (opt.global_contract_relax_iters > 0) {
+        ensure(opt.global_contract_step_frac > 0.0,
+               "--global-contract-step-frac must be > 0 when relax-iters > 0.");
+    }
+    if (opt.global_contract_sa_restarts > 0) {
+        ensure(opt.global_contract_sa_iters > 0,
+               "--global-contract-sa-iters must be > 0 when sa-restarts > 0.");
+    }
+}
+
 void validate_mz_options(const Options& opt) {
     ensure(opt.mz_its_iters >= 0, "--mz-its-iters must be >= 0.");
     ensure(opt.mz_tabu_depth >= -1, "--mz-tabu-depth must be >= -1.");
@@ -239,6 +280,61 @@ void validate_target_options(const Options& opt) {
            "--target-soft-overlap-cut must be in (0,1].");
     ensure(opt.target_sa_check_interval > 0,
            "--target-sa-check-interval must be > 0.");
+    ensure(opt.target_rounds > 0, "--target-rounds must be > 0.");
+}
+
+void validate_post_opt_options(const Options& opt) {
+    ensure(opt.post_iters >= 0, "--post-iters must be >= 0.");
+    ensure(opt.post_restarts >= 0, "--post-restarts must be >= 0.");
+    ensure(opt.post_t0 > 0.0 && opt.post_tm > 0.0 && opt.post_tm <= opt.post_t0,
+           "--post-t0/--post-tm must satisfy 0 < tm <= t0.");
+    ensure(opt.post_remove_ratio > 0.0 && opt.post_remove_ratio < 1.0,
+           "--post-remove-ratio must be in (0,1).");
+    ensure(opt.post_free_area_min_n >= 0, "--post-free-area-min-n must be >= 0.");
+
+    ensure(opt.post_term_epochs > 0, "--post-term-epochs must be > 0.");
+    ensure(opt.post_term_min_n >= 1 && opt.post_term_min_n <= opt.n_max,
+           "--post-term-min-n must be in [1, n_max].");
+    ensure(opt.post_term_tier_a >= 0 && opt.post_term_tier_b >= 0,
+           "--post-term-tierA/--post-term-tierB must be >= 0.");
+    ensure(opt.post_term_tier_b >= opt.post_term_tier_a,
+           "--post-term-tierB must be >= --post-term-tierA.");
+    ensure(opt.post_tier_a_iters_mult >= 0.0 && opt.post_tier_b_iters_mult >= 0.0 &&
+               opt.post_tier_c_iters_mult >= 0.0,
+           "post tier iters multipliers must be >= 0.");
+    ensure(opt.post_tier_a_restarts_mult >= 0.0 && opt.post_tier_b_restarts_mult >= 0.0 &&
+               opt.post_tier_c_restarts_mult >= 0.0,
+           "post tier restarts multipliers must be >= 0.");
+    ensure(opt.post_tier_a_tighten_mult >= 0.0 && opt.post_tier_b_tighten_mult >= 0.0 &&
+               opt.post_tier_c_tighten_mult >= 0.0,
+           "post tier tighten multipliers must be >= 0.");
+    ensure(opt.post_accept_term_eps >= 0.0, "--post-accept-term-eps must be >= 0.");
+
+    ensure(opt.post_reinsert_attempts_tier_a >= 0 &&
+               opt.post_reinsert_attempts_tier_b >= 0 &&
+               opt.post_reinsert_attempts_tier_c >= 0,
+           "post reinsert attempts must be >= 0.");
+    ensure(opt.post_reinsert_shell_anchors >= 0 &&
+               opt.post_reinsert_core_anchors >= 0,
+           "post reinsert anchors must be >= 0.");
+    ensure(opt.post_reinsert_jitter_attempts >= 0,
+           "--post-reinsert-jitter-attempts must be >= 0.");
+    ensure(opt.post_reinsert_angle_jitter_deg >= 0.0,
+           "--post-reinsert-angle-jitter-deg must be >= 0.");
+    ensure(opt.post_reinsert_early_stop_rel >= 0.0 && opt.post_reinsert_early_stop_rel <= 1.0,
+           "--post-reinsert-early-stop-rel must be in [0,1].");
+
+    ensure(opt.post_backprop_span_a >= 0 && opt.post_backprop_span_b >= 0 &&
+               opt.post_backprop_span_c >= 0,
+           "post backprop tier spans must be >= 0.");
+    ensure(opt.post_backprop_max_combos_a > 0 && opt.post_backprop_max_combos_b > 0 &&
+               opt.post_backprop_max_combos_c > 0,
+           "post backprop tier max combos must be > 0.");
+
+    ensure(opt.post_backprop_passes >= 0, "--post-backprop-passes must be >= 0.");
+    ensure(opt.post_backprop_span >= 0, "--post-backprop-span must be >= 0.");
+    ensure(opt.post_backprop_max_combos > 0, "--post-backprop-max-combos must be > 0.");
+    ensure(opt.post_threads >= 0, "--post-threads must be >= 0.");
 }
 
 struct ArgHandlers {
@@ -274,6 +370,12 @@ ArgHandlers make_arg_handlers(Options& opt) {
     });
     handlers.with_value.emplace("--tile-score-full-every", [&](const std::string& v) {
         opt.tile_score_full_every = parse_int(v);
+    });
+    handlers.with_value.emplace("--tile-score-fast-angles", [&](const std::string& v) {
+        opt.tile_score_fast_angles = parse_int(v);
+    });
+    handlers.with_value.emplace("--tile-density-warmup-iters", [&](const std::string& v) {
+        opt.tile_density_warmup_iters = parse_int(v);
     });
     handlers.flags.emplace("--no-tile-opt-lattice", [&]() { opt.tile_opt_lattice = false; });
     handlers.with_value.emplace("--lattice-v-ratio", [&](const std::string& v) {
@@ -325,6 +427,9 @@ ArgHandlers make_arg_handlers(Options& opt) {
     });
     handlers.with_value.emplace("--sa-chain-band-layers", [&](const std::string& v) {
         opt.sa_chain_band_layers = parse_double(v);
+    });
+    handlers.with_value.emplace("--sa-chain-drop", [&](const std::string& v) {
+        opt.sa_chain_drop = parse_chain_drop_mode(v);
     });
     handlers.with_value.emplace("--sa-w-micro", [&](const std::string& v) {
         opt.sa_w_micro = parse_double(v);
@@ -496,6 +601,33 @@ ArgHandlers make_arg_handlers(Options& opt) {
     handlers.with_value.emplace("--ils-repair-mtv-split", [&](const std::string& v) {
         opt.ils_repair_mtv_split = parse_double(v);
     });
+    handlers.with_value.emplace("--global-contract-steps", [&](const std::string& v) {
+        opt.global_contract_steps = parse_int(v);
+    });
+    handlers.with_value.emplace("--global-contract-scale", [&](const std::string& v) {
+        opt.global_contract_scale = parse_double(v);
+    });
+    handlers.with_value.emplace("--global-contract-relax-iters", [&](const std::string& v) {
+        opt.global_contract_relax_iters = parse_int(v);
+    });
+    handlers.with_value.emplace("--global-contract-overlap-force", [&](const std::string& v) {
+        opt.global_contract_overlap_force = parse_double(v);
+    });
+    handlers.with_value.emplace("--global-contract-center-force", [&](const std::string& v) {
+        opt.global_contract_center_force = parse_double(v);
+    });
+    handlers.with_value.emplace("--global-contract-step-frac", [&](const std::string& v) {
+        opt.global_contract_step_frac = parse_double(v);
+    });
+    handlers.with_value.emplace("--global-contract-repair-passes", [&](const std::string& v) {
+        opt.global_contract_repair_passes = parse_int(v);
+    });
+    handlers.with_value.emplace("--global-contract-sa-restarts", [&](const std::string& v) {
+        opt.global_contract_sa_restarts = parse_int(v);
+    });
+    handlers.with_value.emplace("--global-contract-sa-iters", [&](const std::string& v) {
+        opt.global_contract_sa_iters = parse_int(v);
+    });
     handlers.with_value.emplace("--mz-its-iters", [&](const std::string& v) {
         opt.mz_its_iters = parse_int(v);
     });
@@ -605,6 +737,9 @@ ArgHandlers make_arg_handlers(Options& opt) {
     handlers.with_value.emplace("--target-sa-check-interval", [&](const std::string& v) {
         opt.target_sa_check_interval = parse_int(v);
     });
+    handlers.with_value.emplace("--target-rounds", [&](const std::string& v) {
+        opt.target_rounds = parse_int(v);
+    });
     handlers.with_value.emplace("--seed", [&](const std::string& v) {
         opt.seed = parse_u64(v);
     });
@@ -637,6 +772,136 @@ ArgHandlers make_arg_handlers(Options& opt) {
     handlers.with_value.emplace("--output", [&](const std::string& v) { opt.output_path = v; });
     handlers.flags.emplace("--no-prune", [&]() { opt.prune = false; });
 
+    handlers.flags.emplace("--post-opt", [&]() { opt.post_opt = true; });
+    handlers.with_value.emplace("--post-iters", [&](const std::string& v) {
+        opt.post_iters = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-restarts", [&](const std::string& v) {
+        opt.post_restarts = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-t0", [&](const std::string& v) {
+        opt.post_t0 = parse_double(v);
+    });
+    handlers.with_value.emplace("--post-tm", [&](const std::string& v) {
+        opt.post_tm = parse_double(v);
+    });
+    handlers.with_value.emplace("--post-remove-ratio", [&](const std::string& v) {
+        opt.post_remove_ratio = parse_double(v);
+    });
+    handlers.with_value.emplace("--post-free-area-min-n", [&](const std::string& v) {
+        opt.post_free_area_min_n = parse_int(v);
+    });
+
+    handlers.flags.emplace("--post-term-scheduler", [&]() { opt.post_term_scheduler = true; });
+    handlers.flags.emplace("--post-term-sched", [&]() { opt.post_term_scheduler = true; });
+    handlers.with_value.emplace("--post-term-epochs", [&](const std::string& v) {
+        opt.post_term_epochs = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-term-tierA", [&](const std::string& v) {
+        opt.post_term_tier_a = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-term-tierB", [&](const std::string& v) {
+        opt.post_term_tier_b = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-term-min-n", [&](const std::string& v) {
+        opt.post_term_min_n = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-tierA-iters-mult", [&](const std::string& v) {
+        opt.post_tier_a_iters_mult = parse_double(v);
+    });
+    handlers.with_value.emplace("--post-tierA-restarts-mult", [&](const std::string& v) {
+        opt.post_tier_a_restarts_mult = parse_double(v);
+    });
+    handlers.with_value.emplace("--post-tierB-iters-mult", [&](const std::string& v) {
+        opt.post_tier_b_iters_mult = parse_double(v);
+    });
+    handlers.with_value.emplace("--post-tierB-restarts-mult", [&](const std::string& v) {
+        opt.post_tier_b_restarts_mult = parse_double(v);
+    });
+    handlers.with_value.emplace("--post-tierC-iters-mult", [&](const std::string& v) {
+        opt.post_tier_c_iters_mult = parse_double(v);
+    });
+    handlers.with_value.emplace("--post-tierC-restarts-mult", [&](const std::string& v) {
+        opt.post_tier_c_restarts_mult = parse_double(v);
+    });
+    handlers.with_value.emplace("--post-tierA-tighten-mult", [&](const std::string& v) {
+        opt.post_tier_a_tighten_mult = parse_double(v);
+    });
+    handlers.with_value.emplace("--post-tierB-tighten-mult", [&](const std::string& v) {
+        opt.post_tier_b_tighten_mult = parse_double(v);
+    });
+    handlers.with_value.emplace("--post-tierC-tighten-mult", [&](const std::string& v) {
+        opt.post_tier_c_tighten_mult = parse_double(v);
+    });
+    handlers.with_value.emplace("--post-accept-term-eps", [&](const std::string& v) {
+        opt.post_accept_term_eps = parse_double(v);
+    });
+
+    handlers.flags.emplace("--post-guided-reinsert", [&]() { opt.post_guided_reinsert = true; });
+    handlers.with_value.emplace("--post-reinsert-attempts-A", [&](const std::string& v) {
+        opt.post_reinsert_attempts_tier_a = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-reinsert-attempts-B", [&](const std::string& v) {
+        opt.post_reinsert_attempts_tier_b = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-reinsert-attempts-C", [&](const std::string& v) {
+        opt.post_reinsert_attempts_tier_c = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-reinsert-shell-anchors", [&](const std::string& v) {
+        opt.post_reinsert_shell_anchors = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-reinsert-core-anchors", [&](const std::string& v) {
+        opt.post_reinsert_core_anchors = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-reinsert-jitter-attempts", [&](const std::string& v) {
+        opt.post_reinsert_jitter_attempts = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-reinsert-angle-jitter-deg", [&](const std::string& v) {
+        opt.post_reinsert_angle_jitter_deg = parse_double(v);
+    });
+    handlers.with_value.emplace("--post-reinsert-early-stop-rel", [&](const std::string& v) {
+        opt.post_reinsert_early_stop_rel = parse_double(v);
+    });
+
+    handlers.flags.emplace("--post-backprop-explore", [&]() { opt.post_backprop_explore = true; });
+    handlers.with_value.emplace("--post-backprop-span-A", [&](const std::string& v) {
+        opt.post_backprop_span_a = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-backprop-span-B", [&](const std::string& v) {
+        opt.post_backprop_span_b = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-backprop-span-C", [&](const std::string& v) {
+        opt.post_backprop_span_c = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-backprop-max-combos-A", [&](const std::string& v) {
+        opt.post_backprop_max_combos_a = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-backprop-max-combos-B", [&](const std::string& v) {
+        opt.post_backprop_max_combos_b = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-backprop-max-combos-C", [&](const std::string& v) {
+        opt.post_backprop_max_combos_c = parse_int(v);
+    });
+
+    handlers.with_value.emplace("--post-backprop-passes", [&](const std::string& v) {
+        opt.post_backprop_passes = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-backprop-span", [&](const std::string& v) {
+        opt.post_backprop_span = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-backprop-max-combos", [&](const std::string& v) {
+        opt.post_backprop_max_combos = parse_int(v);
+    });
+    handlers.with_value.emplace("--post-threads", [&](const std::string& v) {
+        opt.post_threads = parse_int(v);
+    });
+    handlers.flags.emplace("--post-no-free-area", [&]() { opt.post_enable_free_area = false; });
+    handlers.flags.emplace("--post-no-backprop", [&]() { opt.post_enable_backprop = false; });
+    handlers.flags.emplace("--post-no-squeeze", [&]() { opt.post_enable_squeeze = false; });
+    handlers.flags.emplace("--post-no-compaction", [&]() { opt.post_enable_compaction = false; });
+    handlers.flags.emplace("--post-no-edge-slide", [&]() { opt.post_enable_edge_slide = false; });
+    handlers.flags.emplace("--post-no-local-search", [&]() { opt.post_enable_local_search = false; });
+
     return handlers;
 }
 
@@ -646,9 +911,11 @@ void validate_options(const Options& opt) {
     validate_shift_options(opt);
     validate_sa_options(opt);
     validate_ils_options(opt);
+    validate_global_contract_options(opt);
     validate_mz_options(opt);
     validate_micro_options(opt);
     validate_target_options(opt);
+    validate_post_opt_options(opt);
 }
 
 }  // namespace

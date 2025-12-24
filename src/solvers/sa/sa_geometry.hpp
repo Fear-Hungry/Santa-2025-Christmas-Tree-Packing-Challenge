@@ -7,7 +7,7 @@
 #include <limits>
 #include <vector>
 
-#include "geom.hpp"
+#include "geometry/geom.hpp"
 #include "sa_helpers.hpp"
 
 static inline double cross_point(const Point& a, const Point& b) {

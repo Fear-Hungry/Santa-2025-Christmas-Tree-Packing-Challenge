@@ -1,12 +1,12 @@
-#include "micro_adjust.hpp"
+#include "utils/micro_adjust.hpp"
 
 #include <cmath>
 #include <limits>
 #include <utility>
 
-#include "collision.hpp"
-#include "submission_io.hpp"
-#include "wrap_utils.hpp"
+#include "geometry/collision.hpp"
+#include "utils/submission_io.hpp"
+#include "utils/wrap_utils.hpp"
 
 namespace {
 

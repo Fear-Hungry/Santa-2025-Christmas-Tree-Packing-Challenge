@@ -5,10 +5,10 @@
 #include <string>
 #include <vector>
 
-#include "baseline.hpp"
-#include "geom.hpp"
-#include "score.hpp"
-#include "submission_io.hpp"
+#include "solvers/baseline.hpp"
+#include "geometry/geom.hpp"
+#include "utils/score.hpp"
+#include "utils/submission_io.hpp"
 
 namespace {
 

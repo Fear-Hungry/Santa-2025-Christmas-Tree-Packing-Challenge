@@ -4,7 +4,7 @@
 #include <random>
 #include <vector>
 
-#include "geom.hpp"
+#include "geometry/geom.hpp"
 
 namespace compaction_contact {
 

@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "geom.hpp"
+#include "geometry/geom.hpp"
 
 // Checa interseção (inclusive toque) entre dois polígonos.
 bool polygons_intersect(const Polygon& p1, const Polygon& p2);

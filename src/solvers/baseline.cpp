@@ -1,12 +1,12 @@
-#include "baseline.hpp"
+#include "solvers/baseline.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <vector>
 
-#include "collision.hpp"
-#include "geom.hpp"
+#include "geometry/collision.hpp"
+#include "geometry/geom.hpp"
 
 namespace {
 double squared_dist(double x, double y, const BaselineConfig& cfg) {

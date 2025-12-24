@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-#include "geom.hpp"
+#include "geometry/geom.hpp"
 
 struct SubmissionPoses {
     std::string path;

@@ -175,9 +175,9 @@ Depois de configurar, use `cmake --build build -j --target <alvo>` para compilar
 Observação: o build “de verdade” é via CMake; o `Makefile` na raiz é apenas um wrapper de conveniência (ele inclui `convenience.mk`) para compatibilidade com scripts.
 
 * Código em C++ dividido em módulos:
-  * `include/geom.hpp` / `src/geometry/geom.cpp`: tipos (`Point`, `Polygon`, `TreePose`), transformação de polígonos, bounding box / bounding square (`s_n`), formatação `s...`.
-  * `include/collision.hpp` / `src/geometry/collision.cpp` + `src/geometry/collision_polygons.cpp`: checagem de colisão (broad-phase por círculo envolvente + narrow-phase por interseção de segmentos).
-  * `include/baseline.hpp` / `src/solvers/baseline.cpp`: baseline em grade que gera posições sem overlap.
+  * `include/geometry/geom.hpp` / `src/geometry/geom.cpp`: tipos (`Point`, `Polygon`, `TreePose`), transformação de polígonos, bounding box / bounding square (`s_n`), formatação `s...`.
+  * `include/geometry/collision.hpp` / `src/geometry/collision.cpp` + `src/geometry/collision_polygons.cpp`: checagem de colisão (broad-phase por círculo envolvente + narrow-phase por interseção de segmentos).
+  * `include/solvers/baseline.hpp` / `src/solvers/baseline.cpp`: baseline em grade que gera posições sem overlap.
   * `apps/solver_baseline.cpp`: `main` que usa os módulos acima e escreve um `submission_baseline_cpp.csv` válido (use `--output` para mudar o caminho).
 
 Para compilar e gerar o submission baseline:

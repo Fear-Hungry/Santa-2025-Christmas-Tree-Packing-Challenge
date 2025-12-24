@@ -9,9 +9,9 @@
 #include <string>
 #include <vector>
 
-#include "geom.hpp"
-#include "solver_tile_options.hpp"
-#include "tiling_pool.hpp"
+#include "geometry/geom.hpp"
+#include "solvers/solver_tile_options.hpp"
+#include "solvers/tiling_pool.hpp"
 
 namespace {
 

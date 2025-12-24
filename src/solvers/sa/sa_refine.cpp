@@ -1,4 +1,4 @@
-#include "sa.hpp"
+#include "solvers/sa.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -12,13 +12,13 @@
 #include <tuple>
 #include <vector>
 
-#include "collision.hpp"
+#include "geometry/collision.hpp"
 #include "sa_geometry.hpp"
 #include "sa_refine_cost.hpp"
 #include "sa_refine_grid.hpp"
 #include "sa_refine_pick.hpp"
-#include "submission_io.hpp"
-#include "wrap_utils.hpp"
+#include "utils/submission_io.hpp"
+#include "utils/wrap_utils.hpp"
 
 namespace {
 

@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "geom.hpp"
+#include "geometry/geom.hpp"
 
 struct MicroAdjustOptions {
     double rot_eps_deg = 0.0;

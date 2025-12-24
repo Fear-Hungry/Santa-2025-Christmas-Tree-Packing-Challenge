@@ -1,4 +1,4 @@
-#include "geom.hpp"
+#include "geometry/geom.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -6,7 +6,7 @@
 #include <limits>
 #include <sstream>
 
-#include "wrap_utils.hpp"
+#include "utils/wrap_utils.hpp"
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;

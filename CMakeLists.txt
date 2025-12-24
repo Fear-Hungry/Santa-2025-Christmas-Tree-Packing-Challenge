@@ -20,90 +20,73 @@ if(CMAKE_CONFIGURATION_TYPES)
 endif()
 
 add_compile_options(-O2)
-include_directories(${CMAKE_SOURCE_DIR}/include)
 
-set(SRC_COMMON
+set(SRC_GEOMETRY
   src/geometry/geom.cpp
   src/geometry/collision.cpp
   src/geometry/collision_polygons.cpp
+)
+
+set(SRC_UTILS
   src/utils/micro_adjust.cpp
   src/utils/score.cpp
+  src/utils/submission_io.cpp
+  src/utils/ensemble_submissions_cli.cpp
 )
-set(SRC_COMPACTION_CONTACT src/solvers/compaction_contact.cpp)
-set(SRC_SUBMISSION src/utils/submission_io.cpp)
-set(SRC_SA
+
+set(SRC_SOLVERS
+  src/solvers/baseline.cpp
+  src/solvers/boundary_refine.cpp
+  src/solvers/compaction_contact.cpp
+  src/solvers/ga.cpp
+  src/solvers/post_opt.cpp
+  src/solvers/prefix_prune.cpp
+  src/solvers/tiling_pool.cpp
+  src/solvers/repair.cpp
   src/solvers/sa/sa.cpp
   src/solvers/sa/sa_refine.cpp
-)
-set(SRC_PREFIX_PRUNE src/solvers/prefix_prune.cpp)
-set(SRC_BOUNDARY_REFINE src/solvers/boundary_refine.cpp)
-set(SRC_TILING_POOL src/solvers/tiling_pool.cpp)
-set(SRC_GA src/solvers/ga.cpp)
-set(SRC_BASELINE src/solvers/baseline.cpp)
-set(SRC_SOLVER_TILE_CLI src/utils/solver_tile_cli.cpp)
-set(SRC_ENSEMBLE_CLI src/utils/ensemble_submissions_cli.cpp)
-
-add_executable(solver_tile
-  apps/solver_tile.cpp
-  ${SRC_COMMON}
-  ${SRC_COMPACTION_CONTACT}
-  ${SRC_SUBMISSION}
-  ${SRC_SA}
-  ${SRC_PREFIX_PRUNE}
-  ${SRC_BOUNDARY_REFINE}
-  ${SRC_TILING_POOL}
-  ${SRC_SOLVER_TILE_CLI}
+  src/utils/solver_tile_cli.cpp
 )
 
-add_executable(solver_tessellation
-  apps/solver_tessellation.cpp
-  ${SRC_COMMON}
-  ${SRC_COMPACTION_CONTACT}
-  ${SRC_SUBMISSION}
-  ${SRC_SA}
-  ${SRC_GA}
-)
+add_library(santa_geometry ${SRC_GEOMETRY})
+target_include_directories(santa_geometry PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
-add_executable(blend_repair
-  apps/blend_repair.cpp
-  ${SRC_COMMON}
-  ${SRC_SUBMISSION}
-  ${SRC_SA}
-)
+add_library(santa_utils ${SRC_UTILS})
+target_include_directories(santa_utils PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(santa_utils PUBLIC santa_geometry)
 
-add_executable(ensemble_submissions
-  apps/ensemble_submissions.cpp
-  ${SRC_COMMON}
-  ${SRC_SUBMISSION}
-  ${SRC_ENSEMBLE_CLI}
-)
+add_library(santa_solvers ${SRC_SOLVERS})
+target_include_directories(santa_solvers PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(santa_solvers PUBLIC santa_geometry santa_utils)
 
-add_executable(score_submission
-  apps/score_submission.cpp
-  ${SRC_COMMON}
-  ${SRC_SUBMISSION}
-)
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(santa_solvers PUBLIC OpenMP::OpenMP_CXX)
+endif()
 
-add_executable(solver_baseline
-  apps/solver_baseline.cpp
-  ${SRC_COMMON}
-  ${SRC_SUBMISSION}
-  ${SRC_BASELINE}
-)
+add_executable(solver_tile apps/solver_tile.cpp)
+target_link_libraries(solver_tile PRIVATE santa_solvers)
 
-add_executable(compact_contact
-  apps/compact_contact.cpp
-  ${SRC_COMMON}
-  ${SRC_COMPACTION_CONTACT}
-  ${SRC_SUBMISSION}
-)
+add_executable(solver_tessellation apps/solver_tessellation.cpp)
+target_link_libraries(solver_tessellation PRIVATE santa_solvers)
 
-add_executable(tile_density_search
-  apps/tile_density_search.cpp
-  ${SRC_COMMON}
-  ${SRC_SUBMISSION}
-  ${SRC_SA}
-  ${SRC_PREFIX_PRUNE}
-  ${SRC_BOUNDARY_REFINE}
-  ${SRC_TILING_POOL}
-)
+add_executable(blend_repair apps/blend_repair.cpp)
+target_link_libraries(blend_repair PRIVATE santa_solvers)
+
+add_executable(ensemble_submissions apps/ensemble_submissions.cpp)
+target_link_libraries(ensemble_submissions PRIVATE santa_utils)
+
+add_executable(score_submission apps/score_submission.cpp)
+target_link_libraries(score_submission PRIVATE santa_utils)
+
+add_executable(solver_baseline apps/solver_baseline.cpp)
+target_link_libraries(solver_baseline PRIVATE santa_solvers)
+
+add_executable(compact_contact apps/compact_contact.cpp)
+target_link_libraries(compact_contact PRIVATE santa_solvers)
+
+add_executable(tile_density_search apps/tile_density_search.cpp)
+target_link_libraries(tile_density_search PRIVATE santa_solvers)
+
+add_executable(post_opt apps/post_opt.cpp)
+target_link_libraries(post_opt PRIVATE santa_solvers)

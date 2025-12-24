@@ -4,7 +4,7 @@
 #include <cmath>
 #include <vector>
 
-#include "geom.hpp"
+#include "geometry/geom.hpp"
 
 namespace sa_refine {
 

@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "sa.hpp"
+#include "solvers/sa.hpp"
 
 enum class TileObjective {
     kDensity,
@@ -14,6 +14,11 @@ enum class TileObjective {
 enum class ShiftSearchMode {
     kOff,
     kMultires,
+};
+
+enum class ChainDropMode {
+    kGreedy,
+    kBest,
 };
 
 struct Options {
@@ -26,6 +31,8 @@ struct Options {
     int tile_score_pool_size = 320;
     int tile_score_nmax = 200;
     int tile_score_full_every = 50;
+    int tile_score_fast_angles = 1;
+    int tile_density_warmup_iters = 0;
     bool tile_opt_lattice = true;
     double lattice_v_ratio = 1.0;
     double lattice_theta_deg = 60.0;
@@ -39,6 +46,7 @@ struct Options {
     int sa_chain_iters_per_n = 0;
     int sa_chain_min_n = 1;
     double sa_chain_band_layers = 2.5;
+    ChainDropMode sa_chain_drop = ChainDropMode::kGreedy;
     bool sa_beam = false;
     int sa_beam_width = 0;
     int sa_beam_remove = 8;
@@ -105,6 +113,17 @@ struct Options {
     double ils_repair_mtv_damping = 1.0;
     double ils_repair_mtv_split = 0.5;
 
+    // Global contraction (n_max): escala constante + relaxamento por forças.
+    int global_contract_steps = 0;
+    double global_contract_scale = 0.999;
+    int global_contract_relax_iters = 0;
+    double global_contract_overlap_force = 1.0;
+    double global_contract_center_force = 0.02;
+    double global_contract_step_frac = 0.05;
+    int global_contract_repair_passes = 200;
+    int global_contract_sa_restarts = 0;
+    int global_contract_sa_iters = 0;
+
     // Milenkovic-Zeng (soft overlap) + ILS (shift + tabu).
     // Aplica um SA em 2 fases (liquefação -> solidificação) com soft overlap,
     // e em volta executa um ILS estilo paper (shift perturb + tabu em swap-rot).
@@ -145,6 +164,7 @@ struct Options {
     double target_soft_overlap_cut = 0.8;
     bool target_early_stop = true;
     int target_sa_check_interval = 200;
+    int target_rounds = 1;
     uint64_t seed = 123456789ULL;
     double spacing_safety = 1.001;
     double shift_a = 0.0;
@@ -158,4 +178,60 @@ struct Options {
     int shift_pool_size = 0;
     std::vector<double> angle_candidates;
     std::string output_path = "submission_tile_cpp.csv";
+
+    // Pós-otimizador estilo "Tree Packer v18".
+    bool post_opt = false;
+    int post_iters = 15000;
+    int post_restarts = 16;
+    double post_t0 = 2.5;
+    double post_tm = 0.0000005;
+    bool post_enable_squeeze = true;
+    bool post_enable_compaction = true;
+    bool post_enable_edge_slide = true;
+    bool post_enable_local_search = true;
+    double post_remove_ratio = 0.50;
+    int post_free_area_min_n = 10;
+    bool post_enable_free_area = true;
+
+    // Scheduler por termo (s_n^2/n): tiers A/B/C e épocas.
+    bool post_term_scheduler = false;
+    int post_term_epochs = 3;
+    int post_term_tier_a = 20;
+    int post_term_tier_b = 120;
+    int post_term_min_n = 1;
+    double post_tier_a_iters_mult = 1.50;
+    double post_tier_a_restarts_mult = 1.00;
+    double post_tier_b_iters_mult = 0.50;
+    double post_tier_b_restarts_mult = 0.25;
+    double post_tier_c_iters_mult = 0.00;
+    double post_tier_c_restarts_mult = 0.00;
+    double post_tier_a_tighten_mult = 1.00;
+    double post_tier_b_tighten_mult = 0.40;
+    double post_tier_c_tighten_mult = 0.10;
+    double post_accept_term_eps = 0.0;
+
+    // Reinserção guiada (remove/reinsert) para Tier A/B.
+    bool post_guided_reinsert = false;
+    int post_reinsert_attempts_tier_a = 4000;
+    int post_reinsert_attempts_tier_b = 1200;
+    int post_reinsert_attempts_tier_c = 200;
+    int post_reinsert_shell_anchors = 32;
+    int post_reinsert_core_anchors = 64;
+    int post_reinsert_jitter_attempts = 256;
+    double post_reinsert_angle_jitter_deg = 30.0;
+    double post_reinsert_early_stop_rel = 0.002;
+
+    // Backprop exploratório (fontes além do gate side_src < side_k).
+    bool post_backprop_explore = false;
+    int post_backprop_span_a = 10;
+    int post_backprop_span_b = 7;
+    int post_backprop_span_c = 5;
+    int post_backprop_max_combos_a = 400;
+    int post_backprop_max_combos_b = 250;
+    int post_backprop_max_combos_c = 200;
+    bool post_enable_backprop = true;
+    int post_backprop_passes = 10;
+    int post_backprop_span = 5;
+    int post_backprop_max_combos = 200;
+    int post_threads = 0;
 };

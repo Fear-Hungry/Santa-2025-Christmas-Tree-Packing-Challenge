@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "geom.hpp"
+#include "geometry/geom.hpp"
 
 struct BaselineConfig {
     double spacing_factor = 2.5;

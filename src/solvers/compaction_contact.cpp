@@ -1,4 +1,4 @@
-#include "compaction_contact.hpp"
+#include "solvers/compaction_contact.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -6,10 +6,10 @@
 #include <random>
 #include <vector>
 
-#include "collision.hpp"
-#include "geom.hpp"
-#include "spatial_grid.hpp"
-#include "submission_io.hpp"
+#include "geometry/collision.hpp"
+#include "geometry/geom.hpp"
+#include "geometry/spatial_grid.hpp"
+#include "utils/submission_io.hpp"
 
 namespace compaction_contact {
 namespace {

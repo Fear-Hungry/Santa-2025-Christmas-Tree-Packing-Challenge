@@ -8,9 +8,9 @@
 #include <string>
 #include <vector>
 
-#include "collision.hpp"
-#include "geom.hpp"
-#include "submission_io.hpp"
+#include "geometry/collision.hpp"
+#include "geometry/geom.hpp"
+#include "utils/submission_io.hpp"
 
 struct InstanceData {
     std::vector<TreePose> poses;

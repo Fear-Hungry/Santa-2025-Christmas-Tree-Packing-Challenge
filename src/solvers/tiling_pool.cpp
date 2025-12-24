@@ -1,4 +1,4 @@
-#include "tiling_pool.hpp"
+#include "solvers/tiling_pool.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -8,10 +8,10 @@
 #include <utility>
 #include <vector>
 
-#include "collision.hpp"
-#include "prefix_prune.hpp"
-#include "submission_io.hpp"
-#include "wrap_utils.hpp"
+#include "geometry/collision.hpp"
+#include "solvers/prefix_prune.hpp"
+#include "utils/submission_io.hpp"
+#include "utils/wrap_utils.hpp"
 
 namespace {
 
@@ -414,27 +414,93 @@ double total_score_min_sides(const std::vector<double>& prefix_side_by_n,
     return total;
 }
 
+std::vector<double> sample_tile_score_angles(const std::vector<double>& candidates, int count) {
+    if (candidates.empty()) {
+        return {0.0};
+    }
+    if (count <= 1) {
+        return {candidates.front()};
+    }
+    const int n = static_cast<int>(candidates.size());
+    if (count >= n) {
+        return candidates;
+    }
+
+    std::vector<double> out;
+    out.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        double t = (count == 1) ? 0.0 : static_cast<double>(i) / static_cast<double>(count - 1);
+        int idx = static_cast<int>(std::round(t * static_cast<double>(n - 1)));
+        idx = std::max(0, std::min(n - 1, idx));
+        double ang = candidates[static_cast<size_t>(idx)];
+        if (out.empty() || std::abs(out.back() - ang) > 1e-12) {
+            out.push_back(ang);
+        }
+    }
+    if (out.empty()) {
+        out.push_back(candidates.front());
+    }
+    return out;
+}
+
 TileScoreEval eval_tile_score_fast(const Polygon& base_poly,
                                    const Pattern& pattern,
                                    double radius,
                                    double spacing,
-                                   double angle_deg,
-                                   int pool_size,
-                                   int n_max) {
-    TileScoreEval out;
-    out.best_angle = angle_deg;
-    out.spacing = spacing;
+                                   const Options& opt) {
+    TileScoreEval best;
+    best.spacing = spacing;
 
-    std::vector<TreePose> pool = generate_ordered_tiling(pool_size, spacing, angle_deg, pattern);
-    if (static_cast<int>(pool.size()) < n_max) {
-        return out;
+    const int n_max = opt.tile_score_nmax;
+    int pool_size = opt.tile_score_pool_size;
+    if (pool_size <= 0) {
+        pool_size = std::max(opt.n_max, n_max);
     }
-    std::vector<TreePose> prefix(pool.begin(), pool.begin() + n_max);
-    std::vector<double> prefix_side_by_n =
-        prefix_sides_from_bbs(bounding_boxes_for_poses(base_poly, prefix));
-    out.total = total_score_from_sides(prefix_side_by_n, n_max);
-    out.ok = std::isfinite(out.total);
-    return out;
+    pool_size = std::max(pool_size, n_max);
+
+    const std::vector<double> angles =
+        sample_tile_score_angles(opt.angle_candidates, opt.tile_score_fast_angles);
+
+    for (double ang : angles) {
+        std::vector<TreePose> pool = generate_ordered_tiling(pool_size, spacing, ang, pattern);
+        if (static_cast<int>(pool.size()) < n_max) {
+            continue;
+        }
+        if (any_overlap(base_poly, pool, radius)) {
+            continue;
+        }
+        auto pool_q = quantize_poses(pool);
+        if (any_overlap(base_poly, pool_q, radius)) {
+            continue;
+        }
+
+        std::vector<TreePose> prefix_nmax;
+        if (opt.prefix_order == "greedy") {
+            prefix_nmax = greedy_prefix_min_side(base_poly, pool_q, n_max);
+        } else {
+            prefix_nmax = std::vector<TreePose>(pool_q.begin(), pool_q.begin() + n_max);
+        }
+
+        std::vector<double> prefix_side_by_n =
+            prefix_sides_from_bbs(bounding_boxes_for_poses(base_poly, prefix_nmax));
+
+        double total = 0.0;
+        if (opt.prune) {
+            std::vector<double> prune_side_by_n =
+                greedy_pruned_sides(bounding_boxes_for_poses(base_poly, pool_q), n_max, 1e-12);
+            total = total_score_min_sides(prefix_side_by_n, &prune_side_by_n, n_max, best.total);
+        } else {
+            total = total_score_min_sides(prefix_side_by_n, nullptr, n_max, best.total);
+        }
+
+        if (total + 1e-12 < best.total) {
+            best.total = total;
+            best.best_angle = ang;
+            best.ok = std::isfinite(best.total);
+        }
+    }
+
+    return best;
 }
 
 bool quantized_pool_is_valid(const Polygon& base_poly,
@@ -611,6 +677,14 @@ Pattern optimize_tile_by_spacing(const Polygon& base_poly,
                                  Pattern pattern,
                                  double radius,
                                  const Options& opt) {
+    if (opt.tile_obj == TileObjective::kScore && opt.tile_density_warmup_iters > 0) {
+        Options warm = opt;
+        warm.tile_obj = TileObjective::kDensity;
+        warm.tile_iters = opt.tile_density_warmup_iters;
+        warm.tile_density_warmup_iters = 0;
+        warm.seed = opt.seed + 7919;
+        pattern = optimize_tile_by_spacing(base_poly, pattern, radius, warm);
+    }
     if (opt.tile_iters <= 0) {
         return pattern;
     }
@@ -720,9 +794,7 @@ Pattern optimize_tile_by_spacing(const Polygon& base_poly,
                                    curr,
                                    radius,
                                    curr_spacing * opt.spacing_safety,
-                                   0.0,
-                                   std::max(opt.tile_score_pool_size, opt.tile_score_nmax),
-                                   opt.tile_score_nmax)
+                                   opt)
                   .total;
 
     for (int it = 0; it < opt.tile_iters; ++it) {
@@ -786,9 +858,8 @@ Pattern optimize_tile_by_spacing(const Polygon& base_poly,
         if (opt.tile_obj == TileObjective::kDensity) {
             obj = area_per_tree(spacing, cand);
         } else {
-            const int pool_size = std::max(opt.tile_score_pool_size, opt.tile_score_nmax);
             TileScoreEval fast = eval_tile_score_fast(
-                base_poly, cand, radius, spacing * opt.spacing_safety, 0.0, pool_size, opt.tile_score_nmax);
+                base_poly, cand, radius, spacing * opt.spacing_safety, opt);
             if (!fast.ok) {
                 continue;
             }

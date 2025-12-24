@@ -1,4 +1,4 @@
-#include "score.hpp"
+#include "utils/score.hpp"
 
 double score_from_side(double side, int n) {
     if (n <= 0) {

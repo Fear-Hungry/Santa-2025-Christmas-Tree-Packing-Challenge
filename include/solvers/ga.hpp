@@ -4,7 +4,7 @@
 #include <limits>
 #include <vector>
 
-#include "geom.hpp"
+#include "geometry/geom.hpp"
 
 struct GAParams {
     int pop_size = 40;

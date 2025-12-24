@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "geom.hpp"
+#include "geometry/geom.hpp"
 
 struct BoundaryRefineParams {
     double radius = 0.0;

@@ -2,8 +2,8 @@
 
 #include <vector>
 
-#include "geom.hpp"
-#include "solver_tile_options.hpp"
+#include "geometry/geom.hpp"
+#include "solvers/solver_tile_options.hpp"
 
 struct MotifPoint {
     double a;    // coord em u (fração do tile)

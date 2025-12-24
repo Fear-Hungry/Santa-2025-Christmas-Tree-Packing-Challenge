@@ -1,4 +1,4 @@
-#include "ga.hpp"
+#include "solvers/ga.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -9,10 +9,10 @@
 #include <utility>
 #include <vector>
 
-#include "collision.hpp"
-#include "geom.hpp"
-#include "spatial_grid.hpp"
-#include "wrap_utils.hpp"
+#include "geometry/collision.hpp"
+#include "geometry/geom.hpp"
+#include "geometry/spatial_grid.hpp"
+#include "utils/wrap_utils.hpp"
 
 namespace {
 

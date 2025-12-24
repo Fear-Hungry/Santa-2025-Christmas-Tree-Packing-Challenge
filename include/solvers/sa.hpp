@@ -5,7 +5,7 @@
 #include <limits>
 #include <vector>
 
-#include "geom.hpp"
+#include "geometry/geom.hpp"
 
 class SARefiner {
 public:

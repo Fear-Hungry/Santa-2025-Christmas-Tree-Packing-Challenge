@@ -10,9 +10,9 @@
 #include <string>
 #include <vector>
 
-#include "compaction_contact.hpp"
-#include "geom.hpp"
-#include "submission_io.hpp"
+#include "solvers/compaction_contact.hpp"
+#include "geometry/geom.hpp"
+#include "utils/submission_io.hpp"
 
 namespace {
 

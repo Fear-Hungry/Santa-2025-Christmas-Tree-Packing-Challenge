@@ -1,4 +1,4 @@
-#include "sa.hpp"
+#include "solvers/sa.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -12,10 +12,10 @@
 #include <tuple>
 #include <vector>
 
-#include "collision.hpp"
+#include "geometry/collision.hpp"
 #include "sa_geometry.hpp"
-#include "submission_io.hpp"
-#include "wrap_utils.hpp"
+#include "utils/submission_io.hpp"
+#include "utils/wrap_utils.hpp"
 
 SARefiner::SARefiner(const Polygon& base_poly, double radius)
     : base_poly_(base_poly), radius_(radius), base_tris_(triangulate_polygon(base_poly)) {}

@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <limits>
 
-#include "geom.hpp"
+#include "geometry/geom.hpp"
 
 namespace sa_detail {
 

@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "geom.hpp"
+#include "geometry/geom.hpp"
 
 // Returns s^2 / n, where s is the bounding square side.
 double score_from_side(double side, int n);

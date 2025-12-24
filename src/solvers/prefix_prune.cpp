@@ -1,4 +1,4 @@
-#include "prefix_prune.hpp"
+#include "solvers/prefix_prune.hpp"
 
 #include <algorithm>
 #include <array>
@@ -9,10 +9,10 @@
 #include <stdexcept>
 #include <vector>
 
-#include "collision.hpp"
-#include "sa.hpp"
-#include "spatial_grid.hpp"
-#include "submission_io.hpp"
+#include "geometry/collision.hpp"
+#include "solvers/sa.hpp"
+#include "geometry/spatial_grid.hpp"
+#include "utils/submission_io.hpp"
 
 namespace {
 
@@ -975,6 +975,46 @@ int pick_greedy_boundary_removal(const std::vector<BoundingBox>& bbs,
     return best_idx;
 }
 
+int pick_best_removal(const std::vector<BoundingBox>& bbs) {
+    const int n = static_cast<int>(bbs.size());
+    if (n <= 0) {
+        return -1;
+    }
+    if (n == 1) {
+        return 0;
+    }
+
+    const ExtentsSupport support = compute_extents_support(bbs);
+    int best_idx = 0;
+    double best_side = std::numeric_limits<double>::infinity();
+    double best_key1 = -std::numeric_limits<double>::infinity();
+    double best_key2 = -std::numeric_limits<double>::infinity();
+
+    for (int idx = 0; idx < n; ++idx) {
+        Extents e2 = extents_without_index(support, idx);
+        double s2 = side_from_extents(e2);
+        const auto& bb = bbs[static_cast<size_t>(idx)];
+        const double cx = 0.5 * (bb.min_x + bb.max_x);
+        const double cy = 0.5 * (bb.min_y + bb.max_y);
+        const double key1 = std::max(std::abs(cx), std::abs(cy));
+        const double key2 = std::hypot(cx, cy);
+
+        if (s2 < best_side - 1e-15 ||
+            (std::abs(s2 - best_side) <= 1e-15 &&
+             (key1 > best_key1 + 1e-15 ||
+              (std::abs(key1 - best_key1) <= 1e-15 &&
+               (key2 > best_key2 + 1e-15 ||
+                (std::abs(key2 - best_key2) <= 1e-15 && idx < best_idx)))))) {
+            best_side = s2;
+            best_key1 = key1;
+            best_key2 = key2;
+            best_idx = idx;
+        }
+    }
+
+    return best_idx;
+}
+
 struct RemovalCandidate {
     int idx = -1;
     double side = std::numeric_limits<double>::infinity();
@@ -985,21 +1025,29 @@ struct RemovalCandidate {
 std::vector<int> pick_removal_candidates(const std::vector<BoundingBox>& bbs,
                                          const Extents& e,
                                          double band,
-                                         int max_keep) {
+                                         int max_keep,
+                                         bool all_indices) {
     std::vector<int> candidates;
     candidates.reserve(bbs.size());
-    const double tol = std::max(1e-12, band);
-    for (size_t i = 0; i < bbs.size(); ++i) {
-        const auto& bb = bbs[i];
-        if (bb.min_x <= e.min_x + tol || bb.max_x >= e.max_x - tol ||
-            bb.min_y <= e.min_y + tol || bb.max_y >= e.max_y - tol) {
-            candidates.push_back(static_cast<int>(i));
-        }
-    }
-    if (candidates.empty()) {
+    if (all_indices) {
         candidates.resize(bbs.size());
         for (size_t i = 0; i < bbs.size(); ++i) {
             candidates[i] = static_cast<int>(i);
+        }
+    } else {
+        const double tol = std::max(1e-12, band);
+        for (size_t i = 0; i < bbs.size(); ++i) {
+            const auto& bb = bbs[i];
+            if (bb.min_x <= e.min_x + tol || bb.max_x >= e.max_x - tol ||
+                bb.min_y <= e.min_y + tol || bb.max_y >= e.max_y - tol) {
+                candidates.push_back(static_cast<int>(i));
+            }
+        }
+        if (candidates.empty()) {
+            candidates.resize(bbs.size());
+            for (size_t i = 0; i < bbs.size(); ++i) {
+                candidates[i] = static_cast<int>(i);
+            }
         }
     }
 
@@ -1440,8 +1488,13 @@ ChainResult build_sa_chain_solutions(const Polygon& base_poly,
         }
 
         std::vector<BoundingBox> bbs = bounding_boxes_for_poses(base_poly, curr);
-        Extents e = compute_extents(bbs);
-        int remove_idx = pick_greedy_boundary_removal(bbs, e, 1e-12);
+        int remove_idx = -1;
+        if (opt.sa_chain_drop == ChainDropMode::kBest) {
+            remove_idx = pick_best_removal(bbs);
+        } else {
+            Extents e = compute_extents(bbs);
+            remove_idx = pick_greedy_boundary_removal(bbs, e, 1e-12);
+        }
         if (remove_idx < 0 || remove_idx >= n) {
             throw std::runtime_error("build_sa_chain_solutions: índice inválido na remoção.");
         }
@@ -1605,13 +1658,14 @@ ChainResult build_sa_beam_chain_solutions(const Polygon& base_poly,
             if (static_cast<int>(state.poses.size()) != n) {
                 throw std::runtime_error("build_sa_beam_chain_solutions: tamanho inconsistente no beam.");
             }
-            std::vector<BoundingBox> bbs =
-                bounding_boxes_for_poses(base_poly, state.poses);
-            Extents e = compute_extents(bbs);
-            const double band = opt.sa_chain_band_layers * std::max(1e-12, band_step);
-            const int max_keep = std::max(1, opt.sa_beam_remove);
-            std::vector<int> remove_idxs =
-                pick_removal_candidates(bbs, e, band, max_keep);
+        std::vector<BoundingBox> bbs =
+            bounding_boxes_for_poses(base_poly, state.poses);
+        Extents e = compute_extents(bbs);
+        const double band = opt.sa_chain_band_layers * std::max(1e-12, band_step);
+        const int max_keep = std::max(1, opt.sa_beam_remove);
+        const bool all_indices = (opt.sa_chain_drop == ChainDropMode::kBest);
+        std::vector<int> remove_idxs =
+            pick_removal_candidates(bbs, e, band, max_keep, all_indices);
 
             for (int idx : remove_idxs) {
                 BeamState cand;

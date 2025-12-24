@@ -1,4 +1,4 @@
-#include "ensemble_submissions_cli.hpp"
+#include "utils/ensemble_submissions_cli.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -10,10 +10,10 @@
 #include <string>
 #include <vector>
 
-#include "collision.hpp"
-#include "geom.hpp"
-#include "micro_adjust.hpp"
-#include "submission_io.hpp"
+#include "geometry/collision.hpp"
+#include "geometry/geom.hpp"
+#include "utils/micro_adjust.hpp"
+#include "utils/submission_io.hpp"
 
 namespace {
 

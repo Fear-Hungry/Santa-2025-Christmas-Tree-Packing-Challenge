@@ -1,4 +1,4 @@
-#include "boundary_refine.hpp"
+#include "solvers/boundary_refine.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -6,10 +6,10 @@
 #include <random>
 #include <vector>
 
-#include "collision.hpp"
-#include "submission_io.hpp"
-#include "spatial_grid.hpp"
-#include "wrap_utils.hpp"
+#include "geometry/collision.hpp"
+#include "utils/submission_io.hpp"
+#include "geometry/spatial_grid.hpp"
+#include "utils/wrap_utils.hpp"
 
 namespace {
 constexpr double kTol = 1e-9;

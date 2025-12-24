@@ -14,7 +14,8 @@ TARGETS := solver_tile \
 	score_submission \
 	solver_baseline \
 	compact_contact \
-	tile_density_search
+	tile_density_search \
+	post_opt
 
 .PHONY: all $(TARGETS) clean
 

@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-#include "sa.hpp"
+#include "solvers/sa.hpp"
 
 namespace sa_refine {
 

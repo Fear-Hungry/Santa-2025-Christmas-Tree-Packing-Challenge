@@ -14,15 +14,15 @@
 #include <unordered_map>
 #include <vector>
 
-#include "cli_parse.hpp"
-#include "collision.hpp"
-#include "compaction_contact.hpp"
-#include "ga.hpp"
-#include "geom.hpp"
-#include "sa.hpp"
-#include "score.hpp"
-#include "submission_io.hpp"
-#include "wrap_utils.hpp"
+#include "utils/cli_parse.hpp"
+#include "geometry/collision.hpp"
+#include "solvers/compaction_contact.hpp"
+#include "solvers/ga.hpp"
+#include "geometry/geom.hpp"
+#include "solvers/sa.hpp"
+#include "utils/score.hpp"
+#include "utils/submission_io.hpp"
+#include "utils/wrap_utils.hpp"
 
 namespace {
 
