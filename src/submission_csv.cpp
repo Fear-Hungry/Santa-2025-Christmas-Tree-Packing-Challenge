@@ -235,10 +235,17 @@ Submission read_submission_csv(std::istream& in, const ReadSubmissionOptions& op
         seen[static_cast<size_t>(puzzle)][static_cast<size_t>(index)] = true;
     }
 
-    if (opt.require_complete) {
+    const bool require_all_puzzles = opt.require_complete;
+    const bool require_puzzle_complete = opt.require_complete || opt.require_puzzle_complete;
+
+    if (require_all_puzzles || require_puzzle_complete) {
         for (int puzzle = 1; puzzle <= opt.nmax; ++puzzle) {
-            if (sub.poses[static_cast<size_t>(puzzle)].empty()) {
+            const bool present = !sub.poses[static_cast<size_t>(puzzle)].empty();
+            if (require_all_puzzles && !present) {
                 throw std::runtime_error("missing puzzle " + std::to_string(puzzle));
+            }
+            if (!present) {
+                continue;
             }
             for (int i = 0; i < puzzle; ++i) {
                 if (!seen[static_cast<size_t>(puzzle)][static_cast<size_t>(i)]) {

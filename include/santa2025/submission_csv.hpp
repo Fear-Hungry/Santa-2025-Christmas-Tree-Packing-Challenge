@@ -12,7 +12,11 @@ namespace santa2025 {
 
 struct ReadSubmissionOptions {
     int nmax = 200;
-    bool require_complete = true;  // require all puzzles 1..nmax and indices 0..puzzle-1
+    // If true, require all puzzles 1..nmax and indices 0..puzzle-1.
+    bool require_complete = true;
+    // If true, require indices 0..puzzle-1 for every puzzle that appears in the CSV,
+    // even when allow-partial mode is enabled (i.e. puzzles may be missing entirely).
+    bool require_puzzle_complete = true;
 };
 
 struct Submission {
