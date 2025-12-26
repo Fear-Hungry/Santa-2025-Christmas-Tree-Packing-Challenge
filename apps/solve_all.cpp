@@ -77,10 +77,21 @@ struct Args {
     int lns_stages = 3;
     int lns_stage_attempts = 20;
     double lns_remove_frac = 0.12;
+    double lns_remove_frac_max = 0.12;
+    double lns_remove_frac_growth = 1.0;
+    int lns_remove_frac_growth_every = 1;
     double lns_boundary_prob = 0.7;
+    std::string lns_destroy_mode = "mix-random-boundary";  // mix-random-boundary|random|boundary|cluster|gap
+    int lns_gap_grid = 48;
+    int lns_gap_try_hole_center = 1;
     double lns_shrink_factor = 0.999;
     double lns_shrink_delta = 0.0;
     int lns_slide_iters = 60;
+    int lns_repair_sa_iters = 0;
+    int lns_repair_sa_best_of = 2;
+    double lns_repair_sa_t0 = 0.02;
+    double lns_repair_sa_t1 = 1e-4;
+    int lns_repair_sa_anchor_samples = 2;
 
     // Optional polish stage (after multi-start selection).
     bool polish = false;
@@ -123,6 +134,25 @@ std::vector<double> parse_angles(const std::string& s) {
         out.push_back(std::stod(tok));
     }
     return out;
+}
+
+santa2025::LNSDestroyMode parse_lns_destroy_mode(const std::string& s) {
+    if (s == "mix-random-boundary") {
+        return santa2025::LNSDestroyMode::kMixRandomBoundary;
+    }
+    if (s == "random") {
+        return santa2025::LNSDestroyMode::kRandom;
+    }
+    if (s == "boundary") {
+        return santa2025::LNSDestroyMode::kBoundary;
+    }
+    if (s == "cluster") {
+        return santa2025::LNSDestroyMode::kCluster;
+    }
+    if (s == "gap") {
+        return santa2025::LNSDestroyMode::kGap;
+    }
+    throw std::runtime_error("invalid --lns-destroy-mode (use mix-random-boundary|random|boundary|cluster|gap)");
 }
 
 Args parse_args(int argc, char** argv) {
@@ -200,14 +230,36 @@ Args parse_args(int argc, char** argv) {
             args.lns_stage_attempts = std::stoi(need("--lns-stage-attempts"));
         } else if (a == "--lns-remove-frac") {
             args.lns_remove_frac = std::stod(need("--lns-remove-frac"));
+        } else if (a == "--lns-remove-frac-max") {
+            args.lns_remove_frac_max = std::stod(need("--lns-remove-frac-max"));
+        } else if (a == "--lns-remove-frac-growth") {
+            args.lns_remove_frac_growth = std::stod(need("--lns-remove-frac-growth"));
+        } else if (a == "--lns-remove-frac-growth-every") {
+            args.lns_remove_frac_growth_every = std::stoi(need("--lns-remove-frac-growth-every"));
         } else if (a == "--lns-boundary-prob") {
             args.lns_boundary_prob = std::stod(need("--lns-boundary-prob"));
+        } else if (a == "--lns-destroy-mode") {
+            args.lns_destroy_mode = need("--lns-destroy-mode");
+        } else if (a == "--lns-gap-grid") {
+            args.lns_gap_grid = std::stoi(need("--lns-gap-grid"));
+        } else if (a == "--lns-gap-try-hole-center") {
+            args.lns_gap_try_hole_center = std::stoi(need("--lns-gap-try-hole-center"));
         } else if (a == "--lns-shrink-factor") {
             args.lns_shrink_factor = std::stod(need("--lns-shrink-factor"));
         } else if (a == "--lns-shrink-delta") {
             args.lns_shrink_delta = std::stod(need("--lns-shrink-delta"));
         } else if (a == "--lns-slide-iters") {
             args.lns_slide_iters = std::stoi(need("--lns-slide-iters"));
+        } else if (a == "--lns-repair-sa-iters") {
+            args.lns_repair_sa_iters = std::stoi(need("--lns-repair-sa-iters"));
+        } else if (a == "--lns-repair-sa-best-of") {
+            args.lns_repair_sa_best_of = std::stoi(need("--lns-repair-sa-best-of"));
+        } else if (a == "--lns-repair-sa-t0") {
+            args.lns_repair_sa_t0 = std::stod(need("--lns-repair-sa-t0"));
+        } else if (a == "--lns-repair-sa-t1") {
+            args.lns_repair_sa_t1 = std::stod(need("--lns-repair-sa-t1"));
+        } else if (a == "--lns-repair-sa-anchor-samples") {
+            args.lns_repair_sa_anchor_samples = std::stoi(need("--lns-repair-sa-anchor-samples"));
         } else if (a == "--polish") {
             args.polish = true;
         } else if (a == "--polish-rounds") {
@@ -260,9 +312,15 @@ Args parse_args(int argc, char** argv) {
                 << "                [--cycle-prefix N]\n"
                 << "                [--sa-iters 20000] [--sa-iters-mode linear|constant] [--sa-tries 8]\n"
                 << "                [--sa-t0 0.25] [--sa-t1 1e-4] [--sa-sigma0 0.20] [--sa-sigma1 0.01]\n"
-                << "                [--lns] [--lns-stages 3] [--lns-stage-attempts 20] [--lns-remove-frac 0.12]\n"
-                << "                [--lns-boundary-prob 0.7] [--lns-shrink-factor 0.999] [--lns-shrink-delta 0]\n"
-                << "                [--lns-slide-iters 60]\n"
+                << "                [--lns] [--lns-stages 3] [--lns-stage-attempts 20]\n"
+                << "                [--lns-remove-frac 0.12] [--lns-remove-frac-max 0.12] [--lns-remove-frac-growth 1.0]\n"
+                << "                [--lns-remove-frac-growth-every 1] [--lns-boundary-prob 0.7]\n"
+                << "                [--lns-destroy-mode mix-random-boundary|random|boundary|cluster|gap]\n"
+                << "                [--lns-gap-grid 48] [--lns-gap-try-hole-center 0|1]\n"
+                << "                [--lns-shrink-factor 0.999] [--lns-shrink-delta 0] [--lns-slide-iters 60]\n"
+                << "                [--lns-repair-sa-iters 0] [--lns-repair-sa-best-of 2]\n"
+                << "                [--lns-repair-sa-t0 0.02] [--lns-repair-sa-t1 1e-4]\n"
+                << "                [--lns-repair-sa-anchor-samples 2]\n"
                 << "                [--polish] [--polish-rounds 2] [--polish-remove-frac 0.06]\n"
                 << "                [--compact-final] [--compact-passes 1]\n"
                 << "                [--hh-iters 60] [--lahc-length 0] [--ucb-c 0.25]\n"
@@ -375,8 +433,27 @@ Args parse_args(int argc, char** argv) {
         if (!(args.lns_remove_frac > 0.0 && args.lns_remove_frac <= 1.0)) {
             throw std::runtime_error("--lns-remove-frac must be in (0,1]");
         }
+        if (!(args.lns_remove_frac_max > 0.0 && args.lns_remove_frac_max <= 1.0)) {
+            throw std::runtime_error("--lns-remove-frac-max must be in (0,1]");
+        }
+        if (!(args.lns_remove_frac_max + 1e-12 >= args.lns_remove_frac)) {
+            throw std::runtime_error("--lns-remove-frac-max must be >= --lns-remove-frac");
+        }
+        if (!(args.lns_remove_frac_growth >= 1.0)) {
+            throw std::runtime_error("--lns-remove-frac-growth must be >= 1");
+        }
+        if (args.lns_remove_frac_growth_every <= 0) {
+            throw std::runtime_error("--lns-remove-frac-growth-every must be > 0");
+        }
         if (!(args.lns_boundary_prob >= 0.0 && args.lns_boundary_prob <= 1.0)) {
             throw std::runtime_error("--lns-boundary-prob must be in [0,1]");
+        }
+        (void)parse_lns_destroy_mode(args.lns_destroy_mode);
+        if (args.lns_gap_grid < 4) {
+            throw std::runtime_error("--lns-gap-grid must be >= 4");
+        }
+        if (!(args.lns_gap_try_hole_center == 0 || args.lns_gap_try_hole_center == 1)) {
+            throw std::runtime_error("--lns-gap-try-hole-center must be 0 or 1");
         }
         if (!(args.lns_shrink_factor > 0.0 && args.lns_shrink_factor <= 1.0)) {
             throw std::runtime_error("--lns-shrink-factor must be in (0,1]");
@@ -386,6 +463,18 @@ Args parse_args(int argc, char** argv) {
         }
         if (args.lns_slide_iters <= 0) {
             throw std::runtime_error("--lns-slide-iters must be > 0");
+        }
+        if (args.lns_repair_sa_iters < 0) {
+            throw std::runtime_error("--lns-repair-sa-iters must be >= 0");
+        }
+        if (args.lns_repair_sa_best_of <= 0) {
+            throw std::runtime_error("--lns-repair-sa-best-of must be >= 1");
+        }
+        if (!(args.lns_repair_sa_t0 > 0.0) || !(args.lns_repair_sa_t1 > 0.0)) {
+            throw std::runtime_error("--lns-repair-sa-t0/--lns-repair-sa-t1 must be > 0");
+        }
+        if (args.lns_repair_sa_anchor_samples <= 0) {
+            throw std::runtime_error("--lns-repair-sa-anchor-samples must be >= 1");
         }
     }
     if (args.polish_rounds <= 0) {
@@ -1063,11 +1152,22 @@ void apply_polish_stage(
     lns.stages = args.polish_rounds;
     lns.stage_attempts = args.lns_stage_attempts;
     lns.remove_frac = args.polish_remove_frac;
+    lns.remove_frac_max = std::max(args.polish_remove_frac, args.lns_remove_frac_max);
+    lns.remove_frac_growth = args.lns_remove_frac_growth;
+    lns.remove_frac_growth_every = args.lns_remove_frac_growth_every;
     lns.boundary_prob = args.lns_boundary_prob;
+    lns.destroy_mode = parse_lns_destroy_mode(args.lns_destroy_mode);
+    lns.gap_grid = args.lns_gap_grid;
+    lns.gap_try_hole_center = (args.lns_gap_try_hole_center != 0);
     lns.shrink_factor = args.lns_shrink_factor;
     lns.shrink_delta = args.lns_shrink_delta;
     lns.slide_iters = args.lns_slide_iters;
     lns.gap = args.gap;
+    lns.repair_sa_iters = args.lns_repair_sa_iters;
+    lns.repair_sa_best_of = args.lns_repair_sa_best_of;
+    lns.repair_sa_t0 = args.lns_repair_sa_t0;
+    lns.repair_sa_t1 = args.lns_repair_sa_t1;
+    lns.repair_sa_anchor_samples = args.lns_repair_sa_anchor_samples;
     lns.safety_eps = args.safety_eps;
     lns.max_offsets_per_delta = args.max_offsets;
     lns.seed = seed;
@@ -1250,6 +1350,17 @@ SolveOut refine_one_run(
         hh.lns_base.gap = args.gap;
         hh.lns_base.safety_eps = args.safety_eps;
         hh.lns_base.max_offsets_per_delta = args.max_offsets;
+        hh.lns_base.remove_frac_max = args.lns_remove_frac_max;
+        hh.lns_base.remove_frac_growth = args.lns_remove_frac_growth;
+        hh.lns_base.remove_frac_growth_every = args.lns_remove_frac_growth_every;
+        hh.lns_base.destroy_mode = parse_lns_destroy_mode(args.lns_destroy_mode);
+        hh.lns_base.gap_grid = args.lns_gap_grid;
+        hh.lns_base.gap_try_hole_center = (args.lns_gap_try_hole_center != 0);
+        hh.lns_base.repair_sa_iters = args.lns_repair_sa_iters;
+        hh.lns_base.repair_sa_best_of = args.lns_repair_sa_best_of;
+        hh.lns_base.repair_sa_t0 = args.lns_repair_sa_t0;
+        hh.lns_base.repair_sa_t1 = args.lns_repair_sa_t1;
+        hh.lns_base.repair_sa_anchor_samples = args.lns_repair_sa_anchor_samples;
 
         const auto res = santa2025::hyper_heuristic_optimize(poly, best, hh, eps);
         best = res.best_poses;
@@ -1274,11 +1385,22 @@ SolveOut refine_one_run(
         lns.stages = args.lns_stages;
         lns.stage_attempts = args.lns_stage_attempts;
         lns.remove_frac = args.lns_remove_frac;
+        lns.remove_frac_max = args.lns_remove_frac_max;
+        lns.remove_frac_growth = args.lns_remove_frac_growth;
+        lns.remove_frac_growth_every = args.lns_remove_frac_growth_every;
         lns.boundary_prob = args.lns_boundary_prob;
+        lns.destroy_mode = parse_lns_destroy_mode(args.lns_destroy_mode);
+        lns.gap_grid = args.lns_gap_grid;
+        lns.gap_try_hole_center = (args.lns_gap_try_hole_center != 0);
         lns.shrink_factor = args.lns_shrink_factor;
         lns.shrink_delta = args.lns_shrink_delta;
         lns.slide_iters = args.lns_slide_iters;
         lns.gap = args.gap;
+        lns.repair_sa_iters = args.lns_repair_sa_iters;
+        lns.repair_sa_best_of = args.lns_repair_sa_best_of;
+        lns.repair_sa_t0 = args.lns_repair_sa_t0;
+        lns.repair_sa_t1 = args.lns_repair_sa_t1;
+        lns.repair_sa_anchor_samples = args.lns_repair_sa_anchor_samples;
         lns.safety_eps = args.safety_eps;
         lns.max_offsets_per_delta = args.max_offsets;
         lns.seed = seed;
