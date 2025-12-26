@@ -1,36 +1,51 @@
-# Build outputs
-/bin/
+# Build artifacts
 /build/
+/bin/
+/.cache/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/Makefile
 *.o
 *.obj
 *.a
 *.so
 *.dylib
+*.dll
 *.exe
 *.out
-*.dSYM/
 
-# Local compiled binaries (do not commit)
-/blend_repair
-/ensemble_submissions
-/score_submission
-/solver_*
-!/solver_*.cpp
-!/solver_*.hpp
+# Experiments / runs / local outputs
+/runs/
+/outputs/
+/artifacts/
+/checkpoints/
+/models/
+/logs/
+/tmp/
 
-# Python cache
+# Kaggle submissions (usually generated)
+/submission*.csv
+
+# Python
 __pycache__/
 *.pyc
+.python-version
+.pytest_cache/
+.ruff_cache/
 
-# Default solver outputs at repo root
-/submission_*.csv
+# Jupyter
+.ipynb_checkpoints/
 
-# Submissions (local artifacts)
-/submissions/
+# Virtualenvs / env files
+.env
+.env.*
+.venv/
+venv/
+env/
 
-# Scratch / temporary outputs
-/runs/
-
-*.md
-!README.md
-!docs/ARCHITECTURE.md
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
