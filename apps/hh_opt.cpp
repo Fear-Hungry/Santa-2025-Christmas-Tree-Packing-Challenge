@@ -43,6 +43,16 @@ struct Args {
     int lahc_length = 0;
     double ucb_c = 0.25;
 
+    // AOS (macro UCB + ALNS roulette inside macro).
+    double alns_rho = 0.20;
+    double alns_min_weight = 1e-12;
+    double reward_time_eps_ms = 1e-3;
+
+    // SA bursts on stagnation (0 = auto for after/cooldown, and "no override" for iters).
+    int sa_burst_after = 0;
+    int sa_burst_cooldown = 0;
+    int sa_burst_iters = 5000;
+
     // Operator base budgets.
     int sa_block_iters = 5000;
     int sa_tries = 8;
@@ -137,6 +147,18 @@ Args parse_args(int argc, char** argv) {
             args.lahc_length = std::stoi(need("--lahc-length"));
         } else if (a == "--ucb-c") {
             args.ucb_c = std::stod(need("--ucb-c"));
+        } else if (a == "--alns-rho") {
+            args.alns_rho = std::stod(need("--alns-rho"));
+        } else if (a == "--alns-min-weight") {
+            args.alns_min_weight = std::stod(need("--alns-min-weight"));
+        } else if (a == "--reward-eps-ms") {
+            args.reward_time_eps_ms = std::stod(need("--reward-eps-ms"));
+        } else if (a == "--sa-burst-after") {
+            args.sa_burst_after = std::stoi(need("--sa-burst-after"));
+        } else if (a == "--sa-burst-cooldown") {
+            args.sa_burst_cooldown = std::stoi(need("--sa-burst-cooldown"));
+        } else if (a == "--sa-burst-iters") {
+            args.sa_burst_iters = std::stoi(need("--sa-burst-iters"));
         } else if (a == "--sa-iters") {
             args.sa_block_iters = std::stoi(need("--sa-iters"));
         } else if (a == "--sa-tries") {
@@ -185,6 +207,8 @@ Args parse_args(int argc, char** argv) {
                       << "              [--objective s|score] [--nmax-score N]\n"
                       << "              [--seed S] [--runs R] [--threads T]\n"
                       << "              [--hh-iters N] [--lahc-length L] [--ucb-c c]\n"
+                      << "              [--alns-rho r] [--alns-min-weight w] [--reward-eps-ms e]\n"
+                      << "              [--sa-burst-after N] [--sa-burst-cooldown N] [--sa-burst-iters N]\n"
                       << "              [--sa-iters N] [--sa-tries K] [--sa-t0 T] [--sa-t1 T]\n"
                       << "              [--sa-sigma0 s] [--sa-sigma1 s]\n"
                       << "              [--lns-stages N] [--lns-stage-attempts N] [--lns-remove-frac f]\n"
@@ -217,6 +241,18 @@ int main(int argc, char** argv) {
         }
         if (!(args.ucb_c >= 0.0)) {
             throw std::runtime_error("--ucb-c must be >= 0");
+        }
+        if (!(args.alns_rho >= 0.0 && args.alns_rho <= 1.0)) {
+            throw std::runtime_error("--alns-rho must be in [0,1]");
+        }
+        if (!(args.alns_min_weight > 0.0)) {
+            throw std::runtime_error("--alns-min-weight must be > 0");
+        }
+        if (!(args.reward_time_eps_ms >= 0.0)) {
+            throw std::runtime_error("--reward-eps-ms must be >= 0");
+        }
+        if (args.sa_burst_after < 0 || args.sa_burst_cooldown < 0 || args.sa_burst_iters < 0) {
+            throw std::runtime_error("--sa-burst-* must be >= 0");
         }
         if (args.sa_block_iters <= 0 || args.sa_tries <= 0) {
             throw std::runtime_error("--sa-iters/--sa-tries must be > 0");
@@ -304,6 +340,12 @@ int main(int argc, char** argv) {
             hh.hh_iters = args.hh_iters;
             hh.lahc_length = args.lahc_length;
             hh.ucb_c = args.ucb_c;
+            hh.alns_rho = args.alns_rho;
+            hh.alns_min_weight = args.alns_min_weight;
+            hh.reward_time_eps_ms = args.reward_time_eps_ms;
+            hh.sa_burst_after = args.sa_burst_after;
+            hh.sa_burst_cooldown = args.sa_burst_cooldown;
+            hh.sa_burst_iters = args.sa_burst_iters;
             hh.log_every = args.log_every;
             hh.log_prefix = "[run " + std::to_string(run_id) + " hh]";
 
@@ -429,11 +471,25 @@ int main(int argc, char** argv) {
             << best.res.best_score << "},\n";
         out << "  \"counters\": {\"attempted\": " << best.res.attempted << ", \"feasible\": " << best.res.feasible
             << ", \"accepted\": " << best.res.accepted << "},\n";
+        if (!best.res.macros.empty()) {
+            out << "  \"macros\": [\n";
+            for (size_t i = 0; i < best.res.macros.size(); ++i) {
+                const auto& m = best.res.macros[i];
+                out << "    {\"name\": \"" << m.name << "\", \"selected\": " << m.selected << ", \"mean_reward\": "
+                    << m.mean_reward << "}";
+                if (i + 1 != best.res.macros.size()) {
+                    out << ",";
+                }
+                out << "\n";
+            }
+            out << "  ],\n";
+        }
         out << "  \"ops\": [\n";
         for (size_t i = 0; i < best.res.ops.size(); ++i) {
             const auto& s = best.res.ops[i];
             out << "    {\"name\": \"" << s.name << "\", \"selected\": " << s.selected << ", \"feasible\": " << s.feasible
-                << ", \"accepted\": " << s.accepted << ", \"mean_reward\": " << s.mean_reward << "}";
+                << ", \"accepted\": " << s.accepted << ", \"mean_reward\": " << s.mean_reward << ", \"weight\": "
+                << s.weight << "}";
             if (i + 1 != best.res.ops.size()) {
                 out << ",";
             }
@@ -498,4 +554,3 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
-

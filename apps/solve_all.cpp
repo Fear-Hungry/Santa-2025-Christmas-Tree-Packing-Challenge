@@ -35,7 +35,11 @@ struct Args {
     int nmax = 200;
 
     std::string init = "grid-shake";  // grid-shake | bottom-left
+    bool init_portfolio = false;
+    int init_top_m = 3;
     bool warm_start = true;
+    std::string warm_start_feed = "best";  // best | initial
+    bool parallel_n = false;
 
     // Refinement per puzzle: none | sa | hh
     std::string refine = "sa";
@@ -78,10 +82,25 @@ struct Args {
     double lns_shrink_delta = 0.0;
     int lns_slide_iters = 60;
 
+    // Optional polish stage (after multi-start selection).
+    bool polish = false;
+    int polish_rounds = 2;
+    double polish_remove_frac = 0.06;
+
+    // Optional deterministic compaction stage (after polish).
+    bool compact_final = false;
+    int compact_passes = 1;
+
     // HH options (used when refine == hh).
     int hh_iters = 60;
     int lahc_length = 0;
     double ucb_c = 0.25;
+    double alns_rho = 0.20;
+    double alns_min_weight = 1e-12;
+    double reward_time_eps_ms = 1e-3;
+    int sa_burst_after = 0;
+    int sa_burst_cooldown = 0;
+    int sa_burst_iters = 5000;
 
     // Output.
     std::string out_csv;
@@ -121,8 +140,16 @@ Args parse_args(int argc, char** argv) {
             args.nmax = std::stoi(need("--nmax"));
         } else if (a == "--init") {
             args.init = need("--init");
+        } else if (a == "--init-portfolio") {
+            args.init_portfolio = true;
+        } else if (a == "--init-top-m") {
+            args.init_top_m = std::stoi(need("--init-top-m"));
+        } else if (a == "--parallel-n") {
+            args.parallel_n = true;
         } else if (a == "--no-warm-start") {
             args.warm_start = false;
+        } else if (a == "--warm-start-feed") {
+            args.warm_start_feed = need("--warm-start-feed");
         } else if (a == "--refine") {
             args.refine = need("--refine");
         } else if (a == "--runs-per-n") {
@@ -181,12 +208,34 @@ Args parse_args(int argc, char** argv) {
             args.lns_shrink_delta = std::stod(need("--lns-shrink-delta"));
         } else if (a == "--lns-slide-iters") {
             args.lns_slide_iters = std::stoi(need("--lns-slide-iters"));
+        } else if (a == "--polish") {
+            args.polish = true;
+        } else if (a == "--polish-rounds") {
+            args.polish_rounds = std::stoi(need("--polish-rounds"));
+        } else if (a == "--polish-remove-frac") {
+            args.polish_remove_frac = std::stod(need("--polish-remove-frac"));
+        } else if (a == "--compact-final") {
+            args.compact_final = true;
+        } else if (a == "--compact-passes") {
+            args.compact_passes = std::stoi(need("--compact-passes"));
         } else if (a == "--hh-iters") {
             args.hh_iters = std::stoi(need("--hh-iters"));
         } else if (a == "--lahc-length") {
             args.lahc_length = std::stoi(need("--lahc-length"));
         } else if (a == "--ucb-c") {
             args.ucb_c = std::stod(need("--ucb-c"));
+        } else if (a == "--alns-rho") {
+            args.alns_rho = std::stod(need("--alns-rho"));
+        } else if (a == "--alns-min-weight") {
+            args.alns_min_weight = std::stod(need("--alns-min-weight"));
+        } else if (a == "--reward-eps-ms") {
+            args.reward_time_eps_ms = std::stod(need("--reward-eps-ms"));
+        } else if (a == "--sa-burst-after") {
+            args.sa_burst_after = std::stoi(need("--sa-burst-after"));
+        } else if (a == "--sa-burst-cooldown") {
+            args.sa_burst_cooldown = std::stoi(need("--sa-burst-cooldown"));
+        } else if (a == "--sa-burst-iters") {
+            args.sa_burst_iters = std::stoi(need("--sa-burst-iters"));
         } else if (a == "--out") {
             args.out_csv = need("--out");
         } else if (a == "--out-dir") {
@@ -202,7 +251,10 @@ Args parse_args(int argc, char** argv) {
         } else if (a == "-h" || a == "--help") {
             std::cout
                 << "Usage: solve_all --out submission.csv [--nmax 200] [--init grid-shake|bottom-left]\n"
+                << "                [--init-portfolio] [--init-top-m 3]\n"
+                << "                [--parallel-n]\n"
                 << "                [--refine none|sa|hh] [--no-warm-start]\n"
+                << "                [--warm-start-feed best|initial]\n"
                 << "                [--runs-per-n 1] [--threads N] [--seed 1]\n"
                 << "                [--angles a,b,c] [--cycle a,b,c] [--mode all|cycle|cycle-then-all]\n"
                 << "                [--cycle-prefix N]\n"
@@ -211,7 +263,11 @@ Args parse_args(int argc, char** argv) {
                 << "                [--lns] [--lns-stages 3] [--lns-stage-attempts 20] [--lns-remove-frac 0.12]\n"
                 << "                [--lns-boundary-prob 0.7] [--lns-shrink-factor 0.999] [--lns-shrink-delta 0]\n"
                 << "                [--lns-slide-iters 60]\n"
+                << "                [--polish] [--polish-rounds 2] [--polish-remove-frac 0.06]\n"
+                << "                [--compact-final] [--compact-passes 1]\n"
                 << "                [--hh-iters 60] [--lahc-length 0] [--ucb-c 0.25]\n"
+                << "                [--alns-rho 0.20] [--alns-min-weight 1e-12] [--reward-eps-ms 1e-3]\n"
+                << "                [--sa-burst-after 0] [--sa-burst-cooldown 0] [--sa-burst-iters 5000]\n"
                 << "                [--gap 1e-6] [--safety-eps 0] [--slide-iters 32] [--max-offsets 512] [--side-grow 1.05] [--restarts 40]\n"
                 << "                [--out-dir runs/solve_all] [--out-json run.json] [--csv-precision 17]\n";
             std::exit(0);
@@ -238,6 +294,18 @@ Args parse_args(int argc, char** argv) {
     }
     if (args.mode != "all" && args.cycle.empty()) {
         throw std::runtime_error("--cycle must be set when using cycle modes");
+    }
+    if (args.warm_start_feed != "best" && args.warm_start_feed != "initial") {
+        throw std::runtime_error("invalid --warm-start-feed (use best|initial)");
+    }
+    if (args.init_top_m <= 0) {
+        throw std::runtime_error("--init-top-m must be > 0");
+    }
+    if (!args.init_portfolio) {
+        args.init_top_m = 1;
+    }
+    if (args.parallel_n && args.warm_start && args.warm_start_feed != "initial") {
+        throw std::runtime_error("--parallel-n requires --warm-start-feed initial (or disable warm start)");
     }
     if (args.runs_per_n <= 0) {
         throw std::runtime_error("--runs-per-n must be > 0");
@@ -266,6 +334,18 @@ Args parse_args(int argc, char** argv) {
     }
     if (!(args.ucb_c >= 0.0)) {
         throw std::runtime_error("--ucb-c must be >= 0");
+    }
+    if (!(args.alns_rho >= 0.0 && args.alns_rho <= 1.0)) {
+        throw std::runtime_error("--alns-rho must be in [0,1]");
+    }
+    if (!(args.alns_min_weight > 0.0)) {
+        throw std::runtime_error("--alns-min-weight must be > 0");
+    }
+    if (!(args.reward_time_eps_ms >= 0.0)) {
+        throw std::runtime_error("--reward-eps-ms must be >= 0");
+    }
+    if (args.sa_burst_after < 0 || args.sa_burst_cooldown < 0 || args.sa_burst_iters < 0) {
+        throw std::runtime_error("--sa-burst-* must be >= 0");
     }
     if (!(args.gap >= 0.0)) {
         throw std::runtime_error("--gap must be >= 0");
@@ -307,6 +387,15 @@ Args parse_args(int argc, char** argv) {
         if (args.lns_slide_iters <= 0) {
             throw std::runtime_error("--lns-slide-iters must be > 0");
         }
+    }
+    if (args.polish_rounds <= 0) {
+        throw std::runtime_error("--polish-rounds must be > 0");
+    }
+    if (!(args.polish_remove_frac > 0.0 && args.polish_remove_frac <= 1.0)) {
+        throw std::runtime_error("--polish-remove-frac must be in (0,1]");
+    }
+    if (args.compact_passes <= 0) {
+        throw std::runtime_error("--compact-passes must be > 0");
     }
     if (!(args.eps > 0.0)) {
         throw std::runtime_error("--eps must be > 0");
@@ -608,6 +697,29 @@ bool insert_one_bottom_left(
         index.set_pose(i, poses[static_cast<size_t>(i)]);
     }
 
+    bool bounds_init = false;
+    double cur_min_x = 0.0;
+    double cur_min_y = 0.0;
+    double cur_max_x = 0.0;
+    double cur_max_y = 0.0;
+    for (int i = 0; i < id; ++i) {
+        const auto& p = poses[static_cast<size_t>(i)];
+        const santa2025::BoundingBox local_bb = rotated_bbox_cached(tree_poly, p.deg, bbox_cache);
+        const santa2025::BoundingBox bb = bbox_for_pose(local_bb, p);
+        if (!bounds_init) {
+            bounds_init = true;
+            cur_min_x = bb.min_x;
+            cur_min_y = bb.min_y;
+            cur_max_x = bb.max_x;
+            cur_max_y = bb.max_y;
+        } else {
+            cur_min_x = std::min(cur_min_x, bb.min_x);
+            cur_min_y = std::min(cur_min_y, bb.min_y);
+            cur_max_x = std::max(cur_max_x, bb.max_x);
+            cur_max_y = std::max(cur_max_y, bb.max_y);
+        }
+    }
+
     std::unordered_map<std::int64_t, std::vector<santa2025::Point>> verts_cache;
 
     auto offsets_for = [&](double delta_deg) -> const std::vector<santa2025::Point>& {
@@ -623,6 +735,8 @@ bool insert_one_bottom_left(
     };
 
     santa2025::Pose best{std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(), 0.0};
+    santa2025::BoundingBox best_world_bb{};
+    double best_s = std::numeric_limits<double>::infinity();
     bool any_angle = false;
 
     const auto angs = angle_candidates(args, id);
@@ -642,9 +756,25 @@ bool insert_one_bottom_left(
             if (!std::isfinite(cand.x) || !std::isfinite(cand.y)) {
                 return;
             }
+            const santa2025::BoundingBox cand_world_bb = bbox_for_pose(local_bb, cand);
+            double new_min_x = cand_world_bb.min_x;
+            double new_min_y = cand_world_bb.min_y;
+            double new_max_x = cand_world_bb.max_x;
+            double new_max_y = cand_world_bb.max_y;
+            if (bounds_init) {
+                new_min_x = std::min(new_min_x, cur_min_x);
+                new_min_y = std::min(new_min_y, cur_min_y);
+                new_max_x = std::max(new_max_x, cur_max_x);
+                new_max_y = std::max(new_max_y, cur_max_y);
+            }
+            const double new_s = std::max(new_max_x - new_min_x, new_max_y - new_min_y);
             any_angle = true;
-            if (cand.y < best.y - 1e-12 || (std::abs(cand.y - best.y) <= 1e-12 && cand.x < best.x)) {
+            if (new_s < best_s - 1e-12 ||
+                (std::abs(new_s - best_s) <= 1e-12 &&
+                 (cand.y < best.y - 1e-12 || (std::abs(cand.y - best.y) <= 1e-12 && cand.x < best.x)))) {
                 best = cand;
+                best_world_bb = cand_world_bb;
+                best_s = new_s;
             }
         };
 
@@ -739,6 +869,275 @@ int scaled_iters(int n, const Args& args) {
     return std::max(1, iters);
 }
 
+struct InitialCandidate {
+    std::string name;
+    std::vector<santa2025::Pose> poses;
+    double s = std::numeric_limits<double>::infinity();
+};
+
+bool has_angle(const std::vector<double>& angles, double target, double tol = 1e-9) {
+    for (const double a : angles) {
+        if (std::abs(a - target) <= tol) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<double> angle_subset_if_available(const std::vector<double>& angles, const std::vector<double>& subset) {
+    for (const double x : subset) {
+        if (!has_angle(angles, x)) {
+            return {};
+        }
+    }
+    return subset;
+}
+
+bool try_warm_start_insert_one(
+    const santa2025::Polygon& poly,
+    int n,
+    const std::vector<santa2025::Pose>& prev,
+    const Args& args,
+    std::vector<santa2025::Pose>& out_poses,
+    double eps
+) {
+    out_poses.clear();
+    if (!args.warm_start || n <= 1) {
+        return false;
+    }
+    if (static_cast<int>(prev.size()) != n - 1) {
+        return false;
+    }
+
+    std::vector<santa2025::Pose> cand = prev;
+    RotatedBBoxCache bbox_cache;
+    if (!normalize_to_quadrant(poly, cand, bbox_cache, eps)) {
+        return false;
+    }
+    cand.push_back(santa2025::Pose{0.0, 0.0, 0.0});
+
+    std::vector<santa2025::BoundingBox> world;
+    world.reserve(static_cast<size_t>(n - 1));
+    for (int i = 0; i < n - 1; ++i) {
+        const auto& p = cand[static_cast<size_t>(i)];
+        const santa2025::BoundingBox local_bb = rotated_bbox_cached(poly, p.deg, bbox_cache);
+        world.push_back(bbox_for_pose(local_bb, p));
+    }
+    const double side0 = bounds_metrics(world).s;
+
+    bool ok = false;
+    double side = std::max(1e-9, side0);
+    for (int attempt = 0; attempt < args.max_restarts; ++attempt) {
+        if (insert_one_bottom_left(poly, cand, args, side, bbox_cache, eps)) {
+            ok = true;
+            break;
+        }
+        side *= args.side_grow;
+    }
+    if (!ok) {
+        return false;
+    }
+
+    out_poses = std::move(cand);
+    return true;
+}
+
+std::vector<InitialCandidate> build_initial_candidates(
+    const santa2025::Polygon& poly,
+    int n,
+    const std::vector<santa2025::Pose>& prev,
+    const Args& args,
+    double eps
+) {
+    std::vector<InitialCandidate> cands;
+    cands.reserve(12);
+
+    auto push = [&](std::string name, std::vector<santa2025::Pose> poses) {
+        if (static_cast<int>(poses.size()) != n) {
+            return;
+        }
+        InitialCandidate c;
+        c.name = std::move(name);
+        c.poses = std::move(poses);
+        c.s = santa2025::packing_s200(poly, c.poses);
+        cands.push_back(std::move(c));
+    };
+
+    {
+        std::vector<santa2025::Pose> poses;
+        if (try_warm_start_insert_one(poly, n, prev, args, poses, eps)) {
+            push("warm_start", std::move(poses));
+        }
+    }
+
+    if (args.init_portfolio) {
+        const std::vector<std::vector<double>> subsets = {
+            {0.0, 180.0},
+            {45.0, 225.0},
+            {90.0, 270.0},
+            {0.0, 90.0, 180.0, 270.0},
+        };
+
+        for (const auto& subset : subsets) {
+            const auto ang = angle_subset_if_available(args.angles, subset);
+            if (ang.empty()) {
+                continue;
+            }
+            Args a = args;
+            a.mode = "all";
+            a.cycle.clear();
+            a.angles = ang;
+
+            std::vector<santa2025::Pose> poses;
+            if (try_warm_start_insert_one(poly, n, prev, a, poses, eps)) {
+                std::ostringstream nm;
+                nm << "warm_start_angles=";
+                for (size_t i = 0; i < ang.size(); ++i) {
+                    if (i) {
+                        nm << ",";
+                    }
+                    nm << ang[i];
+                }
+                push(nm.str(), std::move(poses));
+            }
+        }
+
+        try {
+            push(std::string("init_") + args.init, build_initial(poly, n, args, eps));
+        } catch (const std::exception&) {
+            // ignore
+        }
+
+        try {
+            Args a = args;
+            a.init = (args.init == "bottom-left") ? "grid-shake" : "bottom-left";
+            push(std::string("init_") + a.init, build_initial(poly, n, a, eps));
+        } catch (const std::exception&) {
+            // ignore
+        }
+    }
+
+    if (cands.empty()) {
+        push(std::string("init_") + args.init, build_initial(poly, n, args, eps));
+    }
+
+    std::sort(cands.begin(), cands.end(), [](const InitialCandidate& a, const InitialCandidate& b) {
+        if (a.s != b.s) {
+            return a.s < b.s;
+        }
+        return a.name < b.name;
+    });
+
+    if (static_cast<int>(cands.size()) > args.init_top_m) {
+        cands.resize(static_cast<size_t>(args.init_top_m));
+    }
+
+    return cands;
+}
+
+void apply_polish_stage(
+    const santa2025::Polygon& poly,
+    int n,
+    std::vector<santa2025::Pose>& poses,
+    const Args& args,
+    std::uint64_t seed,
+    double eps
+) {
+    if (!args.polish || n <= 0) {
+        return;
+    }
+
+    santa2025::LNSOptions lns;
+    lns.n = n;
+    lns.angles_deg = args.angles;
+    lns.cycle_deg = args.cycle;
+    lns.cycle_prefix = args.cycle_prefix;
+    if (args.mode == "all") {
+        lns.orientation_mode = santa2025::OrientationMode::kTryAll;
+    } else if (args.mode == "cycle") {
+        lns.orientation_mode = santa2025::OrientationMode::kCycle;
+    } else {
+        lns.orientation_mode = santa2025::OrientationMode::kCycleThenAll;
+    }
+
+    lns.stages = args.polish_rounds;
+    lns.stage_attempts = args.lns_stage_attempts;
+    lns.remove_frac = args.polish_remove_frac;
+    lns.boundary_prob = args.lns_boundary_prob;
+    lns.shrink_factor = args.lns_shrink_factor;
+    lns.shrink_delta = args.lns_shrink_delta;
+    lns.slide_iters = args.lns_slide_iters;
+    lns.gap = args.gap;
+    lns.safety_eps = args.safety_eps;
+    lns.max_offsets_per_delta = args.max_offsets;
+    lns.seed = seed;
+    lns.log_every = 0;
+
+    const auto r = santa2025::lns_shrink_wrap(poly, poses, lns, eps);
+    poses = r.best_poses;
+}
+
+bool compact_down_left_final(
+    const santa2025::Polygon& poly,
+    std::vector<santa2025::Pose>& poses,
+    const Args& args,
+    double eps
+) {
+    if (!args.compact_final) {
+        return true;
+    }
+    const int n = static_cast<int>(poses.size());
+    if (n <= 1) {
+        return true;
+    }
+
+    RotatedBBoxCache bbox_cache;
+    if (!normalize_to_quadrant(poly, poses, bbox_cache, eps)) {
+        return false;
+    }
+
+    std::vector<santa2025::BoundingBox> local_bbs(static_cast<size_t>(n));
+    std::vector<santa2025::BoundingBox> world_bbs(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        const auto& p = poses[static_cast<size_t>(i)];
+        local_bbs[static_cast<size_t>(i)] = rotated_bbox_cached(poly, p.deg, bbox_cache);
+        world_bbs[static_cast<size_t>(i)] = bbox_for_pose(local_bbs[static_cast<size_t>(i)], p);
+    }
+
+    double side = bounds_metrics(world_bbs).s;
+
+    santa2025::CollisionIndex index(poly, eps);
+    index.resize(n);
+    for (int i = 0; i < n; ++i) {
+        index.set_pose(i, poses[static_cast<size_t>(i)]);
+    }
+
+    for (int pass = 0; pass < args.compact_passes; ++pass) {
+        bool any_change = false;
+        for (int i = 0; i < n; ++i) {
+            const santa2025::Pose old = poses[static_cast<size_t>(i)];
+            index.remove(i);
+
+            const santa2025::Pose cand =
+                slide_down_left(old, local_bbs[static_cast<size_t>(i)], index, side, args.safety_eps, args.slide_iters, eps);
+            if (std::isfinite(cand.x) && std::isfinite(cand.y)) {
+                poses[static_cast<size_t>(i)] = cand;
+                index.set_pose(i, cand);
+                world_bbs[static_cast<size_t>(i)] = bbox_for_pose(local_bbs[static_cast<size_t>(i)], cand);
+                any_change = any_change || (cand.x != old.x) || (cand.y != old.y);
+            } else {
+                index.set_pose(i, old);
+            }
+        }
+        side = bounds_metrics(world_bbs).s;
+        if (!any_change) {
+            break;
+        }
+    }
+
+    return true;
+}
+
 struct SolveOut {
     int n = 0;
     std::uint64_t seed = 0;
@@ -798,6 +1197,12 @@ SolveOut refine_one_run(
         hh.hh_iters = args.hh_iters;
         hh.lahc_length = args.lahc_length;
         hh.ucb_c = args.ucb_c;
+        hh.alns_rho = args.alns_rho;
+        hh.alns_min_weight = args.alns_min_weight;
+        hh.reward_time_eps_ms = args.reward_time_eps_ms;
+        hh.sa_burst_after = args.sa_burst_after;
+        hh.sa_burst_cooldown = args.sa_burst_cooldown;
+        hh.sa_burst_iters = args.sa_burst_iters;
         hh.seed = seed;
         hh.log_every = 0;
 
@@ -995,72 +1400,222 @@ int main(int argc, char** argv) {
         prev.reserve(static_cast<size_t>(args.nmax));
 
         constexpr std::uint64_t kNStride = 10'000'019ULL;
+        constexpr std::uint64_t kInitStride = 100'000'007ULL;
+        constexpr std::uint64_t kRunStride = 1'000'003ULL;
 
-        for (int n = 1; n <= args.nmax; ++n) {
-            std::vector<santa2025::Pose> initial;
+        auto better = [&](const SolveOut& a, const SolveOut& b) {
+            if (!a.error.empty()) {
+                return false;
+            }
+            if (!b.error.empty()) {
+                return true;
+            }
+            if (a.best_s != b.best_s) {
+                return a.best_s < b.best_s;
+            }
+            return a.seed < b.seed;
+        };
 
-            if (args.warm_start && n > 1 && static_cast<int>(prev.size()) == n - 1) {
-                std::vector<santa2025::Pose> cand = prev;
-                RotatedBBoxCache bbox_cache;
-                if (normalize_to_quadrant(poly, cand, bbox_cache, args.eps)) {
-                    cand.push_back(santa2025::Pose{0.0, 0.0, 0.0});
+        if (args.parallel_n) {
+            std::vector<std::vector<InitialCandidate>> initial_by_n(static_cast<size_t>(args.nmax + 1));
 
-                    // Current side from bbox metrics (after normalization).
-                    std::vector<santa2025::BoundingBox> world;
-                    world.reserve(static_cast<size_t>(n - 1));
-                    for (int i = 0; i < n - 1; ++i) {
-                        const auto& p = cand[static_cast<size_t>(i)];
-                        const santa2025::BoundingBox local_bb = rotated_bbox_cached(poly, p.deg, bbox_cache);
-                        world.push_back(bbox_for_pose(local_bb, p));
-                    }
-                    const double side0 = bounds_metrics(world).s;
+            prev.clear();
+            for (int n = 1; n <= args.nmax; ++n) {
+                initial_by_n[static_cast<size_t>(n)] = build_initial_candidates(poly, n, prev, args, args.eps);
+                if (initial_by_n[static_cast<size_t>(n)].empty()) {
+                    throw std::runtime_error("n=" + std::to_string(n) + ": no initial candidates");
+                }
+                // In parallel mode, warm-start must feed from an initial (deterministic) chain.
+                prev = initial_by_n[static_cast<size_t>(n)].front().poses;
+            }
 
-                    bool ok = false;
-                    double side = std::max(1e-9, side0);
-                    for (int attempt = 0; attempt < args.max_restarts; ++attempt) {
-                        if (insert_one_bottom_left(poly, cand, args, side, bbox_cache, args.eps)) {
-                            ok = true;
-                            break;
-                        }
-                        side *= args.side_grow;
-                    }
-                    if (ok) {
-                        initial = std::move(cand);
+            struct Job {
+                int n = 0;
+                int init_id = 0;
+                int run_id = 0;
+                std::uint64_t seed = 0;
+            };
+
+            std::vector<Job> jobs;
+            jobs.reserve(static_cast<size_t>(args.nmax) * static_cast<size_t>(args.init_top_m) *
+                         static_cast<size_t>(std::max(1, args.runs_per_n)));
+
+            for (int n = 1; n <= args.nmax; ++n) {
+                const auto& inits = initial_by_n[static_cast<size_t>(n)];
+                for (int init_id = 0; init_id < static_cast<int>(inits.size()); ++init_id) {
+                    for (int run_id = 0; run_id < args.runs_per_n; ++run_id) {
+                        const std::uint64_t seed = args.seed + static_cast<std::uint64_t>(n) * kNStride +
+                                                   static_cast<std::uint64_t>(init_id) * kInitStride +
+                                                   static_cast<std::uint64_t>(run_id) * kRunStride;
+                        jobs.push_back(Job{n, init_id, run_id, seed});
                     }
                 }
             }
 
-            if (initial.empty()) {
-                initial = build_initial(poly, n, args, args.eps);
+            std::vector<SolveOut> best_by_n(static_cast<size_t>(args.nmax + 1));
+            std::vector<int> best_init_by_n(static_cast<size_t>(args.nmax + 1), -1);
+            std::vector<std::mutex> locks(static_cast<size_t>(args.nmax + 1));
+
+            std::atomic<size_t> next{0};
+
+            auto worker = [&]() {
+                for (;;) {
+                    const size_t id = next.fetch_add(1);
+                    if (id >= jobs.size()) {
+                        return;
+                    }
+                    const Job& job = jobs[id];
+
+                    SolveOut out;
+                    try {
+                        out = refine_one_run(
+                            poly,
+                            job.n,
+                            initial_by_n[static_cast<size_t>(job.n)][static_cast<size_t>(job.init_id)].poses,
+                            args,
+                            job.seed,
+                            args.eps
+                        );
+                    } catch (const std::exception& e) {
+                        out.n = job.n;
+                        out.seed = job.seed;
+                        out.error = e.what();
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lk(locks[static_cast<size_t>(job.n)]);
+                        if (best_init_by_n[static_cast<size_t>(job.n)] < 0 ||
+                            better(out, best_by_n[static_cast<size_t>(job.n)])) {
+                            best_by_n[static_cast<size_t>(job.n)] = std::move(out);
+                            best_init_by_n[static_cast<size_t>(job.n)] = job.init_id;
+                        }
+                    }
+                }
+            };
+
+            int threads = args.threads;
+            if (threads == 0) {
+                threads = static_cast<int>(std::thread::hardware_concurrency());
+            }
+            threads = std::max(1, threads);
+            threads = std::min<int>(threads, static_cast<int>(jobs.size()));
+
+            std::vector<std::thread> pool;
+            pool.reserve(static_cast<size_t>(threads));
+            for (int t = 0; t < threads; ++t) {
+                pool.emplace_back(worker);
+            }
+            for (auto& th : pool) {
+                th.join();
             }
 
-            const std::uint64_t seed_n = args.seed + static_cast<std::uint64_t>(n) * kNStride;
-            auto best = refine_multi_start(poly, n, initial, args, seed_n, args.eps);
-            if (!best.error.empty()) {
-                throw std::runtime_error("n=" + std::to_string(n) + " failed: " + best.error);
+            for (int n = 1; n <= args.nmax; ++n) {
+                const int best_init_id = best_init_by_n[static_cast<size_t>(n)];
+                auto& best = best_by_n[static_cast<size_t>(n)];
+                if (best_init_id < 0 || !best.error.empty()) {
+                    throw std::runtime_error("n=" + std::to_string(n) + " failed: " + best.error);
+                }
+
+                std::vector<santa2025::Pose> poses = std::move(best.best_poses);
+                apply_polish_stage(poly, n, poses, args, best.seed + 99'991ULL, args.eps);
+                const std::vector<santa2025::Pose> before_compact = poses;
+                if (!compact_down_left_final(poly, poses, args, args.eps)) {
+                    poses = before_compact;
+                }
+
+                const double s = santa2025::packing_s200(poly, poses);
+                sub.poses[static_cast<size_t>(n)] = poses;
+
+                const double term = (s * s) / static_cast<double>(n);
+                per_s[static_cast<size_t>(n)] = s;
+                per_term[static_cast<size_t>(n)] = term;
+
+                if (!args.out_dir.empty()) {
+                    std::ostringstream name;
+                    name << "puzzle_" << std::setw(3) << std::setfill('0') << n << ".csv";
+                    write_puzzle_csv(out_dir / name.str(), n, poses, args.csv_precision);
+                }
+
+                if (args.log_every > 0 && ((n % args.log_every) == 0 || n == args.nmax)) {
+                    std::lock_guard<std::mutex> lk(santa2025::log_mutex());
+                    std::cerr << "[solve_all] n=" << n << "/" << args.nmax << " s=" << std::setprecision(17) << s
+                              << " term=" << term << " seed=" << best.seed;
+                    if (args.init_portfolio && best_init_id >= 0) {
+                        std::cerr << " init=" << initial_by_n[static_cast<size_t>(n)][static_cast<size_t>(best_init_id)].name;
+                    }
+                    std::cerr << "\n";
+                }
             }
-            if (static_cast<int>(best.best_poses.size()) != n) {
-                throw std::runtime_error("n=" + std::to_string(n) + ": solver returned wrong pose count");
-            }
+        } else {
+            for (int n = 1; n <= args.nmax; ++n) {
+                const auto initial_cands = build_initial_candidates(poly, n, prev, args, args.eps);
+                if (initial_cands.empty()) {
+                    throw std::runtime_error("n=" + std::to_string(n) + ": no initial candidates");
+                }
 
-            sub.poses[static_cast<size_t>(n)] = best.best_poses;
-            prev = best.best_poses;
+                const std::vector<santa2025::Pose> initial_for_feed = initial_cands.front().poses;
 
-            const double s = best.best_s;
-            const double term = (s * s) / static_cast<double>(n);
-            per_s[static_cast<size_t>(n)] = s;
-            per_term[static_cast<size_t>(n)] = term;
+                int best_init_id = -1;
+                SolveOut best;
+                for (size_t init_id = 0; init_id < initial_cands.size(); ++init_id) {
+                    const std::uint64_t seed_n = args.seed + static_cast<std::uint64_t>(n) * kNStride +
+                                                 static_cast<std::uint64_t>(init_id) * kInitStride;
 
-            if (!args.out_dir.empty()) {
-                std::ostringstream name;
-                name << "puzzle_" << std::setw(3) << std::setfill('0') << n << ".csv";
-                write_puzzle_csv(out_dir / name.str(), n, best.best_poses, args.csv_precision);
-            }
+                    auto r = refine_multi_start(poly, n, initial_cands[init_id].poses, args, seed_n, args.eps);
+                    if (!r.error.empty()) {
+                        if (best_init_id < 0) {
+                            best = std::move(r);
+                        }
+                        continue;
+                    }
+                    if (static_cast<int>(r.best_poses.size()) != n) {
+                        throw std::runtime_error("n=" + std::to_string(n) + ": solver returned wrong pose count");
+                    }
 
-            if (args.log_every > 0 && ((n % args.log_every) == 0 || n == args.nmax)) {
-                std::lock_guard<std::mutex> lk(santa2025::log_mutex());
-                std::cerr << "[solve_all] n=" << n << "/" << args.nmax << " s=" << std::setprecision(17) << s
-                          << " term=" << term << " seed=" << best.seed << "\n";
+                    if (best_init_id < 0 || r.best_s < best.best_s - 1e-15) {
+                        best_init_id = static_cast<int>(init_id);
+                        best = std::move(r);
+                    }
+                }
+
+                if (best_init_id < 0) {
+                    throw std::runtime_error("n=" + std::to_string(n) + " failed: " + best.error);
+                }
+
+                std::vector<santa2025::Pose> poses = std::move(best.best_poses);
+                apply_polish_stage(poly, n, poses, args, best.seed + 99'991ULL, args.eps);
+                const std::vector<santa2025::Pose> before_compact = poses;
+                if (!compact_down_left_final(poly, poses, args, args.eps)) {
+                    poses = before_compact;
+                }
+
+                const double s = santa2025::packing_s200(poly, poses);
+                sub.poses[static_cast<size_t>(n)] = poses;
+                if (args.warm_start_feed == "initial") {
+                    prev = initial_for_feed;
+                } else {
+                    prev = poses;
+                }
+
+                const double term = (s * s) / static_cast<double>(n);
+                per_s[static_cast<size_t>(n)] = s;
+                per_term[static_cast<size_t>(n)] = term;
+
+                if (!args.out_dir.empty()) {
+                    std::ostringstream name;
+                    name << "puzzle_" << std::setw(3) << std::setfill('0') << n << ".csv";
+                    write_puzzle_csv(out_dir / name.str(), n, poses, args.csv_precision);
+                }
+
+                if (args.log_every > 0 && ((n % args.log_every) == 0 || n == args.nmax)) {
+                    std::lock_guard<std::mutex> lk(santa2025::log_mutex());
+                    std::cerr << "[solve_all] n=" << n << "/" << args.nmax << " s=" << std::setprecision(17) << s
+                              << " term=" << term << " seed=" << best.seed;
+                    if (args.init_portfolio && best_init_id >= 0) {
+                        std::cerr << " init=" << initial_cands[static_cast<size_t>(best_init_id)].name;
+                    }
+                    std::cerr << "\n";
+                }
             }
         }
 

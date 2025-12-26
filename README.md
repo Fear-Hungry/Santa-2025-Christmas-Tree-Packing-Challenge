@@ -33,6 +33,23 @@ cmake --build build -j
 
 Binários saem em `./bin/`.
 
+## Melhor score local (até agora)
+
+**Menor é melhor.** Medido com `./bin/score_submission` para `n=1..200`, sem merge e sem pós-processamento de ordem.
+
+- 2025-12-26: `score = 89.033538667437242`
+- CLIs usados para reproduzir:
+
+```bash
+cmake -S . -B build
+cmake --build build -j
+
+./bin/solve_all --out runs/best_89/submission.csv --out-dir runs/best_89 --nmax 200 --init bottom-left --refine none \
+  --seed 1 --angles 0,45,90,135,180,225,270,315 --gap 1e-6 --safety-eps 0
+
+./bin/score_submission runs/best_89/submission.csv --breakdown
+```
+
 ## Ferramentas
 
 Inspecionar propriedades (área, bounding box e melhor rotação para minimizar o bounding square):

@@ -277,9 +277,17 @@ std::vector<Pose> bottom_left_pack(const Polygon& tree_poly, const BottomLeftOpt
         poses.clear();
         index.resize(opt.n);
 
+        bool bounds_init = false;
+        double cur_min_x = 0.0;
+        double cur_min_y = 0.0;
+        double cur_max_x = 0.0;
+        double cur_max_y = 0.0;
+
         bool ok = true;
         for (int i = 0; i < opt.n; ++i) {
             Pose best{std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(), 0.0};
+            BoundingBox best_world_bb{};
+            double best_s = std::numeric_limits<double>::infinity();
 
             auto process_angle = [&](double ang) -> bool {
                 bool found_any = false;
@@ -297,10 +305,28 @@ std::vector<Pose> bottom_left_pack(const Polygon& tree_poly, const BottomLeftOpt
                     if (!std::isfinite(cand.x) || !std::isfinite(cand.y)) {
                         return;
                     }
+                    const BoundingBox cand_world_bb = bbox_for_pose(local_bb, cand);
+
+                    double new_min_x = cand_world_bb.min_x;
+                    double new_min_y = cand_world_bb.min_y;
+                    double new_max_x = cand_world_bb.max_x;
+                    double new_max_y = cand_world_bb.max_y;
+                    if (bounds_init) {
+                        new_min_x = std::min(new_min_x, cur_min_x);
+                        new_min_y = std::min(new_min_y, cur_min_y);
+                        new_max_x = std::max(new_max_x, cur_max_x);
+                        new_max_y = std::max(new_max_y, cur_max_y);
+                    }
+                    const double new_s = std::max(new_max_x - new_min_x, new_max_y - new_min_y);
+
                     found_any = true;
-                    if (cand.y < best.y - 1e-12 ||
-                        (std::abs(cand.y - best.y) <= 1e-12 && cand.x < best.x)) {
+                    if (new_s < best_s - 1e-12 ||
+                        (std::abs(new_s - best_s) <= 1e-12 &&
+                         (cand.y < best.y - 1e-12 ||
+                          (std::abs(cand.y - best.y) <= 1e-12 && cand.x < best.x)))) {
                         best = cand;
+                        best_world_bb = cand_world_bb;
+                        best_s = new_s;
                     }
                 };
 
@@ -362,6 +388,19 @@ std::vector<Pose> bottom_left_pack(const Polygon& tree_poly, const BottomLeftOpt
 
             poses.push_back(best);
             index.set_pose(i, best);
+
+            if (!bounds_init) {
+                bounds_init = true;
+                cur_min_x = best_world_bb.min_x;
+                cur_min_y = best_world_bb.min_y;
+                cur_max_x = best_world_bb.max_x;
+                cur_max_y = best_world_bb.max_y;
+            } else {
+                cur_min_x = std::min(cur_min_x, best_world_bb.min_x);
+                cur_min_y = std::min(cur_min_y, best_world_bb.min_y);
+                cur_max_x = std::max(cur_max_x, best_world_bb.max_x);
+                cur_max_y = std::max(cur_max_y, best_world_bb.max_y);
+            }
         }
 
         if (ok) {
