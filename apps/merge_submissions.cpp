@@ -20,6 +20,7 @@ struct Args {
     std::string out_csv;
     std::string out_json;
     int nmax = 200;
+    bool allow_partial = false;
     int csv_precision = 17;
     double eps = 1e-12;
 };
@@ -57,13 +58,15 @@ Args parse_args(int argc, char** argv) {
             args.out_json = need("--out-json");
         } else if (a == "--nmax") {
             args.nmax = std::stoi(need("--nmax"));
+        } else if (a == "--allow-partial") {
+            args.allow_partial = true;
         } else if (a == "--csv-precision") {
             args.csv_precision = std::stoi(need("--csv-precision"));
         } else if (a == "--eps") {
             args.eps = std::stod(need("--eps"));
         } else if (a == "-h" || a == "--help") {
             std::cout << "Usage: merge_submissions --out merged.csv [--in a.csv,b.csv] [a.csv b.csv ...]\n"
-                      << "                        [--nmax 200] [--out-json report.json] [--csv-precision 17] [--eps 1e-12]\n";
+                      << "                        [--nmax 200] [--allow-partial] [--out-json report.json] [--csv-precision 17] [--eps 1e-12]\n";
             std::exit(0);
         } else if (!a.empty() && a[0] == '-') {
             throw std::runtime_error("unknown arg: " + a);
@@ -101,7 +104,8 @@ int main(int argc, char** argv) {
 
         santa2025::ReadSubmissionOptions ropt;
         ropt.nmax = args.nmax;
-        ropt.require_complete = true;
+        ropt.require_complete = !args.allow_partial;
+        ropt.require_puzzle_complete = true;
 
         for (const auto& path : args.inputs) {
             std::ifstream f(path);
@@ -128,16 +132,27 @@ int main(int argc, char** argv) {
         double total = 0.0;
 
         for (int puzzle = 1; puzzle <= args.nmax; ++puzzle) {
-            int best_k = 0;
+            int best_k = -1;
             double best_s = std::numeric_limits<double>::infinity();
 
             for (int k = 0; k < static_cast<int>(subs.size()); ++k) {
                 const auto& poses = subs[static_cast<size_t>(k)].poses[static_cast<size_t>(puzzle)];
+                if (poses.empty()) {
+                    continue;
+                }
+                if (static_cast<int>(poses.size()) != puzzle) {
+                    throw std::runtime_error("input " + std::to_string(k) + " puzzle " + std::to_string(puzzle) +
+                                             ": expected " + std::to_string(puzzle) + " poses");
+                }
                 const double s = santa2025::packing_s200(tree, poses);
                 if (s < best_s) {
                     best_s = s;
                     best_k = k;
                 }
+            }
+
+            if (best_k < 0) {
+                throw std::runtime_error("puzzle " + std::to_string(puzzle) + " missing in all inputs");
             }
 
             const double term = (best_s * best_s) / static_cast<double>(puzzle);

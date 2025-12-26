@@ -165,6 +165,25 @@ o melhor bloco por puzzle (menor `s_n`, equivalente a menor `s_n²/n`):
 ./bin/score_submission merged.csv --breakdown
 ```
 
+Se você quiser fazer “pós-processamento” só em uma faixa pequena (ex.: otimizar `n<=30` com ângulos mais densos,
+ou até bruteforce/exato para `n` muito pequenos) e depois **colar** isso em cima de uma solução completa,
+use `--allow-partial` no merge:
+
+```bash
+./bin/solve_all --out base.csv --nmax 200 --seed 1 --init bottom-left --refine none --angles 0,45,90,135,180,225,270,315
+./bin/solve_all --out small.csv --nmax 30  --seed 1 --init bottom-left --refine none --angles 0,15,30,45,60,75,90,105,120,135,150,165,180,195,210,225,240,255,270,285,300,315,330,345
+
+./bin/merge_submissions --out merged.csv --nmax 200 --allow-partial base.csv small.csv --out-json merge_report.json
+./bin/score_submission merged.csv --breakdown
+```
+
+Para automatizar um “portfolio” de configs (ex.: 0°/180°, 8 ângulos, e ângulos densos para poucos `n`) e já
+gerar o merged final em `runs/`, use:
+
+```bash
+python3 scripts/portfolio_merge.py --tag portfolio1 --nmax 200 --dense-nmax 30 --dense-step 5
+```
+
 ### Prefixo de `n=200` (modo prefix)
 
 Gerar `submission.csv` (puzzles `001..200`) como **prefixos** do packing com `n=200`:
