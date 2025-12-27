@@ -212,6 +212,32 @@ Validar/score local:
 ./bin/score_submission submission.csv --breakdown
 ```
 
+### Budgets por faixa de `n` (experimento)
+
+Para gastar mais compute em `n` médios/grandes (e menos em `n` pequenos), use as flags:
+
+- `--sa-iters-ranges lo-hi=value,...` (override do `--sa-iters` por faixa)
+- `--runs-per-n-ranges lo-hi=value,...` (override do `--runs-per-n` por faixa)
+
+O último match vence (“last match wins”). Faixas fora do `--nmax` são ignoradas.
+
+Exemplo (mais multi-start + mais SA conforme `n` cresce):
+
+```bash
+OUT_DIR=runs/ranges_20251227
+mkdir -p "$OUT_DIR"
+
+./bin/solve_all --out "$OUT_DIR/submission.csv" --out-dir "$OUT_DIR" --out-json "$OUT_DIR/run.json" \
+  --nmax 200 --init bottom-left --refine sa --warm-start-feed initial \
+  --angles 0,45,90,135,180,225,270,315 --gap 1e-6 --safety-eps 0 \
+  --sa-iters-mode linear --sa-iters 20000 \
+  --sa-iters-ranges 1-80=30000,81-160=60000,161-200=120000 \
+  --runs-per-n 2 --runs-per-n-ranges 1-80=4,81-160=8,161-200=16 \
+  --threads 16 --seed 1 --log-every 10
+
+./bin/score_submission "$OUT_DIR/submission.csv"
+```
+
 Para “hardening” (evitar overlaps microscópicos no avaliador), você pode exigir uma separação mínima:
 
 ```bash

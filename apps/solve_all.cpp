@@ -1,5 +1,6 @@
 #include <atomic>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -31,6 +32,12 @@
 
 namespace {
 
+struct IntRangeOverride {
+    int lo = 0;
+    int hi = 0;
+    int value = 0;
+};
+
 struct Args {
     int nmax = 200;
 
@@ -48,6 +55,11 @@ struct Args {
     int runs_per_n = 1;
     int threads = 1;
     std::uint64_t seed = 1;
+
+    // Optional per-n overrides for compute budgets (last match wins).
+    // Format: "lo-hi=value,lo-hi=value". Example: "1-50=1,51-200=8".
+    std::vector<IntRangeOverride> sa_iters_ranges{};
+    std::vector<IntRangeOverride> runs_per_n_ranges{};
 
     // Orientation control.
     std::vector<double> angles{45.0};
@@ -123,6 +135,86 @@ struct Args {
     double eps = 1e-12;
 };
 
+std::string strip_ws(std::string s) {
+    s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c) != 0; }), s.end());
+    return s;
+}
+
+std::vector<IntRangeOverride> parse_int_ranges(const std::string& spec, const char* flag) {
+    const std::string s = strip_ws(spec);
+    if (s.empty()) {
+        return {};
+    }
+
+    std::vector<IntRangeOverride> out;
+    size_t start = 0;
+    while (start < s.size()) {
+        size_t comma = s.find(',', start);
+        const std::string tok = (comma == std::string::npos) ? s.substr(start) : s.substr(start, comma - start);
+        if (tok.empty()) {
+            throw std::runtime_error(std::string("invalid ") + flag + " (empty entry)");
+        }
+
+        const size_t eq = tok.find('=');
+        if (eq == std::string::npos) {
+            throw std::runtime_error(std::string("invalid ") + flag + " entry (expected lo-hi=value): " + tok);
+        }
+        const std::string range = tok.substr(0, eq);
+        const std::string val_s = tok.substr(eq + 1);
+        if (range.empty() || val_s.empty()) {
+            throw std::runtime_error(std::string("invalid ") + flag + " entry (expected lo-hi=value): " + tok);
+        }
+
+        int value = 0;
+        try {
+            value = std::stoi(val_s);
+        } catch (const std::exception&) {
+            throw std::runtime_error(std::string("invalid ") + flag + " value: " + val_s);
+        }
+
+        int lo = 0;
+        int hi = 0;
+        const size_t dash = range.find('-');
+        try {
+            if (dash == std::string::npos) {
+                lo = std::stoi(range);
+                hi = lo;
+            } else {
+                const std::string lo_s = range.substr(0, dash);
+                const std::string hi_s = range.substr(dash + 1);
+                if (lo_s.empty() || hi_s.empty()) {
+                    throw std::runtime_error(std::string("invalid ") + flag + " range: " + range);
+                }
+                lo = std::stoi(lo_s);
+                hi = std::stoi(hi_s);
+            }
+        } catch (const std::exception&) {
+            throw std::runtime_error(std::string("invalid ") + flag + " range: " + range);
+        }
+
+        if (lo <= 0 || hi <= 0 || lo > hi) {
+            throw std::runtime_error(std::string("invalid ") + flag + " range (use 1-based lo-hi): " + range);
+        }
+        out.push_back(IntRangeOverride{lo, hi, value});
+
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    return out;
+}
+
+int pick_range_value(const std::vector<IntRangeOverride>& ranges, int n, int default_value) {
+    int v = default_value;
+    for (const auto& r : ranges) {
+        if (n >= r.lo && n <= r.hi) {
+            v = r.value;  // last match wins
+        }
+    }
+    return v;
+}
+
 std::vector<double> parse_angles(const std::string& s) {
     std::vector<double> out;
     std::stringstream ss(s);
@@ -184,6 +276,8 @@ Args parse_args(int argc, char** argv) {
             args.refine = need("--refine");
         } else if (a == "--runs-per-n") {
             args.runs_per_n = std::stoi(need("--runs-per-n"));
+        } else if (a == "--runs-per-n-ranges") {
+            args.runs_per_n_ranges = parse_int_ranges(need("--runs-per-n-ranges"), "--runs-per-n-ranges");
         } else if (a == "--threads") {
             args.threads = std::stoi(need("--threads"));
         } else if (a == "--seed") {
@@ -210,6 +304,8 @@ Args parse_args(int argc, char** argv) {
             args.max_restarts = std::stoi(need("--restarts"));
         } else if (a == "--sa-iters") {
             args.sa_iters = std::stoi(need("--sa-iters"));
+        } else if (a == "--sa-iters-ranges") {
+            args.sa_iters_ranges = parse_int_ranges(need("--sa-iters-ranges"), "--sa-iters-ranges");
         } else if (a == "--sa-iters-mode") {
             args.sa_iters_mode = need("--sa-iters-mode");
         } else if (a == "--sa-tries") {
@@ -307,10 +403,10 @@ Args parse_args(int argc, char** argv) {
                 << "                [--parallel-n]\n"
                 << "                [--refine none|sa|hh] [--no-warm-start]\n"
                 << "                [--warm-start-feed best|initial]\n"
-                << "                [--runs-per-n 1] [--threads N] [--seed 1]\n"
+                << "                [--runs-per-n 1] [--runs-per-n-ranges 1-50=1,51-200=8] [--threads N] [--seed 1]\n"
                 << "                [--angles a,b,c] [--cycle a,b,c] [--mode all|cycle|cycle-then-all]\n"
                 << "                [--cycle-prefix N]\n"
-                << "                [--sa-iters 20000] [--sa-iters-mode linear|constant] [--sa-tries 8]\n"
+                << "                [--sa-iters 20000] [--sa-iters-ranges 1-50=20000,51-200=60000] [--sa-iters-mode linear|constant] [--sa-tries 8]\n"
                 << "                [--sa-t0 0.25] [--sa-t1 1e-4] [--sa-sigma0 0.20] [--sa-sigma1 0.01]\n"
                 << "                [--lns] [--lns-stages 3] [--lns-stage-attempts 20]\n"
                 << "                [--lns-remove-frac 0.12] [--lns-remove-frac-max 0.12] [--lns-remove-frac-growth 1.0]\n"
@@ -489,6 +585,23 @@ Args parse_args(int argc, char** argv) {
     if (!(args.eps > 0.0)) {
         throw std::runtime_error("--eps must be > 0");
     }
+
+    auto validate_ranges = [&](const std::vector<IntRangeOverride>& ranges, const char* flag) {
+        for (const auto& r : ranges) {
+            if (r.lo <= 0 || r.hi <= 0 || r.lo > r.hi) {
+                throw std::runtime_error(std::string("invalid ") + flag + " range (use lo-hi with 1<=lo<=hi)");
+            }
+            if (r.hi > 200 || r.lo > 200) {
+                throw std::runtime_error(std::string("invalid ") + flag + " range (must be within 1..200)");
+            }
+            if (r.value <= 0) {
+                throw std::runtime_error(std::string("invalid ") + flag + " value (must be > 0)");
+            }
+        }
+    };
+
+    validate_ranges(args.sa_iters_ranges, "--sa-iters-ranges");
+    validate_ranges(args.runs_per_n_ranges, "--runs-per-n-ranges");
 
     return args;
 }
@@ -1559,13 +1672,17 @@ int main(int argc, char** argv) {
             };
 
             std::vector<Job> jobs;
-            jobs.reserve(static_cast<size_t>(args.nmax) * static_cast<size_t>(args.init_top_m) *
-                         static_cast<size_t>(std::max(1, args.runs_per_n)));
+            int max_runs = args.runs_per_n;
+            for (const auto& r : args.runs_per_n_ranges) {
+                max_runs = std::max(max_runs, r.value);
+            }
+            jobs.reserve(static_cast<size_t>(args.nmax) * static_cast<size_t>(args.init_top_m) * static_cast<size_t>(std::max(1, max_runs)));
 
             for (int n = 1; n <= args.nmax; ++n) {
                 const auto& inits = initial_by_n[static_cast<size_t>(n)];
+                const int runs_n = pick_range_value(args.runs_per_n_ranges, n, args.runs_per_n);
                 for (int init_id = 0; init_id < static_cast<int>(inits.size()); ++init_id) {
-                    for (int run_id = 0; run_id < args.runs_per_n; ++run_id) {
+                    for (int run_id = 0; run_id < runs_n; ++run_id) {
                         const std::uint64_t seed = args.seed + static_cast<std::uint64_t>(n) * kNStride +
                                                    static_cast<std::uint64_t>(init_id) * kInitStride +
                                                    static_cast<std::uint64_t>(run_id) * kRunStride;
@@ -1590,11 +1707,13 @@ int main(int argc, char** argv) {
 
                     SolveOut out;
                     try {
+                        Args args_n = args;
+                        args_n.sa_iters = pick_range_value(args.sa_iters_ranges, job.n, args.sa_iters);
                         out = refine_one_run(
                             poly,
                             job.n,
                             initial_by_n[static_cast<size_t>(job.n)][static_cast<size_t>(job.init_id)].poses,
-                            args,
+                            args_n,
                             job.seed,
                             args.eps
                         );
@@ -1662,6 +1781,13 @@ int main(int argc, char** argv) {
                     std::lock_guard<std::mutex> lk(santa2025::log_mutex());
                     std::cerr << "[solve_all] n=" << n << "/" << args.nmax << " s=" << std::setprecision(17) << s
                               << " term=" << term << " seed=" << best.seed;
+                    if (!args.sa_iters_ranges.empty() || !args.runs_per_n_ranges.empty()) {
+                        Args args_n = args;
+                        args_n.sa_iters = pick_range_value(args.sa_iters_ranges, n, args.sa_iters);
+                        const int runs_n = pick_range_value(args.runs_per_n_ranges, n, args.runs_per_n);
+                        std::cerr << " runs=" << runs_n;
+                        std::cerr << " sa_iters=" << scaled_iters(n, args_n);
+                    }
                     if (args.init_portfolio && best_init_id >= 0) {
                         std::cerr << " init=" << initial_by_n[static_cast<size_t>(n)][static_cast<size_t>(best_init_id)].name;
                     }
@@ -1670,7 +1796,11 @@ int main(int argc, char** argv) {
             }
         } else {
             for (int n = 1; n <= args.nmax; ++n) {
-                const auto initial_cands = build_initial_candidates(poly, n, prev, args, args.eps);
+                Args args_n = args;
+                args_n.sa_iters = pick_range_value(args.sa_iters_ranges, n, args.sa_iters);
+                args_n.runs_per_n = pick_range_value(args.runs_per_n_ranges, n, args.runs_per_n);
+
+                const auto initial_cands = build_initial_candidates(poly, n, prev, args_n, args_n.eps);
                 if (initial_cands.empty()) {
                     throw std::runtime_error("n=" + std::to_string(n) + ": no initial candidates");
                 }
@@ -1683,7 +1813,7 @@ int main(int argc, char** argv) {
                     const std::uint64_t seed_n = args.seed + static_cast<std::uint64_t>(n) * kNStride +
                                                  static_cast<std::uint64_t>(init_id) * kInitStride;
 
-                    auto r = refine_multi_start(poly, n, initial_cands[init_id].poses, args, seed_n, args.eps);
+                    auto r = refine_multi_start(poly, n, initial_cands[init_id].poses, args_n, seed_n, args_n.eps);
                     if (!r.error.empty()) {
                         if (best_init_id < 0) {
                             best = std::move(r);
@@ -1705,15 +1835,15 @@ int main(int argc, char** argv) {
                 }
 
                 std::vector<santa2025::Pose> poses = std::move(best.best_poses);
-                apply_polish_stage(poly, n, poses, args, best.seed + 99'991ULL, args.eps);
+                apply_polish_stage(poly, n, poses, args_n, best.seed + 99'991ULL, args_n.eps);
                 const std::vector<santa2025::Pose> before_compact = poses;
-                if (!compact_down_left_final(poly, poses, args, args.eps)) {
+                if (!compact_down_left_final(poly, poses, args_n, args_n.eps)) {
                     poses = before_compact;
                 }
 
                 const double s = santa2025::packing_s200(poly, poses);
                 sub.poses[static_cast<size_t>(n)] = poses;
-                if (args.warm_start_feed == "initial") {
+                if (args_n.warm_start_feed == "initial") {
                     prev = initial_for_feed;
                 } else {
                     prev = poses;
@@ -1733,6 +1863,10 @@ int main(int argc, char** argv) {
                     std::lock_guard<std::mutex> lk(santa2025::log_mutex());
                     std::cerr << "[solve_all] n=" << n << "/" << args.nmax << " s=" << std::setprecision(17) << s
                               << " term=" << term << " seed=" << best.seed;
+                    if (!args.sa_iters_ranges.empty() || !args.runs_per_n_ranges.empty()) {
+                        std::cerr << " runs=" << args_n.runs_per_n;
+                        std::cerr << " sa_iters=" << scaled_iters(n, args_n);
+                    }
                     if (args.init_portfolio && best_init_id >= 0) {
                         std::cerr << " init=" << initial_cands[static_cast<size_t>(best_init_id)].name;
                     }
@@ -1774,7 +1908,31 @@ int main(int argc, char** argv) {
         out << "  \"out_csv\": " << "\"" << args.out_csv << "\",\n";
         out << "  \"warm_start\": " << (args.warm_start ? "true" : "false") << ",\n";
         out << "  \"refine\": " << "\"" << args.refine << "\",\n";
-        out << "  \"runs_per_n\": " << args.runs_per_n << "\n";
+        out << "  \"runs_per_n\": " << args.runs_per_n << ",\n";
+        out << "  \"sa_iters\": " << args.sa_iters << ",\n";
+        out << "  \"sa_iters_mode\": " << "\"" << args.sa_iters_mode << "\"";
+
+        auto dump_ranges = [&](const std::vector<IntRangeOverride>& ranges) {
+            out << "[";
+            for (size_t i = 0; i < ranges.size(); ++i) {
+                if (i) {
+                    out << ",";
+                }
+                const auto& r = ranges[i];
+                out << "{\"lo\":" << r.lo << ",\"hi\":" << r.hi << ",\"value\":" << r.value << "}";
+            }
+            out << "]";
+        };
+
+        if (!args.runs_per_n_ranges.empty()) {
+            out << ",\n  \"runs_per_n_ranges\": ";
+            dump_ranges(args.runs_per_n_ranges);
+        }
+        if (!args.sa_iters_ranges.empty()) {
+            out << ",\n  \"sa_iters_ranges\": ";
+            dump_ranges(args.sa_iters_ranges);
+        }
+        out << "\n";
         out << "}\n";
 
         const std::string payload = out.str();
