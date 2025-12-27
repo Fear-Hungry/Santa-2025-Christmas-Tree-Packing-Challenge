@@ -37,17 +37,80 @@ Binários saem em `./bin/`.
 
 **Menor é melhor.** Medido com `./bin/score_submission` para `n=1..200`, sem merge e sem pós-processamento de ordem.
 
-- 2025-12-26: `score = 89.033538667437242`
+- 2025-12-27: `score = 87.619057066525926` (`runs/try_sa60k_r16_n200_20251227_124010/submission.csv`)
+- 2025-12-26: `score = 89.033538667437242` (`runs/best_89/submission.csv`)
 - CLIs usados para reproduzir:
 
 ```bash
 cmake -S . -B build
 cmake --build build -j
 
-./bin/solve_all --out runs/best_89/submission.csv --out-dir runs/best_89 --nmax 200 --init bottom-left --refine none \
-  --seed 1 --angles 0,45,90,135,180,225,270,315 --gap 1e-6 --safety-eps 0
+OUT_DIR=runs/try_sa60k_r16_n200_20251227_124010
+mkdir -p "$OUT_DIR"
+./bin/solve_all --out "$OUT_DIR/submission.csv" --out-dir "$OUT_DIR" --out-json "$OUT_DIR/run.json" \
+  --nmax 200 --init bottom-left --refine sa --warm-start-feed initial \
+  --runs-per-n 16 --threads 16 \
+  --sa-iters 60000 --sa-iters-mode linear --sa-tries 8 \
+  --seed 1 --angles 0,45,90,135,180,225,270,315 --gap 1e-6 --safety-eps 0 \
+  --compact-final --compact-passes 1 --log-every 50
 
-./bin/score_submission runs/best_89/submission.csv --breakdown
+./bin/score_submission "$OUT_DIR/submission.csv"
+```
+
+## Benchmarks rápidos (lab)
+
+Benchmarks curtos (menor é melhor) para comparar heurísticas sem gastar o budget do `n=200`.
+O score é sempre calculado com `./bin/score_submission` (fonte de verdade).
+
+### 2025-12-26 — LNS gap destroy (n<=40)
+
+Comparação controlada (seeds fixas, budget fixo):
+
+- Baseline: commit `c4704ce` (pré-merge)
+  - seeds 1,2,3: `21.396470160711008`, `21.511813315095495`, `21.2637152072427`
+  - mean: `21.390666227683067`
+- Candidate: commit `5e188ae` + `--lns-destroy-mode gap`
+  - seeds 1,2,3: `21.35681648803555`, `21.31341494631857`, `21.322161260198037`
+  - mean: `21.33079756485072` (Δ `-0.05986866283234704`)
+
+CLI (candidate, HEAD) usado:
+
+```bash
+cmake -S . -B build
+cmake --build build -j
+
+# Repetir para seed=1,2,3
+OUT_DIR=runs/lab_lns_gap_n40/head_seed1
+mkdir -p "$OUT_DIR"
+./bin/solve_all --out "$OUT_DIR/submission.csv" --out-dir "$OUT_DIR" --out-json "$OUT_DIR/run.json" \
+  --nmax 40 --init bottom-left --refine none --seed 1 --threads 1 \
+  --angles 0,90,180,270 --gap 1e-6 --safety-eps 0 \
+  --lns --lns-stages 2 --lns-stage-attempts 5 --lns-remove-frac 0.12 --lns-boundary-prob 0.7 \
+  --lns-destroy-mode gap --lns-gap-grid 48 --lns-gap-try-hole-center 1 \
+  --lns-slide-iters 60 --lns-shrink-factor 0.999 --lns-shrink-delta 0 \
+  --log-every 0
+./bin/score_submission "$OUT_DIR/submission.csv" --nmax 40 --breakdown
+```
+
+CLI (baseline, commit `c4704ce`) usado:
+
+```bash
+# Rodar baseline em worktree separado (para não mexer no checkout atual)
+git worktree add --detach runs/_worktrees/c4704ce c4704ce
+( cd runs/_worktrees/c4704ce && cmake -S . -B build && cmake --build build -j )
+
+# Repetir para seed=1,2,3
+OUT_DIR=runs/lab_lns_gap_n40/baseline_seed1
+mkdir -p "$OUT_DIR"
+runs/_worktrees/c4704ce/bin/solve_all --out "$OUT_DIR/submission.csv" --out-dir "$OUT_DIR" --out-json "$OUT_DIR/run.json" \
+  --nmax 40 --init bottom-left --refine none --seed 1 --threads 1 \
+  --angles 0,90,180,270 --gap 1e-6 --safety-eps 0 \
+  --lns --lns-stages 2 --lns-stage-attempts 5 --lns-remove-frac 0.12 --lns-boundary-prob 0.7 \
+  --lns-slide-iters 60 --lns-shrink-factor 0.999 --lns-shrink-delta 0 \
+  --log-every 0
+
+# Score sempre com o scorer do HEAD (para isolar mudanças do solver)
+./bin/score_submission "$OUT_DIR/submission.csv" --nmax 40 --breakdown
 ```
 
 ## Ferramentas
