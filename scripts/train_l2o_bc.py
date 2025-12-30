@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import random
+from datetime import datetime
+from pathlib import Path
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+import sys
+
+sys.path.insert(0, str(ROOT / "src"))
+
+from l2o import L2OConfig, behavior_cloning_loss, init_params, save_params_npz  # noqa: E402
+
+
+def _adam_update(params, grads, opt_state, lr=1e-3, b1=0.9, b2=0.999, eps=1e-8):
+    step, m, v = opt_state
+    step += 1
+    m = jax.tree_util.tree_map(lambda m, g: b1 * m + (1.0 - b1) * g, m, grads)
+    v = jax.tree_util.tree_map(lambda v, g: b2 * v + (1.0 - b2) * (g * g), v, grads)
+    m_hat = jax.tree_util.tree_map(lambda m: m / (1.0 - b1**step), m)
+    v_hat = jax.tree_util.tree_map(lambda v: v / (1.0 - b2**step), v)
+    params = jax.tree_util.tree_map(lambda p, m, v: p - lr * m / (jnp.sqrt(v) + eps), params, m_hat, v_hat)
+    return params, (step, m, v)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Train L2O by behavior cloning from SA dataset")
+    ap.add_argument("--dataset", type=Path, required=True, help="Dataset .npz from collect_sa_dataset.py")
+    ap.add_argument("--n-list", type=str, default="", help="Comma-separated Ns (default: infer)")
+    ap.add_argument("--batch", type=int, default=64, help="Batch size")
+    ap.add_argument("--train-steps", type=int, default=500, help="Training iterations")
+    ap.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    ap.add_argument("--seed", type=int, default=1, help="Random seed")
+    ap.add_argument("--hidden", type=int, default=32, help="Hidden size")
+    ap.add_argument("--policy", type=str, default="mlp", choices=["mlp", "gnn"], help="Policy backbone")
+    ap.add_argument("--knn-k", type=int, default=4, help="KNN neighbors for GNN")
+    ap.add_argument("--reward", type=str, default="packing", choices=["packing", "prefix"], help="Reward type")
+    ap.add_argument("--trans-sigma", type=float, default=0.2, help="BC translation sigma")
+    ap.add_argument("--rot-sigma", type=float, default=10.0, help="BC rotation sigma")
+    ap.add_argument("--out", type=Path, default=None, help="Output policy path (.npz)")
+    args = ap.parse_args()
+
+    data = np.load(args.dataset)
+    if args.n_list.strip():
+        ns = [int(x) for x in args.n_list.split(",") if x.strip()]
+    else:
+        ns = sorted({int(k.split("n")[1]) for k in data.files if k.startswith("poses_n")})
+    if not ns:
+        raise SystemExit("No N values found in dataset.")
+
+    pools = {}
+    for n in ns:
+        poses = data[f"poses_n{n}"]
+        idxs = data[f"idx_n{n}"]
+        deltas = data[f"delta_n{n}"]
+        pools[n] = (poses, idxs, deltas)
+
+    key = jax.random.PRNGKey(args.seed)
+    params = init_params(key, hidden_size=args.hidden, policy=args.policy)
+    config = L2OConfig(
+        hidden_size=args.hidden,
+        policy=args.policy,
+        knn_k=args.knn_k,
+        reward=args.reward,
+        trans_sigma=args.trans_sigma,
+        rot_sigma=args.rot_sigma,
+    )
+
+    opt_state = (
+        0,
+        jax.tree_util.tree_map(jnp.zeros_like, params),
+        jax.tree_util.tree_map(jnp.zeros_like, params),
+    )
+
+    loss_grad = jax.value_and_grad(lambda p, poses, idxs, deltas: behavior_cloning_loss(p, poses, idxs, deltas, config))
+
+    for step in range(1, args.train_steps + 1):
+        n = random.choice(ns)
+        poses_pool, idx_pool, delta_pool = pools[n]
+        idx = np.random.randint(0, poses_pool.shape[0], size=args.batch)
+        poses_batch = jnp.array(poses_pool[idx])
+        idx_batch = jnp.array(idx_pool[idx])
+        delta_batch = jnp.array(delta_pool[idx])
+        loss, grads = loss_grad(params, poses_batch, idx_batch, delta_batch)
+        params, opt_state = _adam_update(params, grads, opt_state, lr=args.lr)
+        if step % 20 == 0 or step == 1:
+            print(f"[{step:04d}] loss={float(loss):.6f}")
+
+    out_path = args.out
+    if out_path is None:
+        out_dir = ROOT / "runs" / f"l2o_bc_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "policy.npz"
+    save_params_npz(out_path, params, meta={"policy": args.policy, "hidden": args.hidden, "knn_k": args.knn_k})
+    print(f"Saved policy to {out_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

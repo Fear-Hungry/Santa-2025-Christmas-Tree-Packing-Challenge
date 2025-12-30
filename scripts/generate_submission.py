@@ -13,7 +13,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from geom_np import shift_poses_to_origin  # noqa: E402
+from geom_np import polygon_radius, shift_poses_to_origin  # noqa: E402
 from lattice import lattice_poses  # noqa: E402
 from tree_data import TREE_POINTS  # noqa: E402
 
@@ -44,6 +44,8 @@ def _run_sa(
     trans_sigma: float,
     rot_sigma: float,
     rot_prob: float,
+    initial_poses: np.ndarray | None = None,
+    objective: str = "packing",
 ) -> np.ndarray | None:
     global _JAX_AVAILABLE
     if _JAX_AVAILABLE is False:
@@ -63,7 +65,10 @@ def _run_sa(
     radius = polygon_radius(points)
     spacing = 2.0 * radius * 1.2
 
-    initial = _grid_initial_poses(n, spacing)
+    if initial_poses is None:
+        initial = _grid_initial_poses(n, spacing)
+    else:
+        initial = np.array(initial_poses, dtype=float)
     initial_batch = jnp.tile(jnp.array(initial)[None, :, :], (batch_size, 1, 1))
 
     key = jax.random.PRNGKey(seed)
@@ -75,10 +80,57 @@ def _run_sa(
         trans_sigma=trans_sigma,
         rot_sigma=rot_sigma,
         rot_prob=rot_prob,
+        objective=objective,
     )
     best_scores.block_until_ready()
     best_idx = int(jnp.argmin(best_scores))
     poses = np.array(best_poses[best_idx])
+    return shift_poses_to_origin(points, poses)
+
+
+def _run_l2o(
+    n: int,
+    *,
+    model_path: Path,
+    seed: int,
+    steps: int,
+    trans_sigma: float,
+    rot_sigma: float,
+    deterministic: bool,
+) -> np.ndarray | None:
+    try:
+        import jax
+        import jax.numpy as jnp
+    except Exception:
+        return None
+
+    from l2o import L2OConfig, load_params_npz, optimize_with_l2o  # noqa: E402
+    from geom_np import polygon_radius  # noqa: E402
+
+    points = np.array(TREE_POINTS, dtype=float)
+    radius = polygon_radius(points)
+    spacing = 2.0 * radius * 1.2
+    initial = _grid_initial_poses(n, spacing)
+
+    params, meta = load_params_npz(model_path)
+    policy = meta.get("policy", "mlp")
+    knn_k = int(meta.get("knn_k", 4)) if hasattr(meta.get("knn_k", 4), "__int__") else 4
+    config = L2OConfig(
+        policy=str(policy),
+        knn_k=knn_k,
+        trans_sigma=trans_sigma,
+        rot_sigma=rot_sigma,
+        action_noise=not deterministic,
+    )
+    key = jax.random.PRNGKey(seed)
+    poses = optimize_with_l2o(
+        key,
+        params,
+        jnp.array(initial),
+        steps,
+        config,
+    )
+    poses = np.array(poses)
     return shift_poses_to_origin(points, poses)
 
 
@@ -95,8 +147,76 @@ def solve_n(
     sa_trans_sigma: float,
     sa_rot_sigma: float,
     sa_rot_prob: float,
+    sa_objective: str,
+    meta_init_model: Path | None,
+    heatmap_model: Path | None,
+    heatmap_nmax: int,
+    heatmap_steps: int,
+    l2o_model: Path | None,
+    l2o_nmax: int,
+    l2o_steps: int,
+    l2o_trans_sigma: float,
+    l2o_rot_sigma: float,
+    l2o_deterministic: bool,
 ) -> np.ndarray:
+    if heatmap_model is not None and n <= heatmap_nmax:
+        try:
+            from heatmap_meta import HeatmapConfig, heatmap_search, load_params  # noqa: E402
+        except Exception:
+            heatmap_model = None
+        if heatmap_model is not None:
+            params, meta = load_params(heatmap_model)
+            config = HeatmapConfig(
+                hidden_size=int(meta.get("hidden", 32)) if hasattr(meta.get("hidden", 32), "__int__") else 32,
+                policy=str(meta.get("policy", "gnn")),
+                knn_k=int(meta.get("knn_k", 4)) if hasattr(meta.get("knn_k", 4), "__int__") else 4,
+                heatmap_lr=float(meta.get("heatmap_lr", 0.1)),
+                trans_sigma=float(meta.get("trans_sigma", 0.2)),
+                rot_sigma=float(meta.get("rot_sigma", 10.0)),
+            )
+            points = np.array(TREE_POINTS, dtype=float)
+            radius = polygon_radius(points)
+            spacing = 2.0 * radius * 1.2
+            base = _grid_initial_poses(n, spacing)
+            rng = np.random.default_rng(seed)
+            poses, _ = heatmap_search(params, base, config, heatmap_steps, rng)
+            return poses
+
+    if l2o_model is not None and n <= l2o_nmax:
+        poses = _run_l2o(
+            n,
+            model_path=l2o_model,
+            seed=seed,
+            steps=l2o_steps,
+            trans_sigma=l2o_trans_sigma,
+            rot_sigma=l2o_rot_sigma,
+            deterministic=l2o_deterministic,
+        )
+        if poses is not None:
+            return poses
+
     if n <= sa_nmax:
+        init_override = None
+        if meta_init_model is not None:
+            try:
+                import jax
+                import jax.numpy as jnp
+            except Exception:
+                meta_init_model = None
+            if meta_init_model is not None:
+                from meta_init import MetaInitConfig, apply_meta_init, load_meta_params  # noqa: E402
+                from geom_np import polygon_radius  # noqa: E402
+                points = np.array(TREE_POINTS, dtype=float)
+                radius = polygon_radius(points)
+                spacing = 2.0 * radius * 1.2
+                base = _grid_initial_poses(n, spacing)
+                params, meta = load_meta_params(meta_init_model)
+                config = MetaInitConfig(
+                    hidden_size=int(meta.get("hidden", 32)) if hasattr(meta.get("hidden", 32), "__int__") else 32,
+                    delta_xy=float(meta.get("delta_xy", 0.2)),
+                    delta_theta=float(meta.get("delta_theta", 10.0)),
+                )
+                init_override = np.array(apply_meta_init(params, jnp.array(base), config))
         poses = _run_sa(
             n,
             seed=seed,
@@ -105,6 +225,8 @@ def solve_n(
             trans_sigma=sa_trans_sigma,
             rot_sigma=sa_rot_sigma,
             rot_prob=sa_rot_prob,
+            initial_poses=init_override,
+            objective=sa_objective,
         )
         if poses is not None:
             return poses
@@ -129,6 +251,18 @@ def main() -> int:
     ap.add_argument("--sa-trans-sigma", type=float, default=0.2, help="SA translation step scale")
     ap.add_argument("--sa-rot-sigma", type=float, default=15.0, help="SA rotation step scale (deg)")
     ap.add_argument("--sa-rot-prob", type=float, default=0.3, help="SA rotation move probability")
+    ap.add_argument("--sa-objective", type=str, default="packing", choices=["packing", "prefix"])
+    ap.add_argument("--meta-init-model", type=Path, default=None, help="Meta-init model (.npz) for SA init")
+    ap.add_argument("--heatmap-model", type=Path, default=None, help="Heatmap meta-optimizer model (.npz)")
+    ap.add_argument("--heatmap-nmax", type=int, default=10, help="Use heatmap for n <= this threshold")
+    ap.add_argument("--heatmap-steps", type=int, default=200, help="Heatmap search steps per puzzle")
+
+    ap.add_argument("--l2o-model", type=Path, default=None, help="Path to L2O policy (.npz)")
+    ap.add_argument("--l2o-nmax", type=int, default=10, help="Use L2O for n <= this threshold")
+    ap.add_argument("--l2o-steps", type=int, default=200, help="L2O rollout steps per puzzle")
+    ap.add_argument("--l2o-trans-sigma", type=float, default=0.2, help="L2O translation step scale")
+    ap.add_argument("--l2o-rot-sigma", type=float, default=10.0, help="L2O rotation step scale")
+    ap.add_argument("--l2o-deterministic", action="store_true", help="Disable L2O action noise")
 
     ap.add_argument("--lattice-pattern", type=str, default="hex", choices=["hex", "square"])
     ap.add_argument("--lattice-margin", type=float, default=0.02, help="Relative spacing margin")
@@ -153,6 +287,17 @@ def main() -> int:
                 sa_trans_sigma=args.sa_trans_sigma,
                 sa_rot_sigma=args.sa_rot_sigma,
                 sa_rot_prob=args.sa_rot_prob,
+                sa_objective=args.sa_objective,
+                meta_init_model=args.meta_init_model,
+                heatmap_model=args.heatmap_model,
+                heatmap_nmax=args.heatmap_nmax,
+                heatmap_steps=args.heatmap_steps,
+                l2o_model=args.l2o_model,
+                l2o_nmax=args.l2o_nmax,
+                l2o_steps=args.l2o_steps,
+                l2o_trans_sigma=args.l2o_trans_sigma,
+                l2o_rot_sigma=args.l2o_rot_sigma,
+                l2o_deterministic=args.l2o_deterministic,
             )
 
             # Ensure numeric array

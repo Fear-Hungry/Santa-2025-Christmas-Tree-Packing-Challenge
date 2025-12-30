@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 from functools import partial
-from packing import packing_score, compute_packing_bbox
+from packing import packing_score, prefix_packing_score, compute_packing_bbox
 from geometry import transform_polygon
 from tree import get_tree_polygon
 from physics import polygons_intersect
@@ -45,7 +45,7 @@ def check_collisions(poses, base_poly):
     matrix = jax.vmap(lambda i: jax.vmap(lambda j: check_pair(i, j))(jnp.arange(N)))(jnp.arange(N))
     return jnp.any(matrix)
 
-@partial(jax.jit, static_argnames=['n_steps', 'n_trees'])
+@partial(jax.jit, static_argnames=['n_steps', 'n_trees', 'objective'])
 def run_sa_batch(
     random_key,
     n_steps,
@@ -56,6 +56,7 @@ def run_sa_batch(
     trans_sigma=0.1,
     rot_sigma=15.0,
     rot_prob=0.3,
+    objective="packing",
 ):
     """
     Runs a batch of SA chains.
@@ -71,6 +72,7 @@ def run_sa_batch(
     """
     
     base_poly = get_tree_polygon()
+    score_fn = prefix_packing_score if objective == "prefix" else packing_score
     
     def step_fn(state, i):
         key, poses, current_score, best_poses, best_score, temp = state
@@ -122,7 +124,7 @@ def run_sa_batch(
         is_colliding = jax.vmap(lambda p: check_collisions(p, base_poly))(candidate_poses)
         
         # 3. Calculate Score
-        candidate_score = jax.vmap(packing_score)(candidate_poses)
+        candidate_score = jax.vmap(score_fn)(candidate_poses)
         
         # 4. Metropolis Criterion
         delta = candidate_score - current_score
@@ -147,7 +149,7 @@ def run_sa_batch(
 
     # Init State
     batch_size = initial_poses.shape[0]
-    initial_scores = jax.vmap(packing_score)(initial_poses)
+    initial_scores = jax.vmap(score_fn)(initial_poses)
     
     init_state = (random_key, initial_poses, initial_scores, initial_poses, initial_scores, t_start)
     
