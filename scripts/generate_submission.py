@@ -115,9 +115,26 @@ def _run_l2o(
     params, meta = load_params_npz(model_path)
     policy = meta.get("policy", "mlp")
     knn_k = int(meta.get("knn_k", 4)) if hasattr(meta.get("knn_k", 4), "__int__") else 4
+    mlp_depth = int(meta.get("mlp_depth", 1)) if hasattr(meta.get("mlp_depth", 1), "__int__") else 1
+    gnn_steps = int(meta.get("gnn_steps", 1)) if hasattr(meta.get("gnn_steps", 1), "__int__") else 1
+    def _meta_bool(value, default: bool) -> bool:
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        if isinstance(value, (int, np.integer)):
+            return bool(int(value))
+        if isinstance(value, np.ndarray) and value.shape == ():
+            return bool(value.item())
+        return default
+
+    gnn_attention = _meta_bool(meta.get("gnn_attention", False), False)
+    hidden = int(meta.get("hidden", 32)) if hasattr(meta.get("hidden", 32), "__int__") else 32
     config = L2OConfig(
+        hidden_size=hidden,
         policy=str(policy),
         knn_k=knn_k,
+        mlp_depth=mlp_depth,
+        gnn_steps=gnn_steps,
+        gnn_attention=gnn_attention,
         trans_sigma=trans_sigma,
         rot_sigma=rot_sigma,
         action_noise=not deterministic,

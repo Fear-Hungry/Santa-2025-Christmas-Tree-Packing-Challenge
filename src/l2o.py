@@ -17,9 +17,13 @@ class L2OConfig:
     hidden_size: int = 32
     policy: str = "mlp"  # "mlp" or "gnn"
     knn_k: int = 4
+    mlp_depth: int = 1
+    gnn_steps: int = 1
+    gnn_attention: bool = False
     reward: str = "packing"  # "packing" or "prefix"
     trans_sigma: float = 0.2
     rot_sigma: float = 10.0
+    action_scale: float = 1.0
     overlap_penalty: float = 50.0
     action_noise: bool = True
 
@@ -27,22 +31,40 @@ class L2OConfig:
 Params = Dict[str, jnp.ndarray]
 
 
-def init_params(key: jax.Array, hidden_size: int = 32, policy: str = "mlp") -> Params:
+def init_params(
+    key: jax.Array,
+    hidden_size: int = 32,
+    policy: str = "mlp",
+    mlp_depth: int = 1,
+    gnn_attention: bool = False,
+) -> Params:
     if policy == "gnn":
-        key1, key2, key3 = jax.random.split(key, 3)
+        key1, key2, key3, key4, key5 = jax.random.split(key, 5)
         w_in = jax.random.normal(key1, (4, hidden_size)) * 0.1
         b_in = jnp.zeros((hidden_size,))
         w_msg = jax.random.normal(key2, (hidden_size, hidden_size)) * 0.1
         b_msg = jnp.zeros((hidden_size,))
         w_out = jax.random.normal(key3, (hidden_size, 4)) * 0.1
         b_out = jnp.zeros((4,))
-        return {"w_in": w_in, "b_in": b_in, "w_msg": w_msg, "b_msg": b_msg, "w_out": w_out, "b_out": b_out}
-    key1, key2 = jax.random.split(key)
+        params = {"w_in": w_in, "b_in": b_in, "w_msg": w_msg, "b_msg": b_msg, "w_out": w_out, "b_out": b_out}
+        if gnn_attention:
+            w_q = jax.random.normal(key4, (hidden_size, hidden_size)) * 0.1
+            w_k = jax.random.normal(key5, (hidden_size, hidden_size)) * 0.1
+            params["w_q"] = w_q
+            params["w_k"] = w_k
+        return params
+    key1, key2, key3 = jax.random.split(key, 3)
     w1 = jax.random.normal(key1, (4, hidden_size)) * 0.1
     b1 = jnp.zeros((hidden_size,))
     w2 = jax.random.normal(key2, (hidden_size, 4)) * 0.1
     b2 = jnp.zeros((4,))
-    return {"w1": w1, "b1": b1, "w2": w2, "b2": b2}
+    params = {"w1": w1, "b1": b1, "w2": w2, "b2": b2}
+    extra_layers = max(int(mlp_depth), 1) - 1
+    for idx in range(extra_layers):
+        key3, sub = jax.random.split(key3)
+        params[f"w_hidden_{idx}"] = jax.random.normal(sub, (hidden_size, hidden_size)) * 0.1
+        params[f"b_hidden_{idx}"] = jnp.zeros((hidden_size,))
+    return params
 
 
 def _features(poses: jax.Array) -> jax.Array:
@@ -52,9 +74,16 @@ def _features(poses: jax.Array) -> jax.Array:
     return jnp.concatenate([x, y, jnp.sin(theta), jnp.cos(theta)], axis=1)
 
 
-def _mlp_apply(params: Params, poses: jax.Array) -> Tuple[jax.Array, jax.Array]:
+def _mlp_apply(params: Params, poses: jax.Array, depth: int) -> Tuple[jax.Array, jax.Array]:
     feats = _features(poses)
     h = jnp.tanh(feats @ params["w1"] + params["b1"])
+    extra_layers = max(int(depth), 1) - 1
+    for idx in range(extra_layers):
+        w_key = f"w_hidden_{idx}"
+        b_key = f"b_hidden_{idx}"
+        if w_key not in params or b_key not in params:
+            break
+        h = jnp.tanh(h @ params[w_key] + params[b_key])
     out = h @ params["w2"] + params["b2"]
     logits = out[:, 0]
     mean = out[:, 1:4]
@@ -68,14 +97,32 @@ def _knn_indices(xy: jax.Array, k: int) -> jax.Array:
     return jnp.argsort(dists, axis=1)[:, :k]
 
 
-def _gnn_apply(params: Params, poses: jax.Array, knn_k: int) -> Tuple[jax.Array, jax.Array]:
+def _gnn_apply(
+    params: Params,
+    poses: jax.Array,
+    knn_k: int,
+    steps: int,
+    attention: bool,
+) -> Tuple[jax.Array, jax.Array]:
     feats = _features(poses)
     h0 = jnp.tanh(feats @ params["w_in"] + params["b_in"])
+    h = h0
     idx = _knn_indices(poses[:, :2], knn_k)
-    neigh = jnp.take(h0, idx, axis=0)
-    agg = jnp.mean(neigh, axis=1)
-    h1 = jnp.tanh(h0 + agg @ params["w_msg"] + params["b_msg"])
-    out = h1 @ params["w_out"] + params["b_out"]
+    use_attn = attention and "w_q" in params and "w_k" in params
+    for _ in range(max(int(steps), 1)):
+        neigh = jnp.take(h, idx, axis=0)
+        if use_attn:
+            q = h @ params["w_q"]
+            k = h @ params["w_k"]
+            k_neigh = jnp.take(k, idx, axis=0)
+            scale = jnp.sqrt(k.shape[-1]).astype(h.dtype)
+            scores = jnp.sum(q[:, None, :] * k_neigh, axis=-1) / (scale + 1e-9)
+            weights = jax.nn.softmax(scores, axis=1)
+            agg = jnp.sum(neigh * weights[:, :, None], axis=1)
+        else:
+            agg = jnp.mean(neigh, axis=1)
+        h = jnp.tanh(h + agg @ params["w_msg"] + params["b_msg"])
+    out = h @ params["w_out"] + params["b_out"]
     logits = out[:, 0]
     mean = out[:, 1:4]
     return logits, mean
@@ -83,8 +130,12 @@ def _gnn_apply(params: Params, poses: jax.Array, knn_k: int) -> Tuple[jax.Array,
 
 def policy_apply(params: Params, poses: jax.Array, config: L2OConfig) -> Tuple[jax.Array, jax.Array]:
     if config.policy == "gnn":
-        return _gnn_apply(params, poses, config.knn_k)
-    return _mlp_apply(params, poses)
+        logits, mean = _gnn_apply(params, poses, config.knn_k, config.gnn_steps, config.gnn_attention)
+    else:
+        logits, mean = _mlp_apply(params, poses, config.mlp_depth)
+    if config.action_scale != 1.0:
+        mean = mean * config.action_scale
+    return logits, mean
 
 
 def _gaussian_logprob(x: jax.Array, mean: jax.Array, scale: jax.Array) -> jax.Array:
@@ -177,6 +228,26 @@ def loss_fn(
     baseline = jax.lax.stop_gradient(jnp.mean(reward))
     loss = -jnp.mean((reward - baseline) * logp)
     return loss
+
+
+def loss_with_baseline(
+    params: Params,
+    key: jax.Array,
+    poses_batch: jax.Array,
+    steps: int,
+    config: L2OConfig,
+    baseline: jax.Array,
+) -> Tuple[jax.Array, jax.Array]:
+    def one_rollout(k, p):
+        final_poses, logp = rollout(k, params, p, steps, config)
+        reward = _reward_fn(final_poses, config.overlap_penalty, config.reward)
+        return reward, logp
+
+    keys = jax.random.split(key, poses_batch.shape[0])
+    reward, logp = jax.vmap(one_rollout)(keys, poses_batch)
+    advantage = reward - baseline
+    loss = -jnp.mean(advantage * logp)
+    return loss, jnp.mean(reward)
 
 
 def behavior_cloning_loss(

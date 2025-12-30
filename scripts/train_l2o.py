@@ -17,7 +17,7 @@ import sys
 
 sys.path.insert(0, str(ROOT / "src"))
 
-from l2o import L2OConfig, init_params, loss_fn, save_params_npz  # noqa: E402
+from l2o import L2OConfig, init_params, loss_fn, loss_with_baseline, save_params_npz  # noqa: E402
 from geom_np import polygon_radius, shift_poses_to_origin  # noqa: E402
 from tree_data import TREE_POINTS  # noqa: E402
 
@@ -81,16 +81,28 @@ def train_model(
     steps: int = 200,
     lr: float = 1e-3,
     hidden_size: int = 32,
+    mlp_depth: int = 1,
+    gnn_steps: int = 1,
+    gnn_attention: bool = False,
     policy: str = "mlp",
     knn_k: int = 4,
     reward: str = "packing",
+    action_scale: float = 1.0,
     init_mode: str = "grid",
     rand_scale: float = 0.3,
     dataset: dict[int, np.ndarray] | None = None,
     verbose_freq: int = 20,
+    baseline_mode: str = "batch",
+    baseline_decay: float = 0.9,
 ):
     key = jax.random.PRNGKey(seed)
-    params = init_params(key, hidden_size=hidden_size, policy=policy)
+    params = init_params(
+        key,
+        hidden_size=hidden_size,
+        policy=policy,
+        mlp_depth=mlp_depth,
+        gnn_attention=gnn_attention,
+    )
 
     points = np.array(TREE_POINTS, dtype=float)
     radius = polygon_radius(points)
@@ -103,8 +115,24 @@ def train_model(
         jax.tree_util.tree_map(jnp.zeros_like, params),
     )
 
-    config = L2OConfig(hidden_size=hidden_size, policy=policy, knn_k=knn_k, reward=reward)
-    loss_grad = jax.value_and_grad(lambda p, k, batch: loss_fn(p, k, batch, steps, config))
+    config = L2OConfig(
+        hidden_size=hidden_size,
+        policy=policy,
+        knn_k=knn_k,
+        reward=reward,
+        mlp_depth=mlp_depth,
+        gnn_steps=gnn_steps,
+        gnn_attention=gnn_attention,
+        action_scale=action_scale,
+    )
+    baseline = None
+    if baseline_mode == "ema":
+        loss_grad = jax.value_and_grad(
+            lambda p, k, batch, b: loss_with_baseline(p, k, batch, steps, config, b),
+            has_aux=True,
+        )
+    else:
+        loss_grad = jax.value_and_grad(lambda p, k, batch: loss_fn(p, k, batch, steps, config))
     loss_grad = jax.jit(loss_grad)
 
     history = []
@@ -128,7 +156,16 @@ def train_model(
         
         poses_batch = jnp.array(samples)
         key, sub = jax.random.split(key)
-        loss, grads = loss_grad(params, sub, poses_batch)
+        if baseline_mode == "ema":
+            baseline_val = 0.0 if baseline is None else baseline
+            (loss, reward_mean), grads = loss_grad(params, sub, poses_batch, baseline_val)
+            reward_mean = float(reward_mean)
+            if baseline is None:
+                baseline = reward_mean
+            else:
+                baseline = baseline_decay * baseline + (1.0 - baseline_decay) * reward_mean
+        else:
+            loss, grads = loss_grad(params, sub, poses_batch)
         params, opt_state = _adam_update(params, grads, opt_state, lr=lr)
         
         loss_val = float(loss)
@@ -150,9 +187,15 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     ap.add_argument("--seed", type=int, default=1, help="Random seed")
     ap.add_argument("--hidden", type=int, default=32, help="Hidden size")
+    ap.add_argument("--mlp-depth", type=int, default=1, help="MLP depth (>=1)")
+    ap.add_argument("--gnn-steps", type=int, default=1, help="GNN message passing steps")
+    ap.add_argument("--gnn-attention", action="store_true", help="Enable attention aggregation in GNN")
     ap.add_argument("--policy", type=str, default="mlp", choices=["mlp", "gnn"], help="Policy backbone")
     ap.add_argument("--knn-k", type=int, default=4, help="KNN neighbors for GNN")
     ap.add_argument("--reward", type=str, default="packing", choices=["packing", "prefix"], help="Reward type")
+    ap.add_argument("--action-scale", type=float, default=1.0, help="Scale applied to policy mean actions")
+    ap.add_argument("--baseline", type=str, default="batch", choices=["batch", "ema"], help="Baseline mode")
+    ap.add_argument("--baseline-decay", type=float, default=0.9, help="EMA decay for baseline")
     ap.add_argument("--init", type=str, default="grid", choices=["grid", "random", "mix"], help="Init poses")
     ap.add_argument("--rand-scale", type=float, default=0.3, help="Random init scale (relative)")
     ap.add_argument("--dataset-size", type=int, default=0, help="Pre-generate dataset per N (0 = on-the-fly)")
@@ -196,12 +239,18 @@ def main() -> int:
         steps=args.steps,
         lr=args.lr,
         hidden_size=args.hidden,
+        mlp_depth=args.mlp_depth,
+        gnn_steps=args.gnn_steps,
+        gnn_attention=args.gnn_attention,
         policy=args.policy,
         knn_k=args.knn_k,
         reward=args.reward,
+        action_scale=args.action_scale,
         init_mode=args.init,
         rand_scale=args.rand_scale,
         dataset=dataset,
+        baseline_mode=args.baseline,
+        baseline_decay=args.baseline_decay,
     )
 
     out_path = args.out
@@ -209,7 +258,20 @@ def main() -> int:
         out_dir = ROOT / "runs" / f"l2o_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "policy.npz"
-    save_params_npz(out_path, params, meta={"policy": args.policy, "hidden": args.hidden, "knn_k": args.knn_k})
+    save_params_npz(
+        out_path,
+        params,
+        meta={
+            "policy": args.policy,
+            "hidden": args.hidden,
+            "knn_k": args.knn_k,
+            "mlp_depth": args.mlp_depth,
+            "gnn_steps": args.gnn_steps,
+            "gnn_attention": args.gnn_attention,
+            "reward": args.reward,
+            "action_scale": args.action_scale,
+        },
+    )
     print(f"Saved policy to {out_path}")
     return 0
 
