@@ -23,6 +23,7 @@
 /models/
 /logs/
 /tmp/
+/score_output*.txt
 
 # Kaggle submissions (usually generated)
 /submission*.csv

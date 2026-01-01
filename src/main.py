@@ -35,6 +35,7 @@ def main():
     parser.add_argument('--trans_sigma', type=float, default=0.1)
     parser.add_argument('--rot_sigma', type=float, default=15.0)
     parser.add_argument('--rot_prob', type=float, default=0.3)
+    parser.add_argument('--objective', type=str, default="packing", choices=["packing", "prefix"])
     args = parser.parse_args()
     
     print(f"Running JAX packing optimization with:")
@@ -76,6 +77,7 @@ def main():
         trans_sigma=args.trans_sigma,
         rot_sigma=args.rot_sigma,
         rot_prob=args.rot_prob,
+        objective=args.objective,
     )
     # Block until ready
     best_scores.block_until_ready()
