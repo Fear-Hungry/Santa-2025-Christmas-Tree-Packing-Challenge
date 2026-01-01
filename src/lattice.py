@@ -79,13 +79,59 @@ def _compute_spacing(
         return high
 
     if pattern == "hex":
+        # Hex lattice neighbors for a node include (±dx, 0) and (±dx/2, ±dy).
+        # When rotate_deg != 0, symmetry on x/y axes is not guaranteed, so we must
+        # check all sign combinations for the staggered row offsets.
         dx = binary_search_dx(0.0, upper, 0.0)
-        dy = binary_search_dy(0.0, upper, dx / 2.0)
-        row_height = max(dy, 1e-6)
+
+        def _hex_ok(dy: float) -> bool:
+            half = dx / 2.0
+            offsets = [(half, dy), (-half, dy), (half, -dy), (-half, -dy)]
+            return all(no_overlap(ox, oy) for ox, oy in offsets)
+
+        low = 0.0
+        high = upper
+        for _ in range(50):
+            mid = (low + high) / 2.0
+            if _hex_ok(mid):
+                high = mid
+            else:
+                low = mid
+        row_height = max(high, 1e-6)
     else:
+        # Square lattice neighbors include (±dx, 0), (0, ±dy) and (±dx, ±dy).
         dx = binary_search_dx(0.0, upper, 0.0)
         dy = binary_search_dy(0.0, upper, 0.0)
-        row_height = dy
+
+        def _square_ok(scale: float) -> bool:
+            sx = dx * scale
+            sy = dy * scale
+            offsets = [
+                (sx, 0.0),
+                (-sx, 0.0),
+                (0.0, sy),
+                (0.0, -sy),
+                (sx, sy),
+                (sx, -sy),
+                (-sx, sy),
+                (-sx, -sy),
+            ]
+            return all(no_overlap(ox, oy) for ox, oy in offsets)
+
+        # Ensure diagonal neighbors do not overlap (can happen for rotated shapes).
+        scale_low = 1.0
+        scale_high = 3.0
+        # If even the upper scale is not enough, fall back to something safe.
+        if not _square_ok(scale_high):
+            scale_high = 5.0
+        for _ in range(40):
+            mid = (scale_low + scale_high) / 2.0
+            if _square_ok(mid):
+                scale_high = mid
+            else:
+                scale_low = mid
+        dx = dx * scale_high
+        row_height = dy * scale_high
 
     step = dx * (1.0 + margin)
     row_height = row_height * (1.0 + margin)

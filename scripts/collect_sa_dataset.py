@@ -16,6 +16,7 @@ import sys
 sys.path.insert(0, str(ROOT / "src"))
 
 from geom_np import packing_score, polygon_radius, shift_poses_to_origin, transform_polygon  # noqa: E402
+from lattice import lattice_poses  # noqa: E402
 from scoring import polygons_intersect  # noqa: E402
 from tree_data import TREE_POINTS  # noqa: E402
 
@@ -37,6 +38,10 @@ def _random_initial(n: int, spacing: float, rand_scale: float) -> np.ndarray:
     return np.concatenate([xy, theta], axis=1)
 
 
+def _lattice_initial(n: int, *, pattern: str, margin: float, rotate_deg: float) -> np.ndarray:
+    return lattice_poses(n, pattern=pattern, margin=margin, rotate_deg=rotate_deg)
+
+
 def _check_overlaps(points: np.ndarray, poses: np.ndarray) -> bool:
     polys = [transform_polygon(points, pose) for pose in poses]
     for i in range(len(polys)):
@@ -46,11 +51,22 @@ def _check_overlaps(points: np.ndarray, poses: np.ndarray) -> bool:
     return False
 
 
+def _check_overlap_for_index(points: np.ndarray, poses: np.ndarray, idx: int) -> bool:
+    poly_i = transform_polygon(points, poses[idx])
+    for j in range(poses.shape[0]):
+        if j == idx:
+            continue
+        if polygons_intersect(poly_i, transform_polygon(points, poses[j])):
+            return True
+    return False
+
+
 @dataclass
 class RunRecord:
     poses: List[np.ndarray]
     idxs: List[int]
     deltas: List[np.ndarray]
+    delta_scores: List[float]
     final_score: float
 
 
@@ -64,6 +80,9 @@ def _run_sa_collect(
     rot_sigma: float,
     init_mode: str,
     rand_scale: float,
+    lattice_pattern: str,
+    lattice_margin: float,
+    lattice_rotate: float,
     points: np.ndarray,
 ) -> RunRecord:
     radius = polygon_radius(points)
@@ -72,15 +91,21 @@ def _run_sa_collect(
         poses = _grid_initial(n, spacing)
     elif init_mode == "random":
         poses = _random_initial(n, spacing, rand_scale)
+    elif init_mode == "lattice":
+        poses = _lattice_initial(n, pattern=lattice_pattern, margin=lattice_margin, rotate_deg=lattice_rotate)
     else:
         poses = _grid_initial(n, spacing)
 
+    poses = np.array(poses, dtype=float)
     poses = shift_poses_to_origin(points, poses)
+    if _check_overlaps(points, poses):
+        poses = shift_poses_to_origin(points, _grid_initial(n, spacing))
     score = packing_score(points, poses)
 
     accepted_poses: List[np.ndarray] = []
     accepted_idxs: List[int] = []
     accepted_deltas: List[np.ndarray] = []
+    accepted_delta_scores: List[float] = []
 
     for i in range(steps):
         frac = i / max(steps, 1)
@@ -93,7 +118,7 @@ def _run_sa_collect(
         candidate[idx] = candidate[idx] + delta
         candidate[idx, 2] = np.mod(candidate[idx, 2], 360.0)
 
-        if _check_overlaps(points, candidate):
+        if _check_overlap_for_index(points, candidate, idx):
             continue
 
         cand_score = packing_score(points, candidate)
@@ -102,10 +127,11 @@ def _run_sa_collect(
             accepted_poses.append(poses.copy())
             accepted_idxs.append(idx)
             accepted_deltas.append(delta.copy())
+            accepted_delta_scores.append(float(score - cand_score))
             poses = candidate
             score = cand_score
 
-    return RunRecord(accepted_poses, accepted_idxs, accepted_deltas, score)
+    return RunRecord(accepted_poses, accepted_idxs, accepted_deltas, accepted_delta_scores, score)
 
 
 def main() -> int:
@@ -113,16 +139,21 @@ def main() -> int:
     ap.add_argument("--n-list", type=str, default="25,50,100", help="Comma-separated Ns")
     ap.add_argument("--runs-per-n", type=int, default=5, help="SA runs per N")
     ap.add_argument("--steps", type=int, default=400, help="SA steps per run")
+    ap.add_argument("--seed", type=int, default=0, help="Random seed (numpy)")
     ap.add_argument("--t-start", type=float, default=1.0)
     ap.add_argument("--t-end", type=float, default=0.001)
     ap.add_argument("--trans-sigma", type=float, default=0.2)
     ap.add_argument("--rot-sigma", type=float, default=10.0)
-    ap.add_argument("--init", type=str, default="grid", choices=["grid", "random", "mix"])
+    ap.add_argument("--init", type=str, default="grid", choices=["grid", "random", "mix", "lattice", "all"])
     ap.add_argument("--rand-scale", type=float, default=0.3)
+    ap.add_argument("--lattice-pattern", type=str, default="hex", choices=["hex", "square"])
+    ap.add_argument("--lattice-margin", type=float, default=0.02)
+    ap.add_argument("--lattice-rotate", type=float, default=0.0)
     ap.add_argument("--best-only", action="store_true", help="Keep only best run per N")
     ap.add_argument("--out", type=Path, default=ROOT / "runs" / "sa_bc_dataset.npz")
     args = ap.parse_args()
 
+    np.random.seed(int(args.seed))
     ns = [int(x) for x in args.n_list.split(",") if x.strip()]
     points = np.array(TREE_POINTS, dtype=float)
 
@@ -132,6 +163,8 @@ def main() -> int:
         for r in range(args.runs_per_n):
             if args.init == "mix":
                 init_mode = "grid" if r % 2 == 0 else "random"
+            elif args.init == "all":
+                init_mode = ["grid", "random", "lattice"][r % 3]
             else:
                 init_mode = args.init
             run = _run_sa_collect(
@@ -143,6 +176,9 @@ def main() -> int:
                 rot_sigma=args.rot_sigma,
                 init_mode=init_mode,
                 rand_scale=args.rand_scale,
+                lattice_pattern=args.lattice_pattern,
+                lattice_margin=args.lattice_margin,
+                lattice_rotate=args.lattice_rotate,
                 points=points,
             )
             runs.append(run)
@@ -153,10 +189,16 @@ def main() -> int:
         poses = np.concatenate([np.array(r.poses) for r in runs], axis=0) if runs else np.zeros((0, n, 3))
         idxs = np.concatenate([np.array(r.idxs, dtype=int) for r in runs], axis=0) if runs else np.zeros((0,), dtype=int)
         deltas = np.concatenate([np.array(r.deltas, dtype=float) for r in runs], axis=0) if runs else np.zeros((0, 3))
+        dscores = (
+            np.concatenate([np.array(r.delta_scores, dtype=float) for r in runs], axis=0)
+            if runs
+            else np.zeros((0,), dtype=float)
+        )
 
         payload[f"poses_n{n}"] = poses
         payload[f"idx_n{n}"] = idxs
         payload[f"delta_n{n}"] = deltas
+        payload[f"dscore_n{n}"] = dscores
 
         print(f"N={n} samples={poses.shape[0]} best_only={args.best_only}")
 

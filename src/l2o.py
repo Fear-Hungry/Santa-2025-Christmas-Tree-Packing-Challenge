@@ -7,7 +7,7 @@ from typing import Dict, Tuple
 import jax
 import jax.numpy as jnp
 
-from optimizer import check_collisions
+from collisions import check_any_collisions
 from packing import packing_score, prefix_packing_score
 from tree import get_tree_polygon
 
@@ -20,6 +20,7 @@ class L2OConfig:
     mlp_depth: int = 1
     gnn_steps: int = 1
     gnn_attention: bool = False
+    feature_mode: str = "raw"  # "raw" or "bbox_norm"
     reward: str = "packing"  # "packing" or "prefix"
     trans_sigma: float = 0.2
     rot_sigma: float = 10.0
@@ -37,10 +38,12 @@ def init_params(
     policy: str = "mlp",
     mlp_depth: int = 1,
     gnn_attention: bool = False,
+    feature_mode: str = "raw",
 ) -> Params:
+    input_dim = _feature_dim(feature_mode)
     if policy == "gnn":
         key1, key2, key3, key4, key5 = jax.random.split(key, 5)
-        w_in = jax.random.normal(key1, (4, hidden_size)) * 0.1
+        w_in = jax.random.normal(key1, (input_dim, hidden_size)) * 0.1
         b_in = jnp.zeros((hidden_size,))
         w_msg = jax.random.normal(key2, (hidden_size, hidden_size)) * 0.1
         b_msg = jnp.zeros((hidden_size,))
@@ -54,7 +57,7 @@ def init_params(
             params["w_k"] = w_k
         return params
     key1, key2, key3 = jax.random.split(key, 3)
-    w1 = jax.random.normal(key1, (4, hidden_size)) * 0.1
+    w1 = jax.random.normal(key1, (input_dim, hidden_size)) * 0.1
     b1 = jnp.zeros((hidden_size,))
     w2 = jax.random.normal(key2, (hidden_size, 4)) * 0.1
     b2 = jnp.zeros((4,))
@@ -67,15 +70,46 @@ def init_params(
     return params
 
 
-def _features(poses: jax.Array) -> jax.Array:
-    x = poses[:, 0:1]
-    y = poses[:, 1:2]
+def _feature_dim(feature_mode: str) -> int:
+    if feature_mode == "raw":
+        return 4
+    if feature_mode == "bbox_norm":
+        return 6
+    raise ValueError(f"Unknown feature_mode='{feature_mode}'")
+
+
+def _features(poses: jax.Array, feature_mode: str) -> jax.Array:
+    xy = poses[:, 0:2]
     theta = jnp.deg2rad(poses[:, 2:3])
-    return jnp.concatenate([x, y, jnp.sin(theta), jnp.cos(theta)], axis=1)
+    if feature_mode == "raw":
+        return jnp.concatenate([xy, jnp.sin(theta), jnp.cos(theta)], axis=1)
+    if feature_mode != "bbox_norm":
+        raise ValueError(f"Unknown feature_mode='{feature_mode}'")
+
+    min_xy = jnp.min(xy, axis=0)
+    max_xy = jnp.max(xy, axis=0)
+    center = (min_xy + max_xy) * 0.5
+    max_side = jnp.maximum(jnp.max(max_xy - min_xy), 1e-6)
+    xy_norm = (xy - center) / max_side
+    dist_center = jnp.linalg.norm(xy - center, axis=1, keepdims=True) / max_side
+
+    if xy.shape[0] <= 1:
+        nn_dist = jnp.zeros((xy.shape[0], 1), dtype=poses.dtype)
+    else:
+        dists = jnp.sum((xy[:, None, :] - xy[None, :, :]) ** 2, axis=-1)
+        dists = dists + jnp.eye(xy.shape[0]) * 1e9
+        nn_dist = jnp.sqrt(jnp.min(dists, axis=1, keepdims=True)) / max_side
+
+    return jnp.concatenate([xy_norm, jnp.sin(theta), jnp.cos(theta), dist_center, nn_dist], axis=1)
 
 
-def _mlp_apply(params: Params, poses: jax.Array, depth: int) -> Tuple[jax.Array, jax.Array]:
-    feats = _features(poses)
+def _mlp_apply(
+    params: Params,
+    poses: jax.Array,
+    depth: int,
+    feature_mode: str,
+) -> Tuple[jax.Array, jax.Array]:
+    feats = _features(poses, feature_mode)
     h = jnp.tanh(feats @ params["w1"] + params["b1"])
     extra_layers = max(int(depth), 1) - 1
     for idx in range(extra_layers):
@@ -103,8 +137,9 @@ def _gnn_apply(
     knn_k: int,
     steps: int,
     attention: bool,
+    feature_mode: str,
 ) -> Tuple[jax.Array, jax.Array]:
-    feats = _features(poses)
+    feats = _features(poses, feature_mode)
     h0 = jnp.tanh(feats @ params["w_in"] + params["b_in"])
     h = h0
     idx = _knn_indices(poses[:, :2], knn_k)
@@ -130,9 +165,16 @@ def _gnn_apply(
 
 def policy_apply(params: Params, poses: jax.Array, config: L2OConfig) -> Tuple[jax.Array, jax.Array]:
     if config.policy == "gnn":
-        logits, mean = _gnn_apply(params, poses, config.knn_k, config.gnn_steps, config.gnn_attention)
+        logits, mean = _gnn_apply(
+            params,
+            poses,
+            config.knn_k,
+            config.gnn_steps,
+            config.gnn_attention,
+            config.feature_mode,
+        )
     else:
-        logits, mean = _mlp_apply(params, poses, config.mlp_depth)
+        logits, mean = _mlp_apply(params, poses, config.mlp_depth, config.feature_mode)
     if config.action_scale != 1.0:
         mean = mean * config.action_scale
     return logits, mean
@@ -170,7 +212,7 @@ def _apply_delta(poses: jax.Array, idx: jax.Array, delta: jax.Array) -> jax.Arra
 
 def _reward_fn(poses: jax.Array, overlap_penalty: float, reward: str) -> jax.Array:
     base_poly = get_tree_polygon()
-    collision = check_collisions(poses, base_poly)
+    collision = check_any_collisions(poses, base_poly)
     score = prefix_packing_score(poses) if reward == "prefix" else packing_score(poses)
     return -score - overlap_penalty * collision.astype(jnp.float32)
 
@@ -267,6 +309,28 @@ def behavior_cloning_loss(
 
     logp = jax.vmap(one_sample)(poses_batch, idx_batch, delta_batch)
     return -jnp.mean(logp)
+
+
+def behavior_cloning_loss_weighted(
+    params: Params,
+    poses_batch: jax.Array,
+    idx_batch: jax.Array,
+    delta_batch: jax.Array,
+    weights: jax.Array,
+    config: L2OConfig,
+) -> jax.Array:
+    scales = jnp.array([config.trans_sigma, config.trans_sigma, config.rot_sigma])
+
+    def one_sample(poses, idx, delta):
+        logits, mean = policy_apply(params, poses, config)
+        logp_idx = jax.nn.log_softmax(logits)[idx]
+        logp_delta = _gaussian_logprob(delta, mean[idx], scales)
+        return logp_idx + logp_delta
+
+    logp = jax.vmap(one_sample)(poses_batch, idx_batch, delta_batch)
+    w = jnp.maximum(weights, 0.0)
+    denom = jnp.sum(w) + 1e-9
+    return -jnp.sum(w * logp) / denom
 
 
 def _flatten_params(params: Params, prefix: str = "") -> Dict[str, jnp.ndarray]:

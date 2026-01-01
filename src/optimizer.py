@@ -1,10 +1,10 @@
 import jax
 import jax.numpy as jnp
 from functools import partial
-from packing import packing_score, prefix_packing_score, compute_packing_bbox
-from geometry import transform_polygon
+from packing import packing_score, prefix_packing_score
 from tree import get_tree_polygon
-from physics import polygons_intersect
+from collisions import check_any_collisions, check_collision_for_index
+from l2o import policy_apply
 
 # Constants
 N_TREES = 25  # Starting small for testing, actual problem has thousands? No, usually 25-100 for this type? 
@@ -23,27 +23,7 @@ def check_collisions(poses, base_poly):
     Returns:
         True if any collision exists, False otherwise.
     """
-    N = poses.shape[0]
-    polys = jax.vmap(lambda p: transform_polygon(base_poly, p))(poses)
-    
-    # Pairwise check
-    # We only check i < j to avoid double counting and self-check
-    
-    def check_pair(i, j):
-        return jax.lax.cond(
-            i < j,
-            lambda: polygons_intersect(polys[i], polys[j]),
-            lambda: False
-        )
-        
-    # vmap over all pairs? (N, N) might be expensive for large N.
-    # But for N=25 it's fine. For N=5000 it is NOT fine.
-    # We might need a grid-based broad phase if N is large.
-    # The user mention optimization, so purely O(N^2) naive might be slow in Python even on GPU if N is huge.
-    # However, let's start with the naive implementation as a baseline.
-    
-    matrix = jax.vmap(lambda i: jax.vmap(lambda j: check_pair(i, j))(jnp.arange(N)))(jnp.arange(N))
-    return jnp.any(matrix)
+    return check_any_collisions(poses, base_poly)
 
 @partial(jax.jit, static_argnames=['n_steps', 'n_trees', 'objective'])
 def run_sa_batch(
@@ -120,8 +100,8 @@ def run_sa_batch(
         candidate_poses = candidate_poses.at[:, :, 2].set(jnp.mod(candidate_poses[:, :, 2], 360.0))
         
         # 2. Check Constraints
-        # vmap check_collisions over batch
-        is_colliding = jax.vmap(lambda p: check_collisions(p, base_poly))(candidate_poses)
+        # Only the moved tree can introduce a new overlap, so we check one-vs-all.
+        is_colliding = jax.vmap(lambda p, idx: check_collision_for_index(p, base_poly, idx))(candidate_poses, k)
         
         # 3. Calculate Score
         candidate_score = jax.vmap(score_fn)(candidate_poses)
@@ -157,4 +137,109 @@ def run_sa_batch(
     
     _, _, _, best_poses, best_score, _ = final_state
     
+    return best_poses, best_score
+
+
+@partial(jax.jit, static_argnames=["n_steps", "n_trees", "objective", "policy_config"])
+def run_sa_batch_guided(
+    random_key,
+    n_steps,
+    n_trees,
+    initial_poses,
+    policy_params,
+    policy_config,
+    t_start=1.0,
+    t_end=0.001,
+    trans_sigma=0.1,
+    rot_sigma=15.0,
+    rot_prob=0.3,
+    objective="packing",
+    policy_prob=1.0,
+    policy_pmax=0.05,
+):
+    """Runs SA where the proposal is a hybrid: learned policy OR heuristic fallback.
+
+    Proposal selection (per batch element):
+      - Compute policy logits over trees.
+      - If max softmax prob < `policy_pmax`, fallback to heuristic proposal.
+      - Else use policy proposal with probability `policy_prob`, otherwise heuristic.
+
+    The heuristic is the same baseline used by `run_sa_batch` (random k + gaussian move).
+    """
+
+    base_poly = get_tree_polygon()
+    score_fn = prefix_packing_score if objective == "prefix" else packing_score
+
+    def step_fn(state, i):
+        key, poses, current_score, best_poses, best_score = state
+
+        frac = i / n_steps
+        current_temp = t_start * (t_end / t_start) ** frac
+
+        batch_size = poses.shape[0]
+        batch_idx = jnp.arange(batch_size)
+
+        # --- Heuristic proposal (baseline random SA move)
+        key, subkey_k, subkey_move, subkey_trans, subkey_rot = jax.random.split(key, 5)
+        k_h = jax.random.randint(subkey_k, (batch_size,), 0, n_trees)
+        move_choice = jax.random.uniform(subkey_move, (batch_size,))
+
+        dxy = jax.random.normal(subkey_trans, (batch_size, 2)) * trans_sigma * current_temp
+        dtheta = jax.random.normal(subkey_rot, (batch_size,)) * rot_sigma * current_temp
+
+        rot_mask = move_choice < rot_prob
+        delta_xy = dxy * (~rot_mask)[:, None]
+        delta_theta = dtheta * rot_mask
+        delta_h = jnp.concatenate([delta_xy, delta_theta[:, None]], axis=1)
+
+        # --- Policy proposal
+        logits_b, mean_b = jax.vmap(lambda p: policy_apply(policy_params, p, policy_config))(poses)
+        probs_b = jax.nn.softmax(logits_b, axis=1)
+        pmax = jnp.max(probs_b, axis=1)
+
+        key, subkey_gate = jax.random.split(key)
+        u = jax.random.uniform(subkey_gate, (batch_size,))
+        use_policy = (pmax >= policy_pmax) & (u < policy_prob)
+
+        key, subkey_pick = jax.random.split(key)
+        keys_pick = jax.random.split(subkey_pick, batch_size)
+        k_p = jax.vmap(lambda kk, logit: jax.random.categorical(kk, logit))(keys_pick, logits_b)
+
+        key, subkey_eps = jax.random.split(key)
+        eps = jax.random.normal(subkey_eps, (batch_size, 3))
+        mean_sel = mean_b[batch_idx, k_p]
+        scales = jnp.array([trans_sigma, trans_sigma, rot_sigma]) * current_temp
+        delta_p = mean_sel * current_temp + eps * scales
+
+        # --- Mix
+        k = jnp.where(use_policy, k_p, k_h)
+        delta = jnp.where(use_policy[:, None], delta_p, delta_h)
+
+        candidate_poses = poses.at[batch_idx, k].add(delta)
+        candidate_poses = candidate_poses.at[:, :, 2].set(jnp.mod(candidate_poses[:, :, 2], 360.0))
+
+        # --- Constraints: only moved tree can introduce overlap
+        is_colliding = jax.vmap(lambda p, idx: check_collision_for_index(p, base_poly, idx))(candidate_poses, k)
+
+        # --- Score + Metropolis
+        candidate_score = jax.vmap(score_fn)(candidate_poses)
+        dscore = candidate_score - current_score
+
+        key, subkey_accept = jax.random.split(key)
+        r = jax.random.uniform(subkey_accept, (batch_size,))
+        should_accept = (~is_colliding) & ((dscore < 0) | (r < jnp.exp(-dscore / current_temp)))
+
+        new_poses = jnp.where(should_accept[:, None, None], candidate_poses, poses)
+        new_score = jnp.where(should_accept, candidate_score, current_score)
+
+        improved = new_score < best_score
+        new_best_poses = jnp.where(improved[:, None, None], new_poses, best_poses)
+        new_best_score = jnp.minimum(new_score, best_score)
+
+        return (key, new_poses, new_score, new_best_poses, new_best_score), (new_score, is_colliding, use_policy, pmax)
+
+    initial_scores = jax.vmap(score_fn)(initial_poses)
+    init_state = (random_key, initial_poses, initial_scores, initial_poses, initial_scores)
+    final_state, _history = jax.lax.scan(step_fn, init_state, jnp.arange(n_steps))
+    _, _, _, best_poses, best_score = final_state
     return best_poses, best_score
