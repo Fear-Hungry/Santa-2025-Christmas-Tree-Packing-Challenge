@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from collisions import check_any_collisions
 from packing import packing_score, prefix_packing_score
 from tree import get_tree_polygon
+from tree_bounds import TREE_RADIUS2
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class L2OConfig:
     rot_sigma: float = 10.0
     action_scale: float = 1.0
     overlap_penalty: float = 50.0
+    overlap_lambda: float = 0.0
     action_noise: bool = True
 
 
@@ -37,19 +39,30 @@ def init_params(
     hidden_size: int = 32,
     policy: str = "mlp",
     mlp_depth: int = 1,
+    gnn_steps: int = 1,
     gnn_attention: bool = False,
     feature_mode: str = "raw",
 ) -> Params:
     input_dim = _feature_dim(feature_mode)
     if policy == "gnn":
+        msg_steps = max(int(gnn_steps), 1)
         key1, key2, key3, key4, key5 = jax.random.split(key, 5)
         w_in = jax.random.normal(key1, (input_dim, hidden_size)) * 0.1
         b_in = jnp.zeros((hidden_size,))
-        w_msg = jax.random.normal(key2, (hidden_size, hidden_size)) * 0.1
-        b_msg = jnp.zeros((hidden_size,))
+        # Allow per-step message weights for higher capacity when gnn_steps>1.
+        # For backwards compatibility, also keep w_msg/b_msg (used as fallback).
+        msg_keys = jax.random.split(key2, msg_steps)
+        w_msg0 = jax.random.normal(msg_keys[0], (hidden_size, hidden_size)) * 0.1
+        b_msg0 = jnp.zeros((hidden_size,))
         w_out = jax.random.normal(key3, (hidden_size, 4)) * 0.1
         b_out = jnp.zeros((4,))
-        params = {"w_in": w_in, "b_in": b_in, "w_msg": w_msg, "b_msg": b_msg, "w_out": w_out, "b_out": b_out}
+        params = {"w_in": w_in, "b_in": b_in, "w_msg": w_msg0, "b_msg": b_msg0, "w_out": w_out, "b_out": b_out}
+        if msg_steps > 1:
+            params["w_msg_0"] = w_msg0
+            params["b_msg_0"] = b_msg0
+            for step in range(1, msg_steps):
+                params[f"w_msg_{step}"] = jax.random.normal(msg_keys[step], (hidden_size, hidden_size)) * 0.1
+                params[f"b_msg_{step}"] = jnp.zeros((hidden_size,))
         if gnn_attention:
             w_q = jax.random.normal(key4, (hidden_size, hidden_size)) * 0.1
             w_k = jax.random.normal(key5, (hidden_size, hidden_size)) * 0.1
@@ -75,6 +88,9 @@ def _feature_dim(feature_mode: str) -> int:
         return 4
     if feature_mode == "bbox_norm":
         return 6
+    if feature_mode == "rich":
+        # bbox_norm + density + theta_rel_center(sin/cos) + radial_rank
+        return 10
     raise ValueError(f"Unknown feature_mode='{feature_mode}'")
 
 
@@ -83,7 +99,7 @@ def _features(poses: jax.Array, feature_mode: str) -> jax.Array:
     theta = jnp.deg2rad(poses[:, 2:3])
     if feature_mode == "raw":
         return jnp.concatenate([xy, jnp.sin(theta), jnp.cos(theta)], axis=1)
-    if feature_mode != "bbox_norm":
+    if feature_mode not in {"bbox_norm", "rich"}:
         raise ValueError(f"Unknown feature_mode='{feature_mode}'")
 
     min_xy = jnp.min(xy, axis=0)
@@ -94,13 +110,40 @@ def _features(poses: jax.Array, feature_mode: str) -> jax.Array:
     dist_center = jnp.linalg.norm(xy - center, axis=1, keepdims=True) / max_side
 
     if xy.shape[0] <= 1:
+        dist2 = None
         nn_dist = jnp.zeros((xy.shape[0], 1), dtype=poses.dtype)
     else:
-        dists = jnp.sum((xy[:, None, :] - xy[None, :, :]) ** 2, axis=-1)
-        dists = dists + jnp.eye(xy.shape[0]) * 1e9
-        nn_dist = jnp.sqrt(jnp.min(dists, axis=1, keepdims=True)) / max_side
+        dist2 = jnp.sum((xy[:, None, :] - xy[None, :, :]) ** 2, axis=-1)
+        dist2 = dist2 + jnp.eye(xy.shape[0], dtype=poses.dtype) * 1e9
+        nn_dist = jnp.sqrt(jnp.min(dist2, axis=1, keepdims=True)) / max_side
 
-    return jnp.concatenate([xy_norm, jnp.sin(theta), jnp.cos(theta), dist_center, nn_dist], axis=1)
+    base = jnp.concatenate([xy_norm, jnp.sin(theta), jnp.cos(theta), dist_center, nn_dist], axis=1)
+    if feature_mode == "bbox_norm":
+        return base
+
+    # --- rich features
+    # Local density (fraction of neighbors within circle threshold) and radial ordering proxy.
+    if xy.shape[0] <= 1:
+        density = jnp.zeros((xy.shape[0], 1), dtype=poses.dtype)
+        radial_rank = jnp.zeros((xy.shape[0], 1), dtype=poses.dtype)
+    else:
+        thr2 = 4.0 * TREE_RADIUS2
+        within = (dist2 < thr2).astype(poses.dtype)
+        denom = jnp.asarray(float(xy.shape[0] - 1), dtype=poses.dtype)
+        density = jnp.sum(within, axis=1, keepdims=True) / jnp.maximum(denom, 1.0)
+
+        r2 = jnp.sum((xy - center) ** 2, axis=1)  # (n,)
+        comp = (r2[None, :] <= r2[:, None]).astype(poses.dtype)
+        radial_rank = (jnp.sum(comp, axis=1, keepdims=True) - 1.0) / jnp.maximum(denom, 1.0)
+
+    # Angle relative to center direction.
+    vec = center[None, :] - xy
+    ang = jnp.arctan2(vec[:, 1], vec[:, 0])[:, None]
+    rel = theta - ang
+    rel_sin = jnp.sin(rel)
+    rel_cos = jnp.cos(rel)
+
+    return jnp.concatenate([base, density, rel_sin, rel_cos, radial_rank], axis=1)
 
 
 def _mlp_apply(
@@ -144,7 +187,7 @@ def _gnn_apply(
     h = h0
     idx = _knn_indices(poses[:, :2], knn_k)
     use_attn = attention and "w_q" in params and "w_k" in params
-    for _ in range(max(int(steps), 1)):
+    for step in range(max(int(steps), 1)):
         neigh = jnp.take(h, idx, axis=0)
         if use_attn:
             q = h @ params["w_q"]
@@ -156,7 +199,11 @@ def _gnn_apply(
             agg = jnp.sum(neigh * weights[:, :, None], axis=1)
         else:
             agg = jnp.mean(neigh, axis=1)
-        h = jnp.tanh(h + agg @ params["w_msg"] + params["b_msg"])
+        w_msg = params.get(f"w_msg_{step}", params.get("w_msg"))
+        b_msg = params.get(f"b_msg_{step}", params.get("b_msg"))
+        if w_msg is None or b_msg is None:
+            raise ValueError("Missing GNN message weights (w_msg/b_msg).")
+        h = jnp.tanh(h + agg @ w_msg + b_msg)
     out = h @ params["w_out"] + params["b_out"]
     logits = out[:, 0]
     mean = out[:, 1:4]
@@ -210,11 +257,29 @@ def _apply_delta(poses: jax.Array, idx: jax.Array, delta: jax.Array) -> jax.Arra
     return poses.at[idx].add(delta)
 
 
-def _reward_fn(poses: jax.Array, overlap_penalty: float, reward: str) -> jax.Array:
-    base_poly = get_tree_polygon()
-    collision = check_any_collisions(poses, base_poly)
+def _circle_overlap_penalty(poses_xy: jax.Array) -> jax.Array:
+    """Smooth-ish overlap proxy using bounding circles (sum of squared penetrations)."""
+    if poses_xy.shape[0] <= 1:
+        return jnp.array(0.0, dtype=poses_xy.dtype)
+    d = poses_xy[:, None, :] - poses_xy[None, :, :]
+    dist2 = jnp.sum(d * d, axis=-1)
+    thr2 = 4.0 * TREE_RADIUS2
+    pen = jnp.maximum(thr2 - dist2, 0.0)
+    pen2 = pen * pen
+    mask = jnp.triu(jnp.ones_like(pen2), k=1)
+    return jnp.sum(pen2 * mask)
+
+
+def _reward_fn(poses: jax.Array, overlap_penalty: float, overlap_lambda: float, reward: str) -> jax.Array:
     score = prefix_packing_score(poses) if reward == "prefix" else packing_score(poses)
-    return -score - overlap_penalty * collision.astype(jnp.float32)
+    penalty = jnp.array(0.0, dtype=poses.dtype)
+    if overlap_penalty > 0.0:
+        base_poly = get_tree_polygon()
+        collision = check_any_collisions(poses, base_poly)
+        penalty = penalty + jnp.asarray(overlap_penalty, dtype=poses.dtype) * collision.astype(poses.dtype)
+    if overlap_lambda > 0.0:
+        penalty = penalty + jnp.asarray(overlap_lambda, dtype=poses.dtype) * _circle_overlap_penalty(poses[:, :2])
+    return -score - penalty
 
 
 def rollout(
@@ -262,7 +327,7 @@ def loss_fn(
 ) -> jax.Array:
     def one_rollout(k, p):
         final_poses, logp = rollout(k, params, p, steps, config)
-        reward = _reward_fn(final_poses, config.overlap_penalty, config.reward)
+        reward = _reward_fn(final_poses, config.overlap_penalty, config.overlap_lambda, config.reward)
         return reward, logp
 
     keys = jax.random.split(key, poses_batch.shape[0])
@@ -282,7 +347,7 @@ def loss_with_baseline(
 ) -> Tuple[jax.Array, jax.Array]:
     def one_rollout(k, p):
         final_poses, logp = rollout(k, params, p, steps, config)
-        reward = _reward_fn(final_poses, config.overlap_penalty, config.reward)
+        reward = _reward_fn(final_poses, config.overlap_penalty, config.overlap_lambda, config.reward)
         return reward, logp
 
     keys = jax.random.split(key, poses_batch.shape[0])

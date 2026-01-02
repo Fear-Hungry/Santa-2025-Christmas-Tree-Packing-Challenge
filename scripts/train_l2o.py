@@ -120,6 +120,8 @@ def train_model(
     feature_mode: str = "raw",
     reward: str = "packing",
     action_scale: float = 1.0,
+    overlap_penalty: float = 50.0,
+    overlap_lambda: float = 0.0,
     init_mode: str = "grid",
     rand_scale: float = 0.3,
     lattice_pattern: str = "hex",
@@ -140,6 +142,7 @@ def train_model(
         hidden_size=hidden_size,
         policy=policy,
         mlp_depth=mlp_depth,
+        gnn_steps=gnn_steps,
         gnn_attention=gnn_attention,
         feature_mode=feature_mode,
     )
@@ -165,6 +168,8 @@ def train_model(
         gnn_steps=gnn_steps,
         gnn_attention=gnn_attention,
         action_scale=action_scale,
+        overlap_penalty=overlap_penalty,
+        overlap_lambda=overlap_lambda,
     )
     baseline = None
     if baseline_mode == "ema":
@@ -267,11 +272,23 @@ def main() -> int:
         "--feature-mode",
         type=str,
         default="raw",
-        choices=["raw", "bbox_norm"],
+        choices=["raw", "bbox_norm", "rich"],
         help="Input feature representation",
     )
     ap.add_argument("--reward", type=str, default="packing", choices=["packing", "prefix"], help="Reward type")
     ap.add_argument("--action-scale", type=float, default=1.0, help="Scale applied to policy mean actions")
+    ap.add_argument(
+        "--overlap-penalty",
+        type=float,
+        default=50.0,
+        help="Penalty for any collision (binary). Set 0 to disable collision check in reward.",
+    )
+    ap.add_argument(
+        "--overlap-lambda",
+        type=float,
+        default=0.0,
+        help="Weight for circle-overlap penalty (smooth-ish proxy). 0 disables.",
+    )
     ap.add_argument("--baseline", type=str, default="batch", choices=["batch", "ema"], help="Baseline mode")
     ap.add_argument("--baseline-decay", type=float, default=0.9, help="EMA decay for baseline")
     ap.add_argument("--init", type=str, default="grid", choices=["grid", "random", "mix", "lattice", "all"], help="Init poses")
@@ -341,6 +358,8 @@ def main() -> int:
         feature_mode=args.feature_mode,
         reward=args.reward,
         action_scale=args.action_scale,
+        overlap_penalty=args.overlap_penalty,
+        overlap_lambda=args.overlap_lambda,
         init_mode=args.init,
         rand_scale=args.rand_scale,
         lattice_pattern=args.lattice_pattern,
@@ -373,6 +392,8 @@ def main() -> int:
             "feature_mode": args.feature_mode,
             "reward": args.reward,
             "action_scale": args.action_scale,
+            "overlap_penalty": args.overlap_penalty,
+            "overlap_lambda": args.overlap_lambda,
             "init_mode": args.init,
             "rand_scale": args.rand_scale,
             "lattice_pattern": args.lattice_pattern,

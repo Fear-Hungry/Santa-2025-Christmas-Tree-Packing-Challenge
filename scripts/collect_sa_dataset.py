@@ -16,6 +16,7 @@ import sys
 sys.path.insert(0, str(ROOT / "src"))
 
 from geom_np import packing_score, polygon_radius, shift_poses_to_origin, transform_polygon  # noqa: E402
+from geom_np import prefix_score  # noqa: E402
 from lattice import lattice_poses  # noqa: E402
 from scoring import polygons_intersect  # noqa: E402
 from tree_data import TREE_POINTS  # noqa: E402
@@ -70,6 +71,41 @@ class RunRecord:
     final_score: float
 
 
+def _pose_bboxes(points: np.ndarray, poses: np.ndarray) -> np.ndarray:
+    bboxes = np.zeros((poses.shape[0], 4), dtype=float)
+    for i, pose in enumerate(poses):
+        poly = transform_polygon(points, pose)
+        min_xy = np.min(poly, axis=0)
+        max_xy = np.max(poly, axis=0)
+        bboxes[i] = (min_xy[0], min_xy[1], max_xy[0], max_xy[1])
+    return bboxes
+
+
+def _packing_score_from_bboxes(bboxes: np.ndarray) -> float:
+    min_x = float(np.min(bboxes[:, 0]))
+    min_y = float(np.min(bboxes[:, 1]))
+    max_x = float(np.max(bboxes[:, 2]))
+    max_y = float(np.max(bboxes[:, 3]))
+    return float(max(max_x - min_x, max_y - min_y))
+
+
+def _prefix_packing_score(points: np.ndarray, poses: np.ndarray) -> float:
+    bboxes = _pose_bboxes(points, poses)
+    min_x = float(bboxes[0, 0])
+    min_y = float(bboxes[0, 1])
+    max_x = float(bboxes[0, 2])
+    max_y = float(bboxes[0, 3])
+    s_vals = np.zeros((poses.shape[0],), dtype=float)
+    s_vals[0] = max(max_x - min_x, max_y - min_y)
+    for i in range(1, poses.shape[0]):
+        min_x = min(min_x, float(bboxes[i, 0]))
+        min_y = min(min_y, float(bboxes[i, 1]))
+        max_x = max(max_x, float(bboxes[i, 2]))
+        max_y = max(max_y, float(bboxes[i, 3]))
+        s_vals[i] = max(max_x - min_x, max_y - min_y)
+    return float(prefix_score(s_vals))
+
+
 def _run_sa_collect(
     n: int,
     *,
@@ -83,6 +119,7 @@ def _run_sa_collect(
     lattice_pattern: str,
     lattice_margin: float,
     lattice_rotate: float,
+    objective: str,
     points: np.ndarray,
 ) -> RunRecord:
     radius = polygon_radius(points)
@@ -100,7 +137,10 @@ def _run_sa_collect(
     poses = shift_poses_to_origin(points, poses)
     if _check_overlaps(points, poses):
         poses = shift_poses_to_origin(points, _grid_initial(n, spacing))
-    score = packing_score(points, poses)
+    if objective == "prefix":
+        score = _prefix_packing_score(points, poses)
+    else:
+        score = packing_score(points, poses)
 
     accepted_poses: List[np.ndarray] = []
     accepted_idxs: List[int] = []
@@ -121,7 +161,10 @@ def _run_sa_collect(
         if _check_overlap_for_index(points, candidate, idx):
             continue
 
-        cand_score = packing_score(points, candidate)
+        if objective == "prefix":
+            cand_score = _prefix_packing_score(points, candidate)
+        else:
+            cand_score = packing_score(points, candidate)
         dscore = cand_score - score
         if dscore < 0 or np.random.rand() < math.exp(-dscore / max(temp, 1e-9)):
             accepted_poses.append(poses.copy())
@@ -144,6 +187,7 @@ def main() -> int:
     ap.add_argument("--t-end", type=float, default=0.001)
     ap.add_argument("--trans-sigma", type=float, default=0.2)
     ap.add_argument("--rot-sigma", type=float, default=10.0)
+    ap.add_argument("--objective", type=str, default="packing", choices=["packing", "prefix"])
     ap.add_argument("--init", type=str, default="grid", choices=["grid", "random", "mix", "lattice", "all"])
     ap.add_argument("--rand-scale", type=float, default=0.3)
     ap.add_argument("--lattice-pattern", type=str, default="hex", choices=["hex", "square"])
@@ -179,6 +223,7 @@ def main() -> int:
                 lattice_pattern=args.lattice_pattern,
                 lattice_margin=args.lattice_margin,
                 lattice_rotate=args.lattice_rotate,
+                objective=args.objective,
                 points=points,
             )
             runs.append(run)

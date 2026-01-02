@@ -76,49 +76,39 @@ def polygons_intersect(poly1, poly2):
     4. Check if any vertex of poly2 is in poly1 (inclusion).
     """
     
-    # 1. Bounding Box Check
+    # 1. Bounding Box Check (fast reject)
     min1 = jnp.min(poly1, axis=0)
     max1 = jnp.max(poly1, axis=0)
     min2 = jnp.min(poly2, axis=0)
     max2 = jnp.max(poly2, axis=0)
-    
+
     bbox_overlap = jnp.all(max1 >= min2) & jnp.all(max2 >= min1)
-    
-    # If no bbox overlap, return False immediately
-    # Since we are in JAX, we can't easily "return" early without cond, 
-    # but we can mask the expensive checks.
-    
-    # 2. Edge Intersections
-    # Vmap over all pairs of edges? 
-    # Poly1 has N edges, Poly2 has M edges. NxM check.
-    # N=15, M=15 -> 225 checks. Manageable.
-    
-    n1 = poly1.shape[0]
-    n2 = poly2.shape[0]
-    
-    # Create edge pairs
-    # edges1: (N, 2, 2) -> start, end points
-    edges1_start = poly1
-    edges1_end = jnp.roll(poly1, -1, axis=0)
-    
-    edges2_start = poly2
-    edges2_end = jnp.roll(poly2, -1, axis=0)
-    
-    # Vectorize segments_intersect over n1 and n2
-    def check_edges(i, j):
-        return segments_intersect(edges1_start[i], edges1_end[i], edges2_start[j], edges2_end[j])
-        
-    edge_overlaps = jax.vmap(lambda i: jax.vmap(lambda j: check_edges(i, j))(jnp.arange(n2)))(jnp.arange(n1))
-    has_edge_overlap = jnp.any(edge_overlaps)
-    
-    # 3. Vertex Inclusion (Poly1 in Poly2)
-    # vmap point_in_polygon over vertices of poly1
-    verts_in_poly2 = jax.vmap(lambda p: point_in_polygon(p, poly2))(poly1)
-    has_v1_in_p2 = jnp.any(verts_in_poly2)
-    
-    # 4. Vertex Inclusion (Poly2 in Poly1)
-    verts_in_poly1 = jax.vmap(lambda p: point_in_polygon(p, poly1))(poly2)
-    has_v2_in_p1 = jnp.any(verts_in_poly1)
-    
-    overlap = bbox_overlap & (has_edge_overlap | has_v1_in_p2 | has_v2_in_p1)
-    return overlap
+
+    def _expensive() -> jax.Array:
+        # 2. Edge Intersections (NxM checks; here N=M=15 => 225)
+        n1 = poly1.shape[0]
+        n2 = poly2.shape[0]
+
+        edges1_start = poly1
+        edges1_end = jnp.roll(poly1, -1, axis=0)
+
+        edges2_start = poly2
+        edges2_end = jnp.roll(poly2, -1, axis=0)
+
+        def check_edges(i, j):
+            return segments_intersect(edges1_start[i], edges1_end[i], edges2_start[j], edges2_end[j])
+
+        edge_overlaps = jax.vmap(lambda i: jax.vmap(lambda j: check_edges(i, j))(jnp.arange(n2)))(jnp.arange(n1))
+        has_edge_overlap = jnp.any(edge_overlaps)
+
+        # 3. Vertex Inclusion (Poly1 in Poly2)
+        verts_in_poly2 = jax.vmap(lambda p: point_in_polygon(p, poly2))(poly1)
+        has_v1_in_p2 = jnp.any(verts_in_poly2)
+
+        # 4. Vertex Inclusion (Poly2 in Poly1)
+        verts_in_poly1 = jax.vmap(lambda p: point_in_polygon(p, poly1))(poly2)
+        has_v2_in_p1 = jnp.any(verts_in_poly1)
+
+        return has_edge_overlap | has_v1_in_p2 | has_v2_in_p1
+
+    return jax.lax.cond(bbox_overlap, _expensive, lambda: jnp.array(False))

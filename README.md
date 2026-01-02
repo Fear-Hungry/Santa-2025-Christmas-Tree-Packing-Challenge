@@ -23,7 +23,8 @@
 * **Score local atual (fonte: `scripts/score_submission.py`):** `86.8115042186`
   * **Arquivo:** `submission.csv` (baseline atual).
   * Observacao: score calculado com o scorer Python em modo rapido (`--no-overlap`). Para validacao final, rode sem `--no-overlap`.
-* **Pipeline atual:** versao Python/JAX com geracao via `scripts/generate_submission.py` e registro de experimentos em `runs/`. Nao ha pipeline automatico de sweep/ensemble nesta versao.
+* **Pipeline atual:** versao Python/JAX com geracao via `scripts/generate_submission.py` e registro de experimentos em `runs/`.
+  * **Multi-start/ensemble:** `scripts/sweep_ensemble.py` (selecao por instancia/`n`).
 
 ## O que “da score alto” aqui (na pratica)
 
@@ -165,6 +166,9 @@ Este repo usa **Python/JAX** como base do solver, substituindo a base C++ anteri
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U "jax[cpu]" numpy matplotlib
+
+# Opcional (acelera `polygons_intersect` no score local):
+python3 scripts/build_fastcollide.py
 ```
 
 Se voce tiver GPU/CUDA, instale o pacote JAX adequado ao seu ambiente.
@@ -194,6 +198,15 @@ Gerar submission (hibrido SA + lattice):
 python3 scripts/generate_submission.py --out submission.csv --nmax 200 --sa-nmax 30 --sa-steps 400 --sa-batch 64 --sa-objective packing
 ```
 
+Sweep + ensemble por instancia (multi-start; escolhe o melhor `s_n` por `n` entre varias tentativas):
+
+```bash
+python3 scripts/sweep_ensemble.py --nmax 200 --seeds 1,2,3 \\
+  --recipe hex:"--lattice-pattern hex --lattice-rotations 0,15,30" \\
+  --recipe square:"--lattice-pattern square --lattice-rotations 0,15,30" \\
+  --out submission_ensemble.csv
+```
+
 Gerar submission usando L2O para n pequeno (exige policy treinada):
 
 ```bash
@@ -208,7 +221,7 @@ python3 scripts/train_l2o.py --n 10 --train-steps 200 --policy gnn --knn-k 4 --o
 python3 scripts/generate_submission.py --out submission.csv --nmax 200 --l2o-model runs/l2o_gnn_policy.npz --l2o-nmax 10
 ```
 
-Para alinhar o reward ao score da competicao, use `--reward prefix` no L2O e `--sa-objective prefix` no SA.
+Para alinhar o reward ao score da competicao, use `--reward prefix` no L2O e `--sa-objective prefix` no SA. Opcionalmente, experimente `--feature-mode rich`, `--gnn-attention`, `--gnn-steps` maior e `--overlap-lambda` pequeno (penalidade suave por overlap via circulos).
 
 Treinamento com dataset multi-N (ex.: N=25,50,100) e diferentes inicializacoes:
 
@@ -239,6 +252,26 @@ Treinamento baseado em mapas de calor (inspiracao MoCo, meta-otimizador + ES):
 ```bash
 python3 scripts/train_heatmap_meta.py --n-list 25,50,100 --train-steps 50 --es-pop 6 \\
   --heatmap-steps 200 --policy gnn --knn-k 4 --out runs/heatmap_meta.npz
+```
+
+Meta-inicializacao (gera um bom start para o SA; requer JAX):
+
+```bash
+python3 scripts/train_meta_init.py --n-list 25,50,100 --train-steps 50 --es-pop 6 \\
+  --sa-steps 100 --sa-batch 16 --objective packing --out runs/meta_init.npz
+
+python3 scripts/generate_submission.py --out submission.csv --nmax 200 \\
+  --sa-nmax 50 --sa-steps 400 --meta-init-model runs/meta_init.npz
+```
+
+Heatmap meta (prioriza quais arvores mover; nao requer JAX):
+
+```bash
+python3 scripts/train_heatmap_meta.py --n-list 10,20,30 --train-steps 50 --es-pop 6 \\
+  --heatmap-steps 200 --out runs/heatmap_meta.npz
+
+python3 scripts/generate_submission.py --out submission.csv --nmax 200 \\
+  --heatmap-model runs/heatmap_meta.npz --heatmap-nmax 20 --heatmap-steps 400
 ```
 
 Uso no gerador (heatmap para n pequeno):
@@ -284,15 +317,12 @@ Este repo ja possui um esqueleto L2O MLP em `src/l2o.py` (REINFORCE). Para troca
 
 ---
 
-## Ensembling / sweep / repair (planejado na versao Python)
+## Ensembling / sweep / repair (Python)
 
-A versao anterior em C++ tinha pipelines de **sweep**, **ensemble por instancia** e **repair**. Esses componentes **ainda nao foram portados** para Python. O roadmap e:
+A versao anterior em C++ tinha pipelines de **sweep**, **ensemble por instancia** e **repair**. Nesta versao Python, isso foi portado como scripts simples e reprodutiveis:
 
-* **Ensemble por `n`**: juntar varios `submission*.csv` e escolher o melhor `s_n` por instancia.
-* **Sweep automatico**: rodar varias seeds/parametros e selecionar automaticamente.
-* **Blend/repair**: substituir subconjuntos de arvores e reparar overlaps.
-
-Se voce quiser, posso implementar esses scripts em Python a partir da logica antiga.
+* **Sweep + ensemble por instancia:** `scripts/sweep_ensemble.py` roda varios `scripts/generate_submission.py` (seeds/receitas) e monta um submission final escolhendo o menor `s_n` por `n`.
+* **Repair / refinamento local:** `scripts/generate_submission.py` ja inclui hill-climb e GA com reparo simples de overlaps para `n` pequenos (`--hc-*`, `--ga-*`).
 
 ---
 

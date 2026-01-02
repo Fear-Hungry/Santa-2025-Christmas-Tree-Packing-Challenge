@@ -12,6 +12,11 @@ import numpy as np
 from geom_np import packing_score, prefix_score, transform_polygon
 from tree_data import TREE_POINTS
 
+try:
+    from fastcollide import polygons_intersect as _polygons_intersect_fast
+except Exception:
+    _polygons_intersect_fast = None
+
 
 def _parse_val(value: str) -> float:
     value = value.strip()
@@ -93,6 +98,8 @@ def _polygons_intersect(poly1: np.ndarray, poly2: np.ndarray) -> bool:
 
 
 def polygons_intersect(poly1: np.ndarray, poly2: np.ndarray) -> bool:
+    if _polygons_intersect_fast is not None:
+        return bool(_polygons_intersect_fast(poly1, poly2))
     return _polygons_intersect(poly1, poly2)
 
 
@@ -103,7 +110,7 @@ def _check_overlaps(points: np.ndarray, poses: np.ndarray) -> bool:
     n = len(polys)
     for i in range(n):
         for j in range(i + 1, n):
-            if _polygons_intersect(polys[i], polys[j]):
+            if polygons_intersect(polys[i], polys[j]):
                 return True
     return False
 

@@ -15,10 +15,15 @@ import itertools
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Tuple
 
+import os
 import importlib
 import inspect
 import jax
 import jax.numpy as jnp
+import matplotlib
+
+if not os.environ.get("DISPLAY"):
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -1132,11 +1137,21 @@ def generate_submission(
     run_cmd(cmd)
 
 
-def _best_per_puzzle_ensemble(out_csv: Path, candidates: Dict[str, Path], *, nmax: int) -> Dict[str, object]:
+def _best_per_puzzle_ensemble(
+    out_csv: Path,
+    candidates: Dict[str, Path],
+    *,
+    nmax: int,
+    check_overlap: bool,
+) -> Dict[str, object]:
     try:
         from scoring import load_submission  # noqa: E402
     except Exception as exc:
         raise RuntimeError("Failed to import scoring.load_submission") from exc
+    try:
+        from postopt_np import has_overlaps  # noqa: E402
+    except Exception as exc:
+        raise RuntimeError("Failed to import postopt_np.has_overlaps") from exc
 
     points = np.array(TREE_POINTS, dtype=float)
     loaded = {name: load_submission(path, nmax=nmax) for name, path in candidates.items()}
@@ -1151,13 +1166,18 @@ def _best_per_puzzle_ensemble(out_csv: Path, candidates: Dict[str, Path], *, nma
             poses = puzzles.get(n)
             if poses is None or poses.shape[0] != n:
                 continue
+            poses = np.array(poses, dtype=float, copy=True)
+            poses[:, 2] = np.mod(poses[:, 2], 360.0)
+            poses = shift_poses_to_origin(points, poses)
+            if check_overlap and has_overlaps(points, poses):
+                continue
             s = float(packing_score(points, poses))
             if s < best_s:
                 best_s = s
                 best_name = name
                 best_pose = poses
         if best_name is None or best_pose is None:
-            raise ValueError(f"No complete candidates for puzzle {n}")
+            raise ValueError(f"No feasible candidates for puzzle {n} (check_overlap={check_overlap})")
         selected[n] = best_name
         best_poses[n] = np.array(best_pose, dtype=float)
 
@@ -1166,8 +1186,9 @@ def _best_per_puzzle_ensemble(out_csv: Path, candidates: Dict[str, Path], *, nma
         writer = csv.writer(f)
         writer.writerow(["id", "x", "y", "deg"])
         for n in range(1, nmax + 1):
-            poses = best_poses[n]
+            poses = np.array(best_poses[n], dtype=float, copy=True)
             poses[:, 2] = np.mod(poses[:, 2], 360.0)
+            poses = shift_poses_to_origin(points, poses)
             for i, (x, y, deg) in enumerate(poses):
                 writer.writerow([f"{n:03d}_{i}", f"s{float(x):.17f}", f"s{float(y):.17f}", f"s{float(deg):.17f}"])
 
@@ -1534,7 +1555,7 @@ if RUN_SUBMISSION_SWEEP:
 
         if SWEEP_BUILD_ENSEMBLE and stage1_paths:
             ens_csv = RUN_DIR / "submission_ensemble.csv"
-            ens_meta = _best_per_puzzle_ensemble(ens_csv, stage1_paths, nmax=SWEEP_NMAX)
+            ens_meta = _best_per_puzzle_ensemble(ens_csv, stage1_paths, nmax=SWEEP_NMAX, check_overlap=SWEEP_SCORE_OVERLAP_CHECK)
             (RUN_DIR / "submission_ensemble_meta.json").write_text(json.dumps(ens_meta, indent=2))
             ens_score = score_csv(ens_csv, nmax=SWEEP_NMAX, check_overlap=SWEEP_SCORE_OVERLAP_CHECK)
             (RUN_DIR / "submission_ensemble_score.json").write_text(json.dumps(ens_score, indent=2))
@@ -1588,7 +1609,7 @@ if RUN_SUBMISSION_SWEEP:
 
         if SWEEP_BUILD_ENSEMBLE and stage2_paths:
             ens_csv = RUN_DIR / "submission_ensemble.csv"
-            ens_meta = _best_per_puzzle_ensemble(ens_csv, stage2_paths, nmax=SUBMISSION_NMAX)
+            ens_meta = _best_per_puzzle_ensemble(ens_csv, stage2_paths, nmax=SUBMISSION_NMAX, check_overlap=SUBMISSION_OVERLAP_CHECK)
             (RUN_DIR / "submission_ensemble_meta.json").write_text(json.dumps(ens_meta, indent=2))
             ens_score = score_csv(ens_csv, nmax=SUBMISSION_NMAX, check_overlap=SUBMISSION_OVERLAP_CHECK)
             (RUN_DIR / "submission_ensemble_score.json").write_text(json.dumps(ens_score, indent=2))
@@ -1641,3 +1662,77 @@ else:
     (RUN_DIR / "submission_score.json").write_text(json.dumps(score, indent=2))
     print("Submission saved to", out_csv)
     print("Score:", score.get("score"))
+
+# %% Maximo de experimentos: multi-start + ensemble por n (via scripts/sweep_ensemble.py)
+# Objetivo: rodar MUITAS seeds com uma receita forte (mother-prefix + refine no N=200) e
+# deixar o ensemble escolher o melhor s_n por puzzle.
+RUN_MAX_SEED_SWEEP = True
+MAX_SEED_SWEEP_SEEDS = "1..50"  # aumente se quiser (ex.: 1..100)
+MAX_SEED_SWEEP_JOBS = 4  # candidatos em paralelo (ajuste conforme CPU/RAM)
+MAX_SEED_SWEEP_TAG = "max_seed_sweep"
+MAX_SEED_SWEEP_OUT = RUN_DIR / "submission_max_ensemble.csv"
+
+# Receita forte default (ajuste livremente).
+MAX_SEED_SWEEP_RECIPE = {
+    "mother_prefix": True,
+    "sa_nmax": 0,
+    "lattice_pattern": "hex",
+    "lattice_margin": 0.005,
+    "refine_nmin": 200,
+    "refine_steps": 5000,
+    "refine_batch": 128,
+    "refine_objective": "prefix",
+    "refine_proposal": "mixed",
+    "refine_cooling": "log",
+    "refine_trans_sigma": 0.35,
+    "refine_rot_sigma": 25.0,
+    "refine_rot_prob": 0.4,
+    "refine_rot_prob_end": 0.1,
+}
+
+if RUN_MAX_SEED_SWEEP:
+    if MAX_SEED_SWEEP_OUT.exists():
+        print("[max_seed_sweep] skipping: already exists:", MAX_SEED_SWEEP_OUT)
+    else:
+        recipes_json = RUN_DIR / "max_seed_sweep_recipes.json"
+        args_list: List[str] = []
+        for key, value in MAX_SEED_SWEEP_RECIPE.items():
+            if value is None:
+                continue
+            flag = "--" + key.replace("_", "-")
+            if isinstance(value, bool):
+                if value:
+                    args_list.append(flag)
+            else:
+                args_list += [flag, str(value)]
+        recipes_json.write_text(json.dumps([{"name": "best_refine", "args": args_list}], indent=2))
+
+        run_cmd(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "sweep_ensemble.py"),
+                "--repo",
+                str(ROOT),
+                "--runs-dir",
+                str(RUN_DIR),
+                "--tag",
+                MAX_SEED_SWEEP_TAG,
+                "--nmax",
+                str(SUBMISSION_NMAX),
+                "--seeds",
+                str(MAX_SEED_SWEEP_SEEDS),
+                "--jobs",
+                str(MAX_SEED_SWEEP_JOBS),
+                "--recipes-json",
+                str(recipes_json),
+                "--overlap-check",
+                "selected",
+                "--keep-going",
+                "--out",
+                str(MAX_SEED_SWEEP_OUT),
+            ]
+        )
+
+        max_score = score_csv(MAX_SEED_SWEEP_OUT, nmax=SUBMISSION_NMAX, check_overlap=True)
+        (RUN_DIR / "submission_max_ensemble_score.json").write_text(json.dumps(max_score, indent=2))
+        print("[max_seed_sweep] score:", max_score.get("score"))

@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
-from geometry import transform_polygon, polygon_bbox
-from tree import get_tree_polygon
+from tree_bounds import aabb_for_poses
 
 
 def compute_packing_bbox(poses):
@@ -14,15 +13,7 @@ def compute_packing_bbox(poses):
     Returns:
         (4,) array [min_x, min_y, max_x, max_y]
     """
-    base_poly = get_tree_polygon()
-
-    # Transform all polygons
-    # vmap over poses (N, 3) -> (N, 15, 2)
-    transformed_polys = jax.vmap(lambda p: transform_polygon(base_poly, p))(poses)
-
-    # Get bbox of each polygon
-    # (N, 4)
-    bboxes = jax.vmap(polygon_bbox)(transformed_polys)
+    bboxes = aabb_for_poses(poses, padded=False)
 
     # Global bbox
     min_x = jnp.min(bboxes[:, 0])
@@ -58,9 +49,7 @@ def prefix_packing_score(poses):
     Prefix-style objective over a single ordered packing:
     sum_{n=1..N} s_n^2 / n where s_n is the bbox max side for prefix [0..n).
     """
-    base_poly = get_tree_polygon()
-    transformed_polys = jax.vmap(lambda p: transform_polygon(base_poly, p))(poses)
-    bboxes = jax.vmap(polygon_bbox)(transformed_polys)
+    bboxes = aabb_for_poses(poses, padded=False)
 
     def scan_fn(carry, bbox):
         min_x, min_y, max_x, max_y = carry

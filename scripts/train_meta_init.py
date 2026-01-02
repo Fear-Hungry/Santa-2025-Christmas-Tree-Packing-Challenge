@@ -19,8 +19,10 @@ import sys
 sys.path.insert(0, str(ROOT / "src"))
 
 from geom_np import polygon_radius, shift_poses_to_origin  # noqa: E402
+from collisions import check_any_collisions  # noqa: E402
 from meta_init import MetaInitConfig, apply_meta_init, init_meta_params, save_meta_params  # noqa: E402
 from optimizer import run_sa_batch  # noqa: E402
+from tree import get_tree_polygon  # noqa: E402
 from tree_data import TREE_POINTS  # noqa: E402
 
 
@@ -50,6 +52,7 @@ def _accum_grad(accum: Dict[str, jnp.ndarray], noise: Dict[str, jnp.ndarray], we
 def main() -> int:
     ap = argparse.ArgumentParser(description="Meta-train initialization policy with ES + fixed SA steps")
     ap.add_argument("--n-list", type=str, default="25,50,100", help="Comma-separated Ns")
+    ap.add_argument("--objective", type=str, default="packing", choices=["packing", "prefix"], help="SA objective used for training")
     ap.add_argument("--train-steps", type=int, default=50, help="Outer ES iterations")
     ap.add_argument("--es-pop", type=int, default=6, help="ES population size")
     ap.add_argument("--es-sigma", type=float, default=0.05, help="ES noise std")
@@ -77,11 +80,17 @@ def main() -> int:
     points = np.array(TREE_POINTS, dtype=float)
     radius = polygon_radius(points)
     spacing = 2.0 * radius * 1.2
+    base_poly = get_tree_polygon()
 
     def eval_params(p, key, n: int) -> float:
         base = _grid_initial(n, spacing)
         base = shift_poses_to_origin(points, base)
         init = apply_meta_init(p, jnp.array(base), config)
+        # IMPORTANT: run_sa_batch assumes the starting state is collision-free.
+        # If init is colliding, the incremental one-vs-all collision tracking can
+        # miss pre-existing overlaps. Penalize and skip SA in that case.
+        if bool(check_any_collisions(init, base_poly)):
+            return 1000.0
         init_batch = jnp.tile(init[None, :, :], (args.sa_batch, 1, 1))
         best_poses, best_scores = run_sa_batch(
             key,
@@ -91,6 +100,7 @@ def main() -> int:
             trans_sigma=args.sa_trans_sigma,
             rot_sigma=args.sa_rot_sigma,
             rot_prob=args.sa_rot_prob,
+            objective=args.objective,
         )
         best_scores.block_until_ready()
         return float(jnp.min(best_scores))
@@ -135,6 +145,12 @@ def main() -> int:
             "hidden": args.hidden,
             "delta_xy": args.delta_xy,
             "delta_theta": args.delta_theta,
+            "objective": args.objective,
+            "sa_steps": args.sa_steps,
+            "sa_batch": args.sa_batch,
+            "sa_trans_sigma": args.sa_trans_sigma,
+            "sa_rot_sigma": args.sa_rot_sigma,
+            "sa_rot_prob": args.sa_rot_prob,
         },
     )
     print(f"Saved meta-init model to {out_path}")

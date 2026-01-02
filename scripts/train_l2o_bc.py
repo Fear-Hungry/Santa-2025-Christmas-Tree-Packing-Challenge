@@ -54,7 +54,7 @@ def main() -> int:
         "--feature-mode",
         type=str,
         default="raw",
-        choices=["raw", "bbox_norm"],
+        choices=["raw", "bbox_norm", "rich"],
         help="Input feature representation",
     )
     ap.add_argument("--reward", type=str, default="packing", choices=["packing", "prefix"], help="Reward type")
@@ -89,6 +89,7 @@ def main() -> int:
         hidden_size=args.hidden,
         policy=args.policy,
         mlp_depth=args.mlp_depth,
+        gnn_steps=args.gnn_steps,
         gnn_attention=args.gnn_attention,
         feature_mode=args.feature_mode,
     )

@@ -102,7 +102,14 @@ def _compute_features(
         axis=1,
     )
     # global features
-    globals_feat = np.array([step_frac], dtype=float)
+    globals_feat = np.array(
+        [
+            step_frac,
+            width / max_side,
+            height / max_side,
+        ],
+        dtype=float,
+    )
     globals_rep = np.repeat(globals_feat[None, :], poses.shape[0], axis=0)
     return np.concatenate([node_feats, globals_rep], axis=1)
 

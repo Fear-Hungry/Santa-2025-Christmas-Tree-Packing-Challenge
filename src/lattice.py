@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Literal
 
 import numpy as np
@@ -11,6 +12,8 @@ from tree_data import TREE_POINTS
 
 Pattern = Literal["hex", "square"]
 
+_TREE_POINTS_NP = np.array(TREE_POINTS, dtype=float)
+
 
 def lattice_poses(
     n: int,
@@ -19,8 +22,8 @@ def lattice_poses(
     margin: float = 0.02,
     rotate_deg: float = 0.0,
 ) -> np.ndarray:
-    points = np.array(TREE_POINTS, dtype=float)
-    step, row_height = _compute_spacing(points, pattern, rotate_deg, margin)
+    points = _TREE_POINTS_NP
+    step, row_height = _compute_spacing_cached(pattern, rotate_deg, margin)
 
     if n <= 0:
         return np.zeros((0, 3), dtype=float)
@@ -44,6 +47,11 @@ def lattice_poses(
             poses[i] = (x, y, rotate_deg)
 
     return shift_poses_to_origin(points, poses)
+
+
+@lru_cache(maxsize=None)
+def _compute_spacing_cached(pattern: Pattern, rotate_deg: float, margin: float) -> tuple[float, float]:
+    return _compute_spacing(_TREE_POINTS_NP, pattern, rotate_deg, margin)
 
 
 def _compute_spacing(

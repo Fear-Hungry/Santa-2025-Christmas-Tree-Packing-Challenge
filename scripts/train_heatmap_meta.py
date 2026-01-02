@@ -145,6 +145,8 @@ def main() -> int:
             "heatmap_lr": args.heatmap_lr,
             "trans_sigma": args.trans_sigma,
             "rot_sigma": args.rot_sigma,
+            "t_start": args.t_start,
+            "t_end": args.t_end,
         },
     )
     print(f"Saved heatmap meta model to {out_path}")

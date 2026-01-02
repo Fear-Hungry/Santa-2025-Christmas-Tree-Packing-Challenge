@@ -5,6 +5,7 @@ from packing import packing_score, prefix_packing_score
 from tree import get_tree_polygon
 from collisions import check_any_collisions, check_collision_for_index
 from l2o import policy_apply
+from tree_bounds import TREE_RADIUS2, aabb_for_poses
 
 # Constants
 N_TREES = 25  # Starting small for testing, actual problem has thousands? No, usually 25-100 for this type? 
@@ -25,7 +26,10 @@ def check_collisions(poses, base_poly):
     """
     return check_any_collisions(poses, base_poly)
 
-@partial(jax.jit, static_argnames=['n_steps', 'n_trees', 'objective'])
+@partial(
+    jax.jit,
+    static_argnames=["n_steps", "n_trees", "objective", "cooling", "proposal", "allow_collisions"],
+)
 def run_sa_batch(
     random_key,
     n_steps,
@@ -36,6 +40,19 @@ def run_sa_batch(
     trans_sigma=0.1,
     rot_sigma=15.0,
     rot_prob=0.3,
+    rot_prob_end=-1.0,
+    cooling="geom",
+    cooling_power=1.0,
+    trans_sigma_nexp=0.0,
+    rot_sigma_nexp=0.0,
+    sigma_nref=50.0,
+    proposal="random",
+    smart_prob=1.0,
+    smart_beta=8.0,
+    smart_drift=1.0,
+    smart_noise=0.25,
+    overlap_lambda=0.0,
+    allow_collisions=False,
     objective="packing",
 ):
     """
@@ -54,93 +71,184 @@ def run_sa_batch(
     base_poly = get_tree_polygon()
     score_fn = prefix_packing_score if objective == "prefix" else packing_score
     
+    n_ratio = jnp.asarray(float(n_trees), dtype=initial_poses.dtype) / jnp.asarray(sigma_nref, dtype=initial_poses.dtype)
+    trans_sigma_eff = jnp.asarray(trans_sigma, dtype=initial_poses.dtype) * (n_ratio ** jnp.asarray(trans_sigma_nexp, dtype=initial_poses.dtype))
+    rot_sigma_eff = jnp.asarray(rot_sigma, dtype=initial_poses.dtype) * (n_ratio ** jnp.asarray(rot_sigma_nexp, dtype=initial_poses.dtype))
+    overlap_lambda_t = jnp.asarray(overlap_lambda, dtype=initial_poses.dtype)
+    thr2 = 4.0 * TREE_RADIUS2
+
+    def _pair_penalty_for_index(poses_xy: jax.Array, idx: jax.Array) -> jax.Array:
+        center_k = poses_xy[idx]
+        d = poses_xy - center_k
+        dist2 = jnp.sum(d * d, axis=1)
+        pen = jnp.maximum(thr2 - dist2, 0.0)
+        mask = (jnp.arange(n_trees) != idx).astype(pen.dtype)
+        return jnp.sum((pen * pen) * mask)
+
+    def _total_penalty(poses_xy: jax.Array) -> jax.Array:
+        d = poses_xy[:, None, :] - poses_xy[None, :, :]
+        dist2 = jnp.sum(d * d, axis=-1)
+        pen = jnp.maximum(thr2 - dist2, 0.0)
+        pen2 = pen * pen
+        mask = jnp.triu(jnp.ones_like(pen2), k=1)
+        return jnp.sum(pen2 * mask)
+
+    def _select_bbox_inward(subkey: jax.Array, poses_one: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+        bboxes = aabb_for_poses(poses_one, padded=False)
+        min_x = jnp.min(bboxes[:, 0])
+        min_y = jnp.min(bboxes[:, 1])
+        max_x = jnp.max(bboxes[:, 2])
+        max_y = jnp.max(bboxes[:, 3])
+        width = max_x - min_x
+        height = max_y - min_y
+        use_x = width >= height
+
+        slack_x = jnp.minimum(bboxes[:, 0] - min_x, max_x - bboxes[:, 2])
+        slack_y = jnp.minimum(bboxes[:, 1] - min_y, max_y - bboxes[:, 3])
+        slack = jnp.where(use_x, slack_x, slack_y)
+        slack = jnp.maximum(slack, 0.0)
+        scale = jnp.maximum(jnp.where(use_x, width, height), 1e-6)
+        logits = -(slack / scale) * jnp.asarray(smart_beta, dtype=poses_one.dtype)
+        idx = jax.random.categorical(subkey, logits)
+        center = jnp.array([(min_x + max_x) * 0.5, (min_y + max_y) * 0.5], dtype=poses_one.dtype)
+        return idx, center, use_x
+
     def step_fn(state, i):
-        key, poses, current_score, best_poses, best_score, temp = state
+        key, poses, current_score, current_penalty, current_colliding, best_poses, best_score, temp = state
         
         # Annealing schedule
-        # Linear or geometric? Geometric is common.
-        # t = t_start * (t_end / t_start) ** (i / n_steps_float)
         frac = i / n_steps
-        current_temp = t_start * (t_end / t_start) ** frac
+        anneal = frac ** jnp.asarray(cooling_power, dtype=initial_poses.dtype)
+        if cooling in {"geom", "geometric", "exp", "exponential"}:
+            current_temp = t_start * (t_end / t_start) ** anneal
+        elif cooling == "linear":
+            current_temp = t_start + (t_end - t_start) * anneal
+        elif cooling == "log":
+            # Log schedule with exact endpoints: T(0)=t_start, T(n_steps-1)=t_end.
+            denom = jnp.log1p(jnp.asarray(float(max(n_steps - 1, 1)), dtype=initial_poses.dtype))
+            alpha = (t_start / t_end - 1.0) / (denom + 1e-12)
+            current_temp = t_start / (1.0 + alpha * jnp.log1p(i.astype(initial_poses.dtype)))
+        else:
+            current_temp = t_start * (t_end / t_start) ** anneal
+
+        rot_prob_final = jnp.where(rot_prob_end >= 0.0, rot_prob_end, rot_prob)
+        current_rot_prob = rot_prob + (rot_prob_final - rot_prob) * anneal
+        current_rot_prob = jnp.clip(current_rot_prob, 0.0, 1.0)
         
         # 1. Propose Move
-        key, subkey = jax.random.split(key)
+        key, subkey_select, subkey_k, subkey_move, subkey_trans, subkey_rot, subkey_gate = jax.random.split(key, 7)
         
-        # For each batch element, pick ONE tree to perturb? 
-        # Or perturb all slightly? Usually perturb one or a few.
-        # Let's perturb all slightly for now (diffusion) or pick one.
-        # Vectorized logic is easier if we do the same operation on all batches.
-        
-        # Perturb one tree per batch:
-        # Pick random index per batch?
-        
-        # Simplified: Add small gaussian noise to all poses.
-        # This is more like Langevin Dynamics.
-        # For SA, usually we want a discrete move.
-        
-        # Let's pick a random tree index `k` for each batch.
         batch_size = poses.shape[0]
-        k = jax.random.randint(subkey, (batch_size,), 0, n_trees)
-        
-        key, subkey_move = jax.random.split(key)
+        batch_idx = jnp.arange(batch_size)
+
+        k_rand = jax.random.randint(subkey_k, (batch_size,), 0, n_trees)
         move_choice = jax.random.uniform(subkey_move, (batch_size,))
 
-        key, subkey_trans = jax.random.split(key)
-        dxy = jax.random.normal(subkey_trans, (batch_size, 2)) * trans_sigma * current_temp
+        eps_xy = jax.random.normal(subkey_trans, (batch_size, 2))
+        eps_theta = jax.random.normal(subkey_rot, (batch_size,))
 
-        key, subkey_rot = jax.random.split(key)
-        dtheta = jax.random.normal(subkey_rot, (batch_size,)) * rot_sigma * current_temp
+        if proposal in {"bbox", "bbox_inward", "inward", "smart", "mixed"}:
+            keys_pick = jax.random.split(subkey_select, batch_size)
+            k_smart, centers, use_x = jax.vmap(_select_bbox_inward)(keys_pick, poses)
+            xy_k = poses[batch_idx, k_smart, 0:2]
+            direction = centers - xy_k
+            axis_direction = jnp.where(use_x[:, None], jnp.stack([direction[:, 0], jnp.zeros_like(direction[:, 0])], axis=1), jnp.stack([jnp.zeros_like(direction[:, 1]), direction[:, 1]], axis=1))
+            norm = jnp.linalg.norm(axis_direction, axis=1, keepdims=True)
+            unit = axis_direction / (norm + 1e-12)
+            drift = unit * (trans_sigma_eff * current_temp * jnp.asarray(smart_drift, dtype=poses.dtype))
+            noise = eps_xy * (trans_sigma_eff * current_temp * jnp.asarray(smart_noise, dtype=poses.dtype))
+            dxy_smart = drift + noise
+        else:
+            k_smart = k_rand
+            dxy_smart = eps_xy * (trans_sigma_eff * current_temp)
 
-        rot_mask = move_choice < rot_prob
+        dxy_rand = eps_xy * (trans_sigma_eff * current_temp)
+
+        if proposal in {"bbox", "bbox_inward", "inward", "smart"}:
+            k = k_smart
+            dxy = dxy_smart
+        elif proposal == "mixed":
+            gate = jax.random.uniform(subkey_gate, (batch_size,)) < jnp.asarray(smart_prob, dtype=poses.dtype)
+            k = jnp.where(gate, k_smart, k_rand)
+            dxy = jnp.where(gate[:, None], dxy_smart, dxy_rand)
+        else:
+            k = k_rand
+            dxy = dxy_rand
+
+        dtheta = eps_theta * (rot_sigma_eff * current_temp)
+
+        rot_mask = move_choice < current_rot_prob
         delta_xy = dxy * (~rot_mask)[:, None]
         delta_theta = dtheta * rot_mask
         delta = jnp.concatenate([delta_xy, delta_theta[:, None]], axis=1)
 
-        candidate_poses = poses.at[jnp.arange(batch_size), k].add(delta)
+        candidate_poses = poses.at[batch_idx, k].add(delta)
         candidate_poses = candidate_poses.at[:, :, 2].set(jnp.mod(candidate_poses[:, :, 2], 360.0))
         
         # 2. Check Constraints
         # Only the moved tree can introduce a new overlap, so we check one-vs-all.
         is_colliding = jax.vmap(lambda p, idx: check_collision_for_index(p, base_poly, idx))(candidate_poses, k)
         
-        # 3. Calculate Score
+        # 3. Calculate Score (+ optional overlap penalty)
         candidate_score = jax.vmap(score_fn)(candidate_poses)
+
+        def _update_penalty() -> jax.Array:
+            old_k = jax.vmap(lambda p, idx: _pair_penalty_for_index(p[:, :2], idx))(poses, k)
+            new_k = jax.vmap(lambda p, idx: _pair_penalty_for_index(p[:, :2], idx))(candidate_poses, k)
+            return current_penalty + (new_k - old_k)
+
+        candidate_penalty = jax.lax.cond(overlap_lambda_t > 0.0, _update_penalty, lambda: current_penalty)
+        current_energy = current_score + overlap_lambda_t * current_penalty
+        candidate_energy = candidate_score + overlap_lambda_t * candidate_penalty
         
         # 4. Metropolis Criterion
-        delta = candidate_score - current_score
+        delta = candidate_energy - current_energy
         
         key, subkey_accept = jax.random.split(key)
         r = jax.random.uniform(subkey_accept, (batch_size,))
         
         # Acceptance condition:
         # If !colliding AND (delta < 0 OR r < exp(-delta/T))
-        should_accept = (~is_colliding) & ((delta < 0) | (r < jnp.exp(-delta / current_temp)))
+        should_accept = (delta < 0) | (r < jnp.exp(-delta / current_temp))
+        if not allow_collisions:
+            should_accept = should_accept & (~is_colliding)
         
         # Update state where accepted
         new_poses = jnp.where(should_accept[:, None, None], candidate_poses, poses)
         new_score = jnp.where(should_accept, candidate_score, current_score)
+        new_penalty = jnp.where(should_accept, candidate_penalty, current_penalty)
+        new_colliding = jnp.where(should_accept, is_colliding, current_colliding)
         
         # Update best
-        improved = new_score < best_score
+        improved = (new_score < best_score) & (~new_colliding)
         new_best_poses = jnp.where(improved[:, None, None], new_poses, best_poses)
-        new_best_score = jnp.minimum(new_score, best_score)
+        new_best_score = jnp.where(improved, new_score, best_score)
         
-        return (key, new_poses, new_score, new_best_poses, new_best_score, current_temp), (new_score, is_colliding)
+        return (key, new_poses, new_score, new_penalty, new_colliding, new_best_poses, new_best_score, current_temp), (new_score, is_colliding)
 
     # Init State
     batch_size = initial_poses.shape[0]
     initial_scores = jax.vmap(score_fn)(initial_poses)
+    initial_penalty = jax.lax.cond(
+        overlap_lambda_t > 0.0,
+        lambda: jax.vmap(lambda p: _total_penalty(p[:, :2]))(initial_poses),
+        lambda: jnp.zeros((batch_size,), dtype=initial_poses.dtype),
+    )
+    initial_colliding = jnp.zeros((batch_size,), dtype=bool)
     
-    init_state = (random_key, initial_poses, initial_scores, initial_poses, initial_scores, t_start)
+    init_state = (random_key, initial_poses, initial_scores, initial_penalty, initial_colliding, initial_poses, initial_scores, t_start)
     
     final_state, history = jax.lax.scan(step_fn, init_state, jnp.arange(n_steps))
     
-    _, _, _, best_poses, best_score, _ = final_state
+    _, _, _, _, _, best_poses, best_score, _ = final_state
     
     return best_poses, best_score
 
 
-@partial(jax.jit, static_argnames=["n_steps", "n_trees", "objective", "policy_config"])
+@partial(
+    jax.jit,
+    static_argnames=["n_steps", "n_trees", "objective", "policy_config", "cooling", "proposal", "allow_collisions"],
+)
 def run_sa_batch_guided(
     random_key,
     n_steps,
@@ -153,9 +261,24 @@ def run_sa_batch_guided(
     trans_sigma=0.1,
     rot_sigma=15.0,
     rot_prob=0.3,
+    rot_prob_end=-1.0,
+    cooling="geom",
+    cooling_power=1.0,
+    trans_sigma_nexp=0.0,
+    rot_sigma_nexp=0.0,
+    sigma_nref=50.0,
+    proposal="random",
+    smart_prob=1.0,
+    smart_beta=8.0,
+    smart_drift=1.0,
+    smart_noise=0.25,
+    overlap_lambda=0.0,
+    allow_collisions=False,
     objective="packing",
     policy_prob=1.0,
     policy_pmax=0.05,
+    policy_prob_end=-1.0,
+    policy_pmax_end=-1.0,
 ):
     """Runs SA where the proposal is a hybrid: learned policy OR heuristic fallback.
 
@@ -170,26 +293,120 @@ def run_sa_batch_guided(
     base_poly = get_tree_polygon()
     score_fn = prefix_packing_score if objective == "prefix" else packing_score
 
+    n_ratio = jnp.asarray(float(n_trees), dtype=initial_poses.dtype) / jnp.asarray(sigma_nref, dtype=initial_poses.dtype)
+    trans_sigma_eff = jnp.asarray(trans_sigma, dtype=initial_poses.dtype) * (n_ratio ** jnp.asarray(trans_sigma_nexp, dtype=initial_poses.dtype))
+    rot_sigma_eff = jnp.asarray(rot_sigma, dtype=initial_poses.dtype) * (n_ratio ** jnp.asarray(rot_sigma_nexp, dtype=initial_poses.dtype))
+    overlap_lambda_t = jnp.asarray(overlap_lambda, dtype=initial_poses.dtype)
+    thr2 = 4.0 * TREE_RADIUS2
+
+    def _pair_penalty_for_index(poses_xy: jax.Array, idx: jax.Array) -> jax.Array:
+        center_k = poses_xy[idx]
+        d = poses_xy - center_k
+        dist2 = jnp.sum(d * d, axis=1)
+        pen = jnp.maximum(thr2 - dist2, 0.0)
+        mask = (jnp.arange(n_trees) != idx).astype(pen.dtype)
+        return jnp.sum((pen * pen) * mask)
+
+    def _total_penalty(poses_xy: jax.Array) -> jax.Array:
+        d = poses_xy[:, None, :] - poses_xy[None, :, :]
+        dist2 = jnp.sum(d * d, axis=-1)
+        pen = jnp.maximum(thr2 - dist2, 0.0)
+        pen2 = pen * pen
+        mask = jnp.triu(jnp.ones_like(pen2), k=1)
+        return jnp.sum(pen2 * mask)
+
+    def _select_bbox_inward(subkey: jax.Array, poses_one: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+        bboxes = aabb_for_poses(poses_one, padded=False)
+        min_x = jnp.min(bboxes[:, 0])
+        min_y = jnp.min(bboxes[:, 1])
+        max_x = jnp.max(bboxes[:, 2])
+        max_y = jnp.max(bboxes[:, 3])
+        width = max_x - min_x
+        height = max_y - min_y
+        use_x = width >= height
+
+        slack_x = jnp.minimum(bboxes[:, 0] - min_x, max_x - bboxes[:, 2])
+        slack_y = jnp.minimum(bboxes[:, 1] - min_y, max_y - bboxes[:, 3])
+        slack = jnp.where(use_x, slack_x, slack_y)
+        slack = jnp.maximum(slack, 0.0)
+        scale = jnp.maximum(jnp.where(use_x, width, height), 1e-6)
+        logits = -(slack / scale) * jnp.asarray(smart_beta, dtype=poses_one.dtype)
+        idx = jax.random.categorical(subkey, logits)
+        center = jnp.array([(min_x + max_x) * 0.5, (min_y + max_y) * 0.5], dtype=poses_one.dtype)
+        return idx, center, use_x
+
     def step_fn(state, i):
-        key, poses, current_score, best_poses, best_score = state
+        key, poses, current_score, current_penalty, current_colliding, best_poses, best_score = state
 
         frac = i / n_steps
-        current_temp = t_start * (t_end / t_start) ** frac
+        anneal = frac ** jnp.asarray(cooling_power, dtype=initial_poses.dtype)
+        if cooling in {"geom", "geometric", "exp", "exponential"}:
+            current_temp = t_start * (t_end / t_start) ** anneal
+        elif cooling == "linear":
+            current_temp = t_start + (t_end - t_start) * anneal
+        elif cooling == "log":
+            denom = jnp.log1p(jnp.asarray(float(max(n_steps - 1, 1)), dtype=initial_poses.dtype))
+            alpha = (t_start / t_end - 1.0) / (denom + 1e-12)
+            current_temp = t_start / (1.0 + alpha * jnp.log1p(i.astype(initial_poses.dtype)))
+        else:
+            current_temp = t_start * (t_end / t_start) ** anneal
+
+        rot_prob_final = jnp.where(rot_prob_end >= 0.0, rot_prob_end, rot_prob)
+        current_rot_prob = rot_prob + (rot_prob_final - rot_prob) * anneal
+        current_rot_prob = jnp.clip(current_rot_prob, 0.0, 1.0)
+
+        policy_prob_final = jnp.where(policy_prob_end >= 0.0, policy_prob_end, policy_prob)
+        current_policy_prob = policy_prob + (policy_prob_final - policy_prob) * anneal
+        current_policy_prob = jnp.clip(current_policy_prob, 0.0, 1.0)
+
+        pmax_final = jnp.where(policy_pmax_end >= 0.0, policy_pmax_end, policy_pmax)
+        current_policy_pmax = policy_pmax + (pmax_final - policy_pmax) * anneal
+        current_policy_pmax = jnp.clip(current_policy_pmax, 0.0, 1.0)
 
         batch_size = poses.shape[0]
         batch_idx = jnp.arange(batch_size)
 
         # --- Heuristic proposal (baseline random SA move)
-        key, subkey_k, subkey_move, subkey_trans, subkey_rot = jax.random.split(key, 5)
-        k_h = jax.random.randint(subkey_k, (batch_size,), 0, n_trees)
+        key, subkey_select, subkey_k, subkey_move, subkey_trans, subkey_rot, subkey_gate = jax.random.split(key, 7)
+        k_rand = jax.random.randint(subkey_k, (batch_size,), 0, n_trees)
         move_choice = jax.random.uniform(subkey_move, (batch_size,))
 
-        dxy = jax.random.normal(subkey_trans, (batch_size, 2)) * trans_sigma * current_temp
-        dtheta = jax.random.normal(subkey_rot, (batch_size,)) * rot_sigma * current_temp
+        eps_xy = jax.random.normal(subkey_trans, (batch_size, 2))
+        eps_theta = jax.random.normal(subkey_rot, (batch_size,))
 
-        rot_mask = move_choice < rot_prob
-        delta_xy = dxy * (~rot_mask)[:, None]
-        delta_theta = dtheta * rot_mask
+        if proposal in {"bbox", "bbox_inward", "inward", "smart", "mixed"}:
+            keys_pick = jax.random.split(subkey_select, batch_size)
+            k_smart, centers, use_x = jax.vmap(_select_bbox_inward)(keys_pick, poses)
+            xy_k = poses[batch_idx, k_smart, 0:2]
+            direction = centers - xy_k
+            axis_direction = jnp.where(use_x[:, None], jnp.stack([direction[:, 0], jnp.zeros_like(direction[:, 0])], axis=1), jnp.stack([jnp.zeros_like(direction[:, 1]), direction[:, 1]], axis=1))
+            norm = jnp.linalg.norm(axis_direction, axis=1, keepdims=True)
+            unit = axis_direction / (norm + 1e-12)
+            drift = unit * (trans_sigma_eff * current_temp * jnp.asarray(smart_drift, dtype=poses.dtype))
+            noise = eps_xy * (trans_sigma_eff * current_temp * jnp.asarray(smart_noise, dtype=poses.dtype))
+            dxy_smart = drift + noise
+        else:
+            k_smart = k_rand
+            dxy_smart = eps_xy * (trans_sigma_eff * current_temp)
+
+        dxy_rand = eps_xy * (trans_sigma_eff * current_temp)
+
+        if proposal in {"bbox", "bbox_inward", "inward", "smart"}:
+            k_h = k_smart
+            dxy_h = dxy_smart
+        elif proposal == "mixed":
+            gate = jax.random.uniform(subkey_gate, (batch_size,)) < jnp.asarray(smart_prob, dtype=poses.dtype)
+            k_h = jnp.where(gate, k_smart, k_rand)
+            dxy_h = jnp.where(gate[:, None], dxy_smart, dxy_rand)
+        else:
+            k_h = k_rand
+            dxy_h = dxy_rand
+
+        dtheta_h = eps_theta * (rot_sigma_eff * current_temp)
+
+        rot_mask = move_choice < current_rot_prob
+        delta_xy = dxy_h * (~rot_mask)[:, None]
+        delta_theta = dtheta_h * rot_mask
         delta_h = jnp.concatenate([delta_xy, delta_theta[:, None]], axis=1)
 
         # --- Policy proposal
@@ -199,7 +416,7 @@ def run_sa_batch_guided(
 
         key, subkey_gate = jax.random.split(key)
         u = jax.random.uniform(subkey_gate, (batch_size,))
-        use_policy = (pmax >= policy_pmax) & (u < policy_prob)
+        use_policy = (pmax >= current_policy_pmax) & (u < current_policy_prob)
 
         key, subkey_pick = jax.random.split(key)
         keys_pick = jax.random.split(subkey_pick, batch_size)
@@ -208,7 +425,7 @@ def run_sa_batch_guided(
         key, subkey_eps = jax.random.split(key)
         eps = jax.random.normal(subkey_eps, (batch_size, 3))
         mean_sel = mean_b[batch_idx, k_p]
-        scales = jnp.array([trans_sigma, trans_sigma, rot_sigma]) * current_temp
+        scales = jnp.array([trans_sigma_eff, trans_sigma_eff, rot_sigma_eff]) * current_temp
         delta_p = mean_sel * current_temp + eps * scales
 
         # --- Mix
@@ -221,25 +438,44 @@ def run_sa_batch_guided(
         # --- Constraints: only moved tree can introduce overlap
         is_colliding = jax.vmap(lambda p, idx: check_collision_for_index(p, base_poly, idx))(candidate_poses, k)
 
-        # --- Score + Metropolis
+        # --- Score (+ optional overlap penalty) + Metropolis
         candidate_score = jax.vmap(score_fn)(candidate_poses)
-        dscore = candidate_score - current_score
+        def _update_penalty() -> jax.Array:
+            old_k = jax.vmap(lambda p, idx: _pair_penalty_for_index(p[:, :2], idx))(poses, k)
+            new_k = jax.vmap(lambda p, idx: _pair_penalty_for_index(p[:, :2], idx))(candidate_poses, k)
+            return current_penalty + (new_k - old_k)
+
+        candidate_penalty = jax.lax.cond(overlap_lambda_t > 0.0, _update_penalty, lambda: current_penalty)
+        current_energy = current_score + overlap_lambda_t * current_penalty
+        candidate_energy = candidate_score + overlap_lambda_t * candidate_penalty
+        dscore = candidate_energy - current_energy
 
         key, subkey_accept = jax.random.split(key)
         r = jax.random.uniform(subkey_accept, (batch_size,))
-        should_accept = (~is_colliding) & ((dscore < 0) | (r < jnp.exp(-dscore / current_temp)))
+        should_accept = (dscore < 0) | (r < jnp.exp(-dscore / current_temp))
+        if not allow_collisions:
+            should_accept = should_accept & (~is_colliding)
 
         new_poses = jnp.where(should_accept[:, None, None], candidate_poses, poses)
         new_score = jnp.where(should_accept, candidate_score, current_score)
+        new_penalty = jnp.where(should_accept, candidate_penalty, current_penalty)
+        new_colliding = jnp.where(should_accept, is_colliding, current_colliding)
 
-        improved = new_score < best_score
+        improved = (new_score < best_score) & (~new_colliding)
         new_best_poses = jnp.where(improved[:, None, None], new_poses, best_poses)
-        new_best_score = jnp.minimum(new_score, best_score)
+        new_best_score = jnp.where(improved, new_score, best_score)
 
-        return (key, new_poses, new_score, new_best_poses, new_best_score), (new_score, is_colliding, use_policy, pmax)
+        return (key, new_poses, new_score, new_penalty, new_colliding, new_best_poses, new_best_score), (new_score, is_colliding, use_policy, pmax)
 
     initial_scores = jax.vmap(score_fn)(initial_poses)
-    init_state = (random_key, initial_poses, initial_scores, initial_poses, initial_scores)
+    batch_size = initial_poses.shape[0]
+    initial_penalty = jax.lax.cond(
+        overlap_lambda_t > 0.0,
+        lambda: jax.vmap(lambda p: _total_penalty(p[:, :2]))(initial_poses),
+        lambda: jnp.zeros((batch_size,), dtype=initial_poses.dtype),
+    )
+    initial_colliding = jnp.zeros((batch_size,), dtype=bool)
+    init_state = (random_key, initial_poses, initial_scores, initial_penalty, initial_colliding, initial_poses, initial_scores)
     final_state, _history = jax.lax.scan(step_fn, init_state, jnp.arange(n_steps))
-    _, _, _, best_poses, best_score = final_state
+    _, _, _, _, _, best_poses, best_score = final_state
     return best_poses, best_score
