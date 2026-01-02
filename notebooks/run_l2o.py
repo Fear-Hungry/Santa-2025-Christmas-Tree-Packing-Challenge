@@ -7,12 +7,14 @@ import csv
 import hashlib
 import json
 import math
+import random
 import shutil
 import subprocess
 import sys
 from datetime import datetime
 import itertools
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, Iterable, List, Tuple
 
 import os
@@ -61,12 +63,50 @@ optimize_with_l2o = l2o_mod.optimize_with_l2o
 
 
 def train_model_safe(**kwargs):
+    seed = kwargs.get("seed")
+    if seed is not None:
+        try:
+            seed_int = int(seed)
+        except Exception:
+            seed_int = None
+        if seed_int is not None:
+            np.random.seed(seed_int)
+            random.seed(seed_int)
+
     sig = inspect.signature(train_l2o_mod.train_model)
     allowed = {k: v for k, v in kwargs.items() if k in sig.parameters}
     missing = sorted(set(kwargs) - set(allowed))
     if missing:
         print(f"[warn] train_model ignorou parametros nao suportados: {missing}")
     return train_l2o_mod.train_model(**allowed)
+
+
+def parse_int_list(text: str) -> list[int]:
+    raw = text.strip()
+    if not raw:
+        return []
+    if raw.lower() in {"none", "off", "false"}:
+        return []
+    out: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ".." in part:
+            a, b = part.split("..", 1)
+            start = int(a)
+            end = int(b)
+            step = 1 if end >= start else -1
+            out.extend(list(range(start, end + step, step)))
+            continue
+        if "-" in part and part.count("-") == 1 and part[0] != "-":
+            a, b = part.split("-", 1)
+            start = int(a)
+            end = int(b)
+            out.extend(list(range(start, end + 1)))
+            continue
+        out.append(int(part))
+    return out
 
 
 # %% Initial layouts
@@ -178,6 +218,8 @@ def l2o_config_from_meta(meta: Dict[str, object], *, reward: str, deterministic:
     gnn_attention = _get_bool("gnn_attention", False)
     action_scale = _get_float("action_scale", 1.0)
     feature_mode = str(meta.get("feature_mode", "raw"))
+    overlap_penalty = _get_float("overlap_penalty", 50.0)
+    overlap_lambda = _get_float("overlap_lambda", 0.0)
 
     return L2OConfig(
         hidden_size=hidden,
@@ -189,6 +231,8 @@ def l2o_config_from_meta(meta: Dict[str, object], *, reward: str, deterministic:
         gnn_attention=gnn_attention,
         feature_mode=feature_mode,
         action_scale=action_scale,
+        overlap_penalty=overlap_penalty,
+        overlap_lambda=overlap_lambda,
         action_noise=not deterministic,
     )
 
@@ -391,6 +435,32 @@ EVAL_STEPS = 50
 INIT_MODE = "grid"  # grid | random | mix
 RAND_SCALE = 0.3
 
+# ---- L2O sweep (muitos experimentos) ----
+# Ideia: explorar varias configs (seed/hparams) rapidamente, rankear no "val" e
+# depois re-treinar apenas o melhor MLP/GNN com o budget cheio.
+RUN_L2O_SWEEP = True
+L2O_SWEEP_SEEDS = "1..8"  # ex.: "1..30" para MUITOS seeds
+L2O_SWEEP_FEATURE_MODES = ["raw", "bbox_norm", "rich"]
+L2O_SWEEP_HIDDEN_SIZES = [32, 64]
+L2O_SWEEP_ACTION_SCALES = [0.05, 0.1]
+L2O_SWEEP_MLP_DEPTHS = [1, 2, 3]
+L2O_SWEEP_GNN_STEPS = [1, 2, 3]
+L2O_SWEEP_GNN_ATTENTION = [False, True]
+L2O_SWEEP_KNN_K = [4, 6]
+L2O_SWEEP_LR = [1e-3, 3e-4]
+L2O_SWEEP_OVERLAP_LAMBDA = [0.0, 0.01]
+
+L2O_SWEEP_TRAIN_STEPS = 200
+L2O_SWEEP_ROLLOUT_STEPS = ROLLOUT_STEPS
+L2O_SWEEP_EVAL_N_LIST = VAL_N_LIST
+L2O_SWEEP_EVAL_SEEDS = VAL_EVAL_SEEDS
+L2O_SWEEP_EVAL_STEPS = EVAL_STEPS
+L2O_SWEEP_MAX_EXPERIMENTS = 64  # None = roda tudo (pode explodir)
+L2O_SWEEP_TOPK_PER_POLICY = 5  # exporta top-K p/ usar no generate_submission (opcional)
+L2O_SWEEP_RETRAIN_FINAL = True
+L2O_FINAL_TRAIN_STEPS = TRAIN_STEPS
+L2O_FINAL_ROLLOUT_STEPS = ROLLOUT_STEPS
+
 SA_STEPS = 300
 SA_TRANS_SIGMA = 0.2
 SA_ROT_SIGMA = 15.0
@@ -443,64 +513,433 @@ spacing = 2.0 * polygon_radius(points) * 1.2
 VIS_N = TRAIN_N_LIST[0]
 init = shift_poses_to_origin(points, grid_initial(VIS_N, spacing))
 
-# %% Treino MLP
-mlp_params, mlp_loss = train_model_safe(
-    seed=1,
-    n_list=TRAIN_N_LIST,
-    batch=BATCH,
-    train_steps=TRAIN_STEPS,
-    steps=ROLLOUT_STEPS,
-    hidden_size=HIDDEN_SIZE,
-    policy="mlp",
-    reward=REWARD,
-    action_scale=ACTION_SCALE,
-    mlp_depth=MLP_DEPTH,
-    gnn_steps=GNN_STEPS,
-    gnn_attention=GNN_ATTENTION,
-    init_mode=TRAIN_INIT_MODE,
-    rand_scale=RAND_SCALE,
-    lattice_pattern=TRAIN_LATTICE_PATTERN,
-    lattice_margin=TRAIN_LATTICE_MARGIN,
-    lattice_rotate=TRAIN_LATTICE_ROTATE,
-    baseline_mode=BASELINE_MODE,
-    baseline_decay=BASELINE_DECAY,
-    curriculum=TRAIN_CURRICULUM,
-    curriculum_start_max=TRAIN_CURRICULUM_START_MAX,
-    curriculum_end_max=TRAIN_CURRICULUM_END_MAX,
-    curriculum_steps=TRAIN_CURRICULUM_STEPS,
-    feature_mode=FEATURE_MODE,
-    verbose_freq=10,
-)
+# %% Treino L2O (sweep -> seleciona os melhores)
+L2O_SWEEP_TOP_MODELS: Dict[str, Path] = {}
+mlp_meta: Dict[str, object] = {
+    "policy": "mlp",
+    "hidden": HIDDEN_SIZE,
+    "mlp_depth": MLP_DEPTH,
+    "gnn_steps": GNN_STEPS,
+    "gnn_attention": GNN_ATTENTION,
+    "feature_mode": FEATURE_MODE,
+    "action_scale": ACTION_SCALE,
+    "knn_k": 4,
+    "overlap_penalty": 50.0,
+    "overlap_lambda": 0.0,
+}
+gnn_meta: Dict[str, object] = {
+    "policy": "gnn",
+    "hidden": HIDDEN_SIZE,
+    "knn_k": 4,
+    "mlp_depth": MLP_DEPTH,
+    "gnn_steps": GNN_STEPS,
+    "gnn_attention": GNN_ATTENTION,
+    "feature_mode": FEATURE_MODE,
+    "action_scale": ACTION_SCALE,
+    "overlap_penalty": 50.0,
+    "overlap_lambda": 0.0,
+}
 
-# %% Treino GNN
-gnn_params, gnn_loss = train_model_safe(
-    seed=2,
-    n_list=TRAIN_N_LIST,
-    batch=BATCH,
-    train_steps=TRAIN_STEPS,
-    steps=ROLLOUT_STEPS,
-    hidden_size=HIDDEN_SIZE,
-    policy="gnn",
-    reward=REWARD,
-    action_scale=ACTION_SCALE,
-    knn_k=4,
-    mlp_depth=MLP_DEPTH,
-    gnn_steps=GNN_STEPS,
-    gnn_attention=GNN_ATTENTION,
-    init_mode=TRAIN_INIT_MODE,
-    rand_scale=RAND_SCALE,
-    lattice_pattern=TRAIN_LATTICE_PATTERN,
-    lattice_margin=TRAIN_LATTICE_MARGIN,
-    lattice_rotate=TRAIN_LATTICE_ROTATE,
-    baseline_mode=BASELINE_MODE,
-    baseline_decay=BASELINE_DECAY,
-    curriculum=TRAIN_CURRICULUM,
-    curriculum_start_max=TRAIN_CURRICULUM_START_MAX,
-    curriculum_end_max=TRAIN_CURRICULUM_END_MAX,
-    curriculum_steps=TRAIN_CURRICULUM_STEPS,
-    feature_mode=FEATURE_MODE,
-    verbose_freq=10,
-)
+if RUN_L2O_SWEEP:
+    sweep_dir = RUN_DIR / "l2o_sweep"
+    sweep_dir.mkdir(parents=True, exist_ok=True)
+
+    def _cfg_id(data: Dict[str, object]) -> str:
+        blob = json.dumps(data, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha1(blob).hexdigest()[:10]
+
+    seeds = parse_int_list(L2O_SWEEP_SEEDS)
+    if not seeds:
+        seeds = [1]
+
+    planned: List[Dict[str, object]] = []
+
+    # MLP space
+    for seed, feature_mode, hidden, action_scale, lr, overlap_lambda, mlp_depth in itertools.product(
+        seeds,
+        L2O_SWEEP_FEATURE_MODES,
+        L2O_SWEEP_HIDDEN_SIZES,
+        L2O_SWEEP_ACTION_SCALES,
+        L2O_SWEEP_LR,
+        L2O_SWEEP_OVERLAP_LAMBDA,
+        L2O_SWEEP_MLP_DEPTHS,
+    ):
+        meta = {
+            "policy": "mlp",
+            "seed": int(seed),
+            "hidden": int(hidden),
+            "mlp_depth": int(mlp_depth),
+            "gnn_steps": int(GNN_STEPS),
+            "gnn_attention": bool(GNN_ATTENTION),
+            "knn_k": 4,
+            "feature_mode": str(feature_mode),
+            "action_scale": float(action_scale),
+            "lr": float(lr),
+            "baseline_mode": str(BASELINE_MODE),
+            "baseline_decay": float(BASELINE_DECAY),
+            "overlap_penalty": 50.0,
+            "overlap_lambda": float(overlap_lambda),
+        }
+        cid = _cfg_id(meta)
+        planned.append({"name": f"mlp_{cid}", "meta": meta})
+
+    # GNN space
+    for (
+        seed,
+        feature_mode,
+        hidden,
+        action_scale,
+        lr,
+        overlap_lambda,
+        gnn_steps,
+        gnn_attention,
+        knn_k,
+    ) in itertools.product(
+        seeds,
+        L2O_SWEEP_FEATURE_MODES,
+        L2O_SWEEP_HIDDEN_SIZES,
+        L2O_SWEEP_ACTION_SCALES,
+        L2O_SWEEP_LR,
+        L2O_SWEEP_OVERLAP_LAMBDA,
+        L2O_SWEEP_GNN_STEPS,
+        L2O_SWEEP_GNN_ATTENTION,
+        L2O_SWEEP_KNN_K,
+    ):
+        meta = {
+            "policy": "gnn",
+            "seed": int(seed),
+            "hidden": int(hidden),
+            "knn_k": int(knn_k),
+            "mlp_depth": int(MLP_DEPTH),
+            "gnn_steps": int(gnn_steps),
+            "gnn_attention": bool(gnn_attention),
+            "feature_mode": str(feature_mode),
+            "action_scale": float(action_scale),
+            "lr": float(lr),
+            "baseline_mode": str(BASELINE_MODE),
+            "baseline_decay": float(BASELINE_DECAY),
+            "overlap_penalty": 50.0,
+            "overlap_lambda": float(overlap_lambda),
+        }
+        cid = _cfg_id(meta)
+        planned.append({"name": f"gnn_{cid}", "meta": meta})
+
+    planned = sorted(planned, key=lambda r: str(r["name"]))
+    if L2O_SWEEP_MAX_EXPERIMENTS is not None:
+        planned = planned[: int(L2O_SWEEP_MAX_EXPERIMENTS)]
+
+    (sweep_dir / "sweep_meta.json").write_text(
+        json.dumps(
+            {
+                "planned_total": int(len(planned)),
+                "seeds": list(seeds),
+                "train_steps": int(L2O_SWEEP_TRAIN_STEPS),
+                "rollout_steps": int(L2O_SWEEP_ROLLOUT_STEPS),
+                "eval_n_list": list(L2O_SWEEP_EVAL_N_LIST),
+                "eval_seeds": list(L2O_SWEEP_EVAL_SEEDS),
+                "eval_steps": int(L2O_SWEEP_EVAL_STEPS),
+                "max_experiments": L2O_SWEEP_MAX_EXPERIMENTS,
+            },
+            indent=2,
+        )
+    )
+
+    sweep_rows: List[Dict[str, object]] = []
+    for idx, item in enumerate(planned, start=1):
+        name = str(item["name"])
+        meta = dict(item["meta"])  # type: ignore[arg-type]
+
+        out_path = sweep_dir / f"{name}.npz"
+        if out_path.exists():
+            params, saved_meta = load_params_npz(out_path)
+            meta = dict(saved_meta)
+            loss = []
+        else:
+            params, loss = train_model_safe(
+                seed=int(meta["seed"]),
+                n_list=TRAIN_N_LIST,
+                batch=BATCH,
+                train_steps=L2O_SWEEP_TRAIN_STEPS,
+                steps=L2O_SWEEP_ROLLOUT_STEPS,
+                lr=float(meta.get("lr", 1e-3)),
+                hidden_size=int(meta.get("hidden", HIDDEN_SIZE)),
+                policy=str(meta.get("policy", "mlp")),
+                reward=REWARD,
+                action_scale=float(meta.get("action_scale", ACTION_SCALE)),
+                knn_k=int(meta.get("knn_k", 4)),
+                mlp_depth=int(meta.get("mlp_depth", MLP_DEPTH)),
+                gnn_steps=int(meta.get("gnn_steps", GNN_STEPS)),
+                gnn_attention=bool(meta.get("gnn_attention", False)),
+                init_mode=TRAIN_INIT_MODE,
+                rand_scale=RAND_SCALE,
+                lattice_pattern=TRAIN_LATTICE_PATTERN,
+                lattice_margin=TRAIN_LATTICE_MARGIN,
+                lattice_rotate=TRAIN_LATTICE_ROTATE,
+                baseline_mode=str(meta.get("baseline_mode", BASELINE_MODE)),
+                baseline_decay=float(meta.get("baseline_decay", BASELINE_DECAY)),
+                curriculum=TRAIN_CURRICULUM,
+                curriculum_start_max=TRAIN_CURRICULUM_START_MAX,
+                curriculum_end_max=TRAIN_CURRICULUM_END_MAX,
+                curriculum_steps=TRAIN_CURRICULUM_STEPS,
+                feature_mode=str(meta.get("feature_mode", FEATURE_MODE)),
+                overlap_lambda=float(meta.get("overlap_lambda", 0.0)),
+                verbose_freq=0,
+            )
+            save_params_npz(out_path, params, meta=meta)
+
+        eval_cfg = l2o_config_from_meta(meta, reward=REWARD, deterministic=True)
+        eval_rows = evaluate_solver(
+            name,
+            solve_l2o(params, eval_cfg, steps=L2O_SWEEP_EVAL_STEPS),
+            L2O_SWEEP_EVAL_N_LIST,
+            L2O_SWEEP_EVAL_SEEDS,
+            points,
+            split="sweep_val",
+        )
+        val_score = float(challenge_score_from_results(eval_rows, name, "sweep_val"))
+
+        sweep_rows.append(
+            {
+                "name": name,
+                "policy": str(meta.get("policy")),
+                "seed": int(meta.get("seed", -1)),
+                "hidden": int(meta.get("hidden", -1)),
+                "feature_mode": str(meta.get("feature_mode")),
+                "action_scale": float(meta.get("action_scale", float("nan"))),
+                "lr": float(meta.get("lr", float("nan"))),
+                "overlap_lambda": float(meta.get("overlap_lambda", float("nan"))),
+                "val_score": val_score,
+                "path": str(out_path),
+                "loss_last": float(loss[-1]) if loss else float("nan"),
+            }
+        )
+
+        if idx == 1 or idx % 5 == 0 or idx == len(planned):
+            print(f"[l2o_sweep] {idx}/{len(planned)} done. best_val={min(r['val_score'] for r in sweep_rows):.6f}")
+
+    sweep_rows = sorted(sweep_rows, key=lambda r: (float(r.get("val_score") or float("inf")), str(r.get("name"))))
+    write_csv(sweep_dir / "rank.csv", sweep_rows)
+    (sweep_dir / "rank.json").write_text(json.dumps(sweep_rows, indent=2))
+
+    def _topk(policy: str) -> List[Dict[str, object]]:
+        items = [r for r in sweep_rows if str(r.get("policy")) == policy]
+        return items[: int(max(L2O_SWEEP_TOPK_PER_POLICY, 0))]
+
+    top_mlp = _topk("mlp")
+    top_gnn = _topk("gnn")
+    for r in top_mlp + top_gnn:
+        name = str(r["name"])
+        L2O_SWEEP_TOP_MODELS[name] = Path(str(r["path"]))
+
+    best_mlp = top_mlp[0] if top_mlp else None
+    best_gnn = top_gnn[0] if top_gnn else None
+    (sweep_dir / "best.json").write_text(json.dumps({"best_mlp": best_mlp, "best_gnn": best_gnn}, indent=2))
+    (sweep_dir / "top_models.json").write_text(json.dumps({k: str(v) for k, v in L2O_SWEEP_TOP_MODELS.items()}, indent=2))
+
+    def _fmt_top(items: List[Dict[str, object]], k: int = 5) -> str:
+        parts = []
+        for r in items[:k]:
+            parts.append(f"{r['name']}:{float(r['val_score']):.6f}")
+        return ", ".join(parts) if parts else "(none)"
+
+    print(f"[l2o_sweep] top_mlp: {_fmt_top(top_mlp)}")
+    print(f"[l2o_sweep] top_gnn: {_fmt_top(top_gnn)}")
+
+    summary_lines = [
+        "# L2O sweep summary",
+        "",
+        f"- experiments: {len(planned)}",
+        f"- eval split: sweep_val (n={list(L2O_SWEEP_EVAL_N_LIST)} seeds={list(L2O_SWEEP_EVAL_SEEDS)} steps={int(L2O_SWEEP_EVAL_STEPS)})",
+        "",
+        "## Top MLP",
+    ]
+    for r in top_mlp[:10]:
+        summary_lines.append(f"- {r['name']}: val_score={float(r['val_score']):.6f}  path={r['path']}")
+    summary_lines.append("")
+    summary_lines.append("## Top GNN")
+    for r in top_gnn[:10]:
+        summary_lines.append(f"- {r['name']}: val_score={float(r['val_score']):.6f}  path={r['path']}")
+    (sweep_dir / "summary.md").write_text("\n".join(summary_lines) + "\n")
+
+    if L2O_SWEEP_RETRAIN_FINAL and best_mlp is not None:
+        meta = load_params_npz(Path(str(best_mlp["path"])))[1]
+        mlp_meta = dict(meta)
+        mlp_params, mlp_loss = train_model_safe(
+            seed=int(mlp_meta.get("seed", 1)),
+            n_list=TRAIN_N_LIST,
+            batch=BATCH,
+            train_steps=L2O_FINAL_TRAIN_STEPS,
+            steps=L2O_FINAL_ROLLOUT_STEPS,
+            lr=float(mlp_meta.get("lr", 1e-3)),
+            hidden_size=int(mlp_meta.get("hidden", HIDDEN_SIZE)),
+            policy="mlp",
+            reward=REWARD,
+            action_scale=float(mlp_meta.get("action_scale", ACTION_SCALE)),
+            mlp_depth=int(mlp_meta.get("mlp_depth", MLP_DEPTH)),
+            init_mode=TRAIN_INIT_MODE,
+            rand_scale=RAND_SCALE,
+            lattice_pattern=TRAIN_LATTICE_PATTERN,
+            lattice_margin=TRAIN_LATTICE_MARGIN,
+            lattice_rotate=TRAIN_LATTICE_ROTATE,
+            baseline_mode=str(mlp_meta.get("baseline_mode", BASELINE_MODE)),
+            baseline_decay=float(mlp_meta.get("baseline_decay", BASELINE_DECAY)),
+            curriculum=TRAIN_CURRICULUM,
+            curriculum_start_max=TRAIN_CURRICULUM_START_MAX,
+            curriculum_end_max=TRAIN_CURRICULUM_END_MAX,
+            curriculum_steps=TRAIN_CURRICULUM_STEPS,
+            feature_mode=str(mlp_meta.get("feature_mode", FEATURE_MODE)),
+            overlap_lambda=float(mlp_meta.get("overlap_lambda", 0.0)),
+            verbose_freq=10,
+        )
+    else:
+        mlp_params, mlp_loss = train_model_safe(
+            seed=1,
+            n_list=TRAIN_N_LIST,
+            batch=BATCH,
+            train_steps=TRAIN_STEPS,
+            steps=ROLLOUT_STEPS,
+            hidden_size=HIDDEN_SIZE,
+            policy="mlp",
+            reward=REWARD,
+            action_scale=ACTION_SCALE,
+            mlp_depth=MLP_DEPTH,
+            gnn_steps=GNN_STEPS,
+            gnn_attention=GNN_ATTENTION,
+            init_mode=TRAIN_INIT_MODE,
+            rand_scale=RAND_SCALE,
+            lattice_pattern=TRAIN_LATTICE_PATTERN,
+            lattice_margin=TRAIN_LATTICE_MARGIN,
+            lattice_rotate=TRAIN_LATTICE_ROTATE,
+            baseline_mode=BASELINE_MODE,
+            baseline_decay=BASELINE_DECAY,
+            curriculum=TRAIN_CURRICULUM,
+            curriculum_start_max=TRAIN_CURRICULUM_START_MAX,
+            curriculum_end_max=TRAIN_CURRICULUM_END_MAX,
+            curriculum_steps=TRAIN_CURRICULUM_STEPS,
+            feature_mode=FEATURE_MODE,
+            verbose_freq=10,
+        )
+
+    if L2O_SWEEP_RETRAIN_FINAL and best_gnn is not None:
+        meta = load_params_npz(Path(str(best_gnn["path"])))[1]
+        gnn_meta = dict(meta)
+        gnn_params, gnn_loss = train_model_safe(
+            seed=int(gnn_meta.get("seed", 2)),
+            n_list=TRAIN_N_LIST,
+            batch=BATCH,
+            train_steps=L2O_FINAL_TRAIN_STEPS,
+            steps=L2O_FINAL_ROLLOUT_STEPS,
+            lr=float(gnn_meta.get("lr", 1e-3)),
+            hidden_size=int(gnn_meta.get("hidden", HIDDEN_SIZE)),
+            policy="gnn",
+            reward=REWARD,
+            action_scale=float(gnn_meta.get("action_scale", ACTION_SCALE)),
+            knn_k=int(gnn_meta.get("knn_k", 4)),
+            mlp_depth=int(gnn_meta.get("mlp_depth", MLP_DEPTH)),
+            gnn_steps=int(gnn_meta.get("gnn_steps", GNN_STEPS)),
+            gnn_attention=bool(gnn_meta.get("gnn_attention", False)),
+            init_mode=TRAIN_INIT_MODE,
+            rand_scale=RAND_SCALE,
+            lattice_pattern=TRAIN_LATTICE_PATTERN,
+            lattice_margin=TRAIN_LATTICE_MARGIN,
+            lattice_rotate=TRAIN_LATTICE_ROTATE,
+            baseline_mode=str(gnn_meta.get("baseline_mode", BASELINE_MODE)),
+            baseline_decay=float(gnn_meta.get("baseline_decay", BASELINE_DECAY)),
+            curriculum=TRAIN_CURRICULUM,
+            curriculum_start_max=TRAIN_CURRICULUM_START_MAX,
+            curriculum_end_max=TRAIN_CURRICULUM_END_MAX,
+            curriculum_steps=TRAIN_CURRICULUM_STEPS,
+            feature_mode=str(gnn_meta.get("feature_mode", FEATURE_MODE)),
+            overlap_lambda=float(gnn_meta.get("overlap_lambda", 0.0)),
+            verbose_freq=10,
+        )
+    else:
+        gnn_params, gnn_loss = train_model_safe(
+            seed=2,
+            n_list=TRAIN_N_LIST,
+            batch=BATCH,
+            train_steps=TRAIN_STEPS,
+            steps=ROLLOUT_STEPS,
+            hidden_size=HIDDEN_SIZE,
+            policy="gnn",
+            reward=REWARD,
+            action_scale=ACTION_SCALE,
+            knn_k=4,
+            mlp_depth=MLP_DEPTH,
+            gnn_steps=GNN_STEPS,
+            gnn_attention=GNN_ATTENTION,
+            init_mode=TRAIN_INIT_MODE,
+            rand_scale=RAND_SCALE,
+            lattice_pattern=TRAIN_LATTICE_PATTERN,
+            lattice_margin=TRAIN_LATTICE_MARGIN,
+            lattice_rotate=TRAIN_LATTICE_ROTATE,
+            baseline_mode=BASELINE_MODE,
+            baseline_decay=BASELINE_DECAY,
+            curriculum=TRAIN_CURRICULUM,
+            curriculum_start_max=TRAIN_CURRICULUM_START_MAX,
+            curriculum_end_max=TRAIN_CURRICULUM_END_MAX,
+            curriculum_steps=TRAIN_CURRICULUM_STEPS,
+            feature_mode=FEATURE_MODE,
+            verbose_freq=10,
+        )
+else:
+    # Baseline (sem sweep)
+    mlp_params, mlp_loss = train_model_safe(
+        seed=1,
+        n_list=TRAIN_N_LIST,
+        batch=BATCH,
+        train_steps=TRAIN_STEPS,
+        steps=ROLLOUT_STEPS,
+        hidden_size=HIDDEN_SIZE,
+        policy="mlp",
+        reward=REWARD,
+        action_scale=ACTION_SCALE,
+        mlp_depth=MLP_DEPTH,
+        gnn_steps=GNN_STEPS,
+        gnn_attention=GNN_ATTENTION,
+        init_mode=TRAIN_INIT_MODE,
+        rand_scale=RAND_SCALE,
+        lattice_pattern=TRAIN_LATTICE_PATTERN,
+        lattice_margin=TRAIN_LATTICE_MARGIN,
+        lattice_rotate=TRAIN_LATTICE_ROTATE,
+        baseline_mode=BASELINE_MODE,
+        baseline_decay=BASELINE_DECAY,
+        curriculum=TRAIN_CURRICULUM,
+        curriculum_start_max=TRAIN_CURRICULUM_START_MAX,
+        curriculum_end_max=TRAIN_CURRICULUM_END_MAX,
+        curriculum_steps=TRAIN_CURRICULUM_STEPS,
+        feature_mode=FEATURE_MODE,
+        verbose_freq=10,
+    )
+
+    gnn_params, gnn_loss = train_model_safe(
+        seed=2,
+        n_list=TRAIN_N_LIST,
+        batch=BATCH,
+        train_steps=TRAIN_STEPS,
+        steps=ROLLOUT_STEPS,
+        hidden_size=HIDDEN_SIZE,
+        policy="gnn",
+        reward=REWARD,
+        action_scale=ACTION_SCALE,
+        knn_k=4,
+        mlp_depth=MLP_DEPTH,
+        gnn_steps=GNN_STEPS,
+        gnn_attention=GNN_ATTENTION,
+        init_mode=TRAIN_INIT_MODE,
+        rand_scale=RAND_SCALE,
+        lattice_pattern=TRAIN_LATTICE_PATTERN,
+        lattice_margin=TRAIN_LATTICE_MARGIN,
+        lattice_rotate=TRAIN_LATTICE_ROTATE,
+        baseline_mode=BASELINE_MODE,
+        baseline_decay=BASELINE_DECAY,
+        curriculum=TRAIN_CURRICULUM,
+        curriculum_start_max=TRAIN_CURRICULUM_START_MAX,
+        curriculum_end_max=TRAIN_CURRICULUM_END_MAX,
+        curriculum_steps=TRAIN_CURRICULUM_STEPS,
+        feature_mode=FEATURE_MODE,
+        verbose_freq=10,
+    )
 
 # %% Plot losses
 plt.figure(figsize=(6, 4))
@@ -516,32 +955,13 @@ plt.show()
 
 # %% Visualizacao de packing (MLP)
 key = jax.random.PRNGKey(0)
-config = L2OConfig(
-    hidden_size=HIDDEN_SIZE,
-    policy="mlp",
-    reward=REWARD,
-    mlp_depth=MLP_DEPTH,
-    gnn_steps=GNN_STEPS,
-    gnn_attention=GNN_ATTENTION,
-    action_scale=ACTION_SCALE,
-    action_noise=False,
-)
+config = l2o_config_from_meta(mlp_meta, reward=REWARD, deterministic=True)
 mlp_poses = optimize_with_l2o(key, mlp_params, jnp.array(init), ROLLOUT_STEPS, config)
 plot_packing(np.array(mlp_poses), "MLP packing", RUN_DIR / "mlp_packing.png")
 
 # %% Visualizacao de packing (GNN)
 key = jax.random.PRNGKey(1)
-config = L2OConfig(
-    hidden_size=HIDDEN_SIZE,
-    policy="gnn",
-    reward=REWARD,
-    knn_k=4,
-    mlp_depth=MLP_DEPTH,
-    gnn_steps=GNN_STEPS,
-    gnn_attention=GNN_ATTENTION,
-    action_scale=ACTION_SCALE,
-    action_noise=False,
-)
+config = l2o_config_from_meta(gnn_meta, reward=REWARD, deterministic=True)
 gnn_poses = optimize_with_l2o(key, gnn_params, jnp.array(init), ROLLOUT_STEPS, config)
 plot_packing(np.array(gnn_poses), "GNN packing", RUN_DIR / "gnn_packing.png")
 
@@ -705,21 +1125,29 @@ def solve_sa(n: int, seed: int) -> np.ndarray:
     return np.array(best_poses[0])
 
 
-def solve_l2o(params, cfg: L2OConfig) -> Callable[[int, int], np.ndarray]:
+def solve_l2o(params, cfg: L2OConfig, *, steps: int | None = None) -> Callable[[int, int], np.ndarray]:
     def _solve(n: int, seed: int) -> np.ndarray:
         init_pose = get_initial(n, seed)
         key = jax.random.PRNGKey(seed)
-        poses = optimize_with_l2o(key, params, jnp.array(init_pose), EVAL_STEPS, cfg)
+        nsteps = EVAL_STEPS if steps is None else int(steps)
+        poses = optimize_with_l2o(key, params, jnp.array(init_pose), nsteps, cfg)
         return np.array(poses)
 
     return _solve
 
 
-def solve_l2o_refine(base_solver: Callable[[int, int], np.ndarray], params, cfg: L2OConfig) -> Callable[[int, int], np.ndarray]:
+def solve_l2o_refine(
+    base_solver: Callable[[int, int], np.ndarray],
+    params,
+    cfg: L2OConfig,
+    *,
+    steps: int | None = None,
+) -> Callable[[int, int], np.ndarray]:
     def _solve(n: int, seed: int) -> np.ndarray:
         base_pose = base_solver(n, seed)
         key = jax.random.PRNGKey(seed)
-        poses = optimize_with_l2o(key, params, jnp.array(base_pose), REFINE_STEPS, cfg)
+        nsteps = REFINE_STEPS if steps is None else int(steps)
+        poses = optimize_with_l2o(key, params, jnp.array(base_pose), nsteps, cfg)
         return np.array(poses)
 
     return _solve
@@ -801,29 +1229,8 @@ def solve_ensemble(candidates: Dict[str, Callable[[int, int], np.ndarray]]) -> C
 
 # %% Rodar avaliacao (configs)
 results: List[Dict[str, float]] = []
-l2o_mlp_cfg = L2OConfig(
-    hidden_size=HIDDEN_SIZE,
-    policy="mlp",
-    reward=REWARD,
-    mlp_depth=MLP_DEPTH,
-    gnn_steps=GNN_STEPS,
-    gnn_attention=GNN_ATTENTION,
-    action_scale=ACTION_SCALE,
-    action_noise=False,
-    feature_mode=FEATURE_MODE,
-)
-l2o_gnn_cfg = L2OConfig(
-    hidden_size=HIDDEN_SIZE,
-    policy="gnn",
-    reward=REWARD,
-    knn_k=4,
-    mlp_depth=MLP_DEPTH,
-    gnn_steps=GNN_STEPS,
-    gnn_attention=GNN_ATTENTION,
-    action_scale=ACTION_SCALE,
-    action_noise=False,
-    feature_mode=FEATURE_MODE,
-)
+l2o_mlp_cfg = l2o_config_from_meta(mlp_meta, reward=REWARD, deterministic=True)
+l2o_gnn_cfg = l2o_config_from_meta(gnn_meta, reward=REWARD, deterministic=True)
 
 # %% Avaliacao: baselines
 results += evaluate_solver("grid", solve_grid, TRAIN_N_LIST, TRAIN_EVAL_SEEDS, points, split="train")
@@ -1056,9 +1463,17 @@ SUBMISSION_OVERLAP_CHECK = True  # para score final, mantenha True
 
 RUN_SUBMISSION_SWEEP = True  # True = gera/score varias receitas + seeds
 SWEEP_NMAX = 50  # use 200 para score final
-SWEEP_SEEDS = [1, 2]
+SWEEP_SEEDS: List[int] | str = "1..4"
 SWEEP_SCORE_OVERLAP_CHECK = False  # durante sweep rapido, pode ser False; no final use True
 SWEEP_BUILD_ENSEMBLE = True
+SWEEP_JOBS = max(1, int(os.cpu_count() or 1))
+SWEEP_REUSE = True
+SWEEP_KEEP_GOING = True
+
+# Quanto maior, mais combinacoes (receitas) entram no sweep.
+# Use `None` para "maximo" (pode demorar bastante).
+RECIPES_MAX_RECIPES_PER_FAMILY = None
+RECIPES_MAX_LATTICE_VARIANTS = None
 
 # Salvar as politicas treinadas neste notebook (para usar no generate_submission/guided SA)
 MLP_POLICY_PATH = RUN_DIR / "l2o_mlp.npz"
@@ -1066,29 +1481,12 @@ GNN_POLICY_PATH = RUN_DIR / "l2o_gnn.npz"
 save_params_npz(
     MLP_POLICY_PATH,
     mlp_params,
-    meta={
-        "policy": "mlp",
-        "hidden": HIDDEN_SIZE,
-        "mlp_depth": MLP_DEPTH,
-        "feature_mode": FEATURE_MODE,
-        "reward": REWARD,
-        "action_scale": ACTION_SCALE,
-    },
+    meta={**mlp_meta, "reward": REWARD},
 )
 save_params_npz(
     GNN_POLICY_PATH,
     gnn_params,
-    meta={
-        "policy": "gnn",
-        "hidden": HIDDEN_SIZE,
-        "knn_k": 4,
-        "mlp_depth": MLP_DEPTH,
-        "gnn_steps": GNN_STEPS,
-        "gnn_attention": GNN_ATTENTION,
-        "feature_mode": FEATURE_MODE,
-        "reward": REWARD,
-        "action_scale": ACTION_SCALE,
-    },
+    meta={**gnn_meta, "reward": REWARD},
 )
 
 
@@ -1206,6 +1604,11 @@ CANDIDATE_L2O_MODELS: Dict[str, Path] = {
 }
 if bc_policy_path is not None and bc_policy_path.exists():
     CANDIDATE_L2O_MODELS["bc"] = bc_policy_path
+
+# Opcional: inclui os melhores modelos do sweep (rapidos) para aumentar o portfolio.
+for name, path in sorted(L2O_SWEEP_TOP_MODELS.items()):
+    if path.exists():
+        CANDIDATE_L2O_MODELS[f"sweep_{name}"] = path
 CANDIDATE_GUIDED_MODELS: Dict[str, Path] = dict(CANDIDATE_L2O_MODELS)
 
 
@@ -1321,8 +1724,9 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
     }
 
     # Limites para nao explodir combinacoes (aumente/disable para explorar mais).
-    MAX_RECIPES_PER_FAMILY = 20
-    MAX_LATTICE_VARIANTS = 10
+    # `None` = sem limite (maximo de receitas).
+    MAX_RECIPES_PER_FAMILY = RECIPES_MAX_RECIPES_PER_FAMILY
+    MAX_LATTICE_VARIANTS = RECIPES_MAX_LATTICE_VARIANTS
 
     def limit_variants(variants: List[Dict[str, object]], max_n: int | None) -> List[Dict[str, object]]:
         if max_n is None or len(variants) <= max_n:
@@ -1493,19 +1897,35 @@ for name, recipe in RECIPES.items():
 SUB_DIR = RUN_DIR / "submissions"
 SUB_DIR.mkdir(parents=True, exist_ok=True)
 
+# Melhor receita "single" encontrada no sweep (para reutilizar no max_seed_sweep).
+BEST_SEED_SWEEP_RECIPE_NAME: str | None = None
+BEST_SEED_SWEEP_RECIPE: Dict[str, object] | None = None
+
 if RUN_SUBMISSION_SWEEP:
     # Sweep em 2 estagios:
     # 1) ranking rapido em n pequeno (p/ cortar combinacoes)
     # 2) rerun somente top-K em nmax=200 (com overlap_check) + opcional ensemble por puzzle
     SWEEP_TOPK = 20  # quantos candidatos do estagio 1 vao para o estagio 2
     TWO_STAGE_SWEEP = True
+
+    sweep_seeds = SWEEP_SEEDS if isinstance(SWEEP_SEEDS, list) else parse_int_list(str(SWEEP_SEEDS))
+    if not sweep_seeds:
+        raise ValueError("SWEEP_SEEDS is empty")
+
+    jobs = int(SWEEP_JOBS)
+    if jobs <= 0:
+        jobs = max(1, int(os.cpu_count() or 1))
+
     (RUN_DIR / "submission_sweep_meta.json").write_text(
         json.dumps(
             {
                 "two_stage": TWO_STAGE_SWEEP,
+                "jobs": jobs,
+                "reuse": bool(SWEEP_REUSE),
+                "keep_going": bool(SWEEP_KEEP_GOING),
                 "stage1": {
                     "nmax": int(SWEEP_NMAX),
-                    "seeds": [int(s) for s in SWEEP_SEEDS],
+                    "seeds": [int(s) for s in sweep_seeds],
                     "overlap_check": bool(SWEEP_SCORE_OVERLAP_CHECK),
                 },
                 "stage2": {
@@ -1518,27 +1938,82 @@ if RUN_SUBMISSION_SWEEP:
         )
     )
 
+    def _run_submission_candidate(
+        stage: int,
+        recipe_name: str,
+        recipe: Dict[str, object],
+        seed: int,
+        *,
+        nmax: int,
+        check_overlap: bool,
+    ) -> tuple[Dict[str, object], str, Path]:
+        tag = f"{recipe_name}_seed{seed}"
+        out_csv = SUB_DIR / f"stage{stage}_{tag}.csv"
+        if not (SWEEP_REUSE and out_csv.exists()):
+            generate_submission(out_csv, seed=seed, nmax=nmax, args=recipe)
+        score = score_csv(out_csv, nmax=nmax, check_overlap=check_overlap)
+        row: Dict[str, object] = {
+            "tag": tag,
+            "stage": int(stage),
+            "recipe": recipe_name,
+            "seed": int(seed),
+            "nmax": int(nmax),
+            "score": score.get("score"),
+            "s_max": score.get("s_max"),
+            "overlap_check": score.get("overlap_check"),
+        }
+        return row, tag, out_csv
+
     stage1_rows: List[Dict[str, object]] = []
     stage1_paths: Dict[str, Path] = {}
+    planned_stage1: List[tuple[str, Dict[str, object], int]] = []
     for recipe_name, recipe in ACTIVE_RECIPES.items():
-        for seed in SWEEP_SEEDS:
-            tag = f"{recipe_name}_seed{seed}"
-            out_csv = SUB_DIR / f"stage1_{tag}.csv"
-            generate_submission(out_csv, seed=seed, nmax=SWEEP_NMAX, args=recipe)
-            score = score_csv(out_csv, nmax=SWEEP_NMAX, check_overlap=SWEEP_SCORE_OVERLAP_CHECK)
-            stage1_rows.append(
-                {
-                    "tag": tag,
-                    "stage": 1,
-                    "recipe": recipe_name,
-                    "seed": int(seed),
-                    "nmax": int(SWEEP_NMAX),
-                    "score": score.get("score"),
-                    "s_max": score.get("s_max"),
-                    "overlap_check": score.get("overlap_check"),
-                }
-            )
+        for seed in sweep_seeds:
+            planned_stage1.append((recipe_name, recipe, int(seed)))
+
+    if jobs == 1:
+        for recipe_name, recipe, seed in planned_stage1:
+            try:
+                row, tag, out_csv = _run_submission_candidate(
+                    1,
+                    recipe_name,
+                    recipe,
+                    seed,
+                    nmax=SWEEP_NMAX,
+                    check_overlap=SWEEP_SCORE_OVERLAP_CHECK,
+                )
+            except Exception as e:
+                print(f"[sweep stage1] failed ({recipe_name}, seed={seed}): {e}")
+                if not SWEEP_KEEP_GOING:
+                    raise
+                continue
+            stage1_rows.append(row)
             stage1_paths[tag] = out_csv
+    else:
+        with ThreadPoolExecutor(max_workers=jobs) as ex:
+            fut_to_item = {
+                ex.submit(
+                    _run_submission_candidate,
+                    1,
+                    recipe_name,
+                    recipe,
+                    seed,
+                    nmax=SWEEP_NMAX,
+                    check_overlap=SWEEP_SCORE_OVERLAP_CHECK,
+                ): (recipe_name, seed)
+                for recipe_name, recipe, seed in planned_stage1
+            }
+            for fut in as_completed(fut_to_item):
+                recipe_name, seed = fut_to_item[fut]
+                try:
+                    row, tag, out_csv = fut.result()
+                except Exception as e:
+                    print(f"[sweep stage1] failed ({recipe_name}, seed={seed}): {e}")
+                    if not SWEEP_KEEP_GOING:
+                        raise
+                    continue
+                stage1_rows.append(row)
+                stage1_paths[tag] = out_csv
 
     stage1_rows = sorted(stage1_rows, key=lambda r: (float(r.get("score") or float("inf")), str(r["tag"])))
     write_csv(RUN_DIR / "submission_sweep_stage1.csv", stage1_rows)
@@ -1550,6 +2025,8 @@ if RUN_SUBMISSION_SWEEP:
             best_path = stage1_paths[str(best["tag"])]
             shutil.copyfile(best_path, RUN_DIR / "submission_best.csv")
             (RUN_DIR / "submission_best.txt").write_text(json.dumps(best, indent=2))
+            BEST_SEED_SWEEP_RECIPE_NAME = str(best.get("recipe"))
+            BEST_SEED_SWEEP_RECIPE = ACTIVE_RECIPES.get(BEST_SEED_SWEEP_RECIPE_NAME) if BEST_SEED_SWEEP_RECIPE_NAME else None
             print("Best (sweep stage1):", best)
             print("Saved:", RUN_DIR / "submission_best.csv")
 
@@ -1568,29 +2045,58 @@ if RUN_SUBMISSION_SWEEP:
 
         stage2_rows: List[Dict[str, object]] = []
         stage2_paths: Dict[str, Path] = {}
+        planned_stage2: List[tuple[Dict[str, object], str, Dict[str, object], int]] = []
         for row in selected:
             recipe_name = str(row["recipe"])
             seed = int(row["seed"])
-            tag = str(row["tag"])
             recipe = ACTIVE_RECIPES[recipe_name]
+            planned_stage2.append((row, recipe_name, recipe, seed))
 
-            out_csv = SUB_DIR / f"stage2_{tag}.csv"
-            generate_submission(out_csv, seed=seed, nmax=SUBMISSION_NMAX, args=recipe)
-            score = score_csv(out_csv, nmax=SUBMISSION_NMAX, check_overlap=SUBMISSION_OVERLAP_CHECK)
-            stage2_rows.append(
-                {
-                    "tag": tag,
-                    "stage": 2,
-                    "recipe": recipe_name,
-                    "seed": seed,
-                    "nmax": int(SUBMISSION_NMAX),
-                    "score": score.get("score"),
-                    "s_max": score.get("s_max"),
-                    "overlap_check": score.get("overlap_check"),
-                    "stage1_score": row.get("score"),
+        if jobs == 1:
+            for row, recipe_name, recipe, seed in planned_stage2:
+                try:
+                    out_row, tag, out_csv = _run_submission_candidate(
+                        2,
+                        recipe_name,
+                        recipe,
+                        seed,
+                        nmax=SUBMISSION_NMAX,
+                        check_overlap=SUBMISSION_OVERLAP_CHECK,
+                    )
+                except Exception as e:
+                    print(f"[sweep stage2] failed ({recipe_name}, seed={seed}): {e}")
+                    if not SWEEP_KEEP_GOING:
+                        raise
+                    continue
+                out_row["stage1_score"] = row.get("score")
+                stage2_rows.append(out_row)
+                stage2_paths[tag] = out_csv
+        else:
+            with ThreadPoolExecutor(max_workers=jobs) as ex:
+                fut_to_item = {
+                    ex.submit(
+                        _run_submission_candidate,
+                        2,
+                        recipe_name,
+                        recipe,
+                        seed,
+                        nmax=SUBMISSION_NMAX,
+                        check_overlap=SUBMISSION_OVERLAP_CHECK,
+                    ): (row, recipe_name, seed)
+                    for row, recipe_name, recipe, seed in planned_stage2
                 }
-            )
-            stage2_paths[tag] = out_csv
+                for fut in as_completed(fut_to_item):
+                    row, recipe_name, seed = fut_to_item[fut]
+                    try:
+                        out_row, tag, out_csv = fut.result()
+                    except Exception as e:
+                        print(f"[sweep stage2] failed ({recipe_name}, seed={seed}): {e}")
+                        if not SWEEP_KEEP_GOING:
+                            raise
+                        continue
+                    out_row["stage1_score"] = row.get("score")
+                    stage2_rows.append(out_row)
+                    stage2_paths[tag] = out_csv
 
         stage2_rows = sorted(stage2_rows, key=lambda r: (float(r.get("score") or float("inf")), str(r["tag"])))
         write_csv(RUN_DIR / "submission_sweep_stage2.csv", stage2_rows)
@@ -1604,6 +2110,8 @@ if RUN_SUBMISSION_SWEEP:
             best_meta = dict(best2)
             shutil.copyfile(best_csv, RUN_DIR / "submission_best.csv")
             (RUN_DIR / "submission_best.txt").write_text(json.dumps(best2, indent=2))
+            BEST_SEED_SWEEP_RECIPE_NAME = str(best2.get("recipe"))
+            BEST_SEED_SWEEP_RECIPE = ACTIVE_RECIPES.get(BEST_SEED_SWEEP_RECIPE_NAME) if BEST_SEED_SWEEP_RECIPE_NAME else None
             print("Best (stage2):", best2)
             print("Saved:", RUN_DIR / "submission_best.csv")
 
@@ -1656,6 +2164,8 @@ else:
         return sorted(ACTIVE_RECIPES)[0]
 
     SINGLE_RECIPE = _pick_single_recipe()
+    BEST_SEED_SWEEP_RECIPE_NAME = str(SINGLE_RECIPE)
+    BEST_SEED_SWEEP_RECIPE = ACTIVE_RECIPES.get(BEST_SEED_SWEEP_RECIPE_NAME)
     out_csv = RUN_DIR / "submission.csv"
     generate_submission(out_csv, seed=SUBMISSION_SEED, nmax=SUBMISSION_NMAX, args=ACTIVE_RECIPES[SINGLE_RECIPE])
     score = score_csv(out_csv, nmax=SUBMISSION_NMAX, check_overlap=SUBMISSION_OVERLAP_CHECK)
@@ -1667,13 +2177,13 @@ else:
 # Objetivo: rodar MUITAS seeds com uma receita forte (mother-prefix + refine no N=200) e
 # deixar o ensemble escolher o melhor s_n por puzzle.
 RUN_MAX_SEED_SWEEP = True
-MAX_SEED_SWEEP_SEEDS = "1..50"  # aumente se quiser (ex.: 1..100)
-MAX_SEED_SWEEP_JOBS = 4  # candidatos em paralelo (ajuste conforme CPU/RAM)
+MAX_SEED_SWEEP_SEEDS = "1..200"  # aumente se quiser (ex.: 1..500)
+MAX_SEED_SWEEP_JOBS = max(1, int(os.cpu_count() or 1))  # candidatos em paralelo (ajuste conforme CPU/RAM)
 MAX_SEED_SWEEP_TAG = "max_seed_sweep"
 MAX_SEED_SWEEP_OUT = RUN_DIR / "submission_max_ensemble.csv"
 
-# Receita forte default (ajuste livremente).
-MAX_SEED_SWEEP_RECIPE = {
+# Receita forte default (ajuste livremente). Se o sweep de receitas rodar, usamos a melhor receita "single".
+DEFAULT_MAX_SEED_SWEEP_RECIPE: Dict[str, object] = {
     "mother_prefix": True,
     "sa_nmax": 0,
     "lattice_pattern": "hex",
@@ -1694,9 +2204,13 @@ if RUN_MAX_SEED_SWEEP:
     if MAX_SEED_SWEEP_OUT.exists():
         print("[max_seed_sweep] skipping: already exists:", MAX_SEED_SWEEP_OUT)
     else:
+        max_seed_recipe_name = BEST_SEED_SWEEP_RECIPE_NAME or "default_refine"
+        max_seed_recipe = BEST_SEED_SWEEP_RECIPE or DEFAULT_MAX_SEED_SWEEP_RECIPE
+        print(f"[max_seed_sweep] base_recipe={max_seed_recipe_name}  seeds={MAX_SEED_SWEEP_SEEDS}  jobs={MAX_SEED_SWEEP_JOBS}")
+
         recipes_json = RUN_DIR / "max_seed_sweep_recipes.json"
         args_list: List[str] = []
-        for key, value in MAX_SEED_SWEEP_RECIPE.items():
+        for key, value in max_seed_recipe.items():
             if value is None:
                 continue
             flag = "--" + key.replace("_", "-")
@@ -1705,7 +2219,7 @@ if RUN_MAX_SEED_SWEEP:
                     args_list.append(flag)
             else:
                 args_list += [flag, str(value)]
-        recipes_json.write_text(json.dumps([{"name": "best_refine", "args": args_list}], indent=2))
+        recipes_json.write_text(json.dumps([{"name": str(max_seed_recipe_name), "args": args_list}], indent=2))
 
         run_cmd(
             [
