@@ -1,8 +1,25 @@
-#!/usr/bin/env python3
-
-# %% Setup
+# %% Kaggle/local bootstrap (deps + env)
 from __future__ import annotations
 
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+IS_KAGGLE = Path("/kaggle").exists() or os.environ.get("KAGGLE_KERNEL_RUN_TYPE") is not None
+if IS_KAGGLE:
+    # Evita o JAX pre-alocar 100% da memoria (especialmente em GPU)
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+# JAX e necessario para o L2O. Se falhar no Kaggle, habilite Internet e rode novamente.
+try:
+    import jax  # noqa: F401
+except Exception:
+    print("[setup] JAX nao encontrado; instalando jax[cpu]...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "jax[cpu]"])
+    import jax  # noqa: F401
+
+# %% Setup
 import csv
 import hashlib
 import json
@@ -29,14 +46,63 @@ if not os.environ.get("DISPLAY"):
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Resolve repo root (works whether cwd is repo root or notebooks/)
-CWD = Path.cwd()
-if (CWD / "src").exists():
-    ROOT = CWD
-elif (CWD.parent / "src").exists():
-    ROOT = CWD.parent
-else:
-    ROOT = Path(__file__).resolve().parents[1]
+# Resolve repo root (local ou Kaggle)
+def resolve_repo_root() -> Path:
+    env_root = os.environ.get("SANTA_REPO_ROOT") or os.environ.get("REPO_ROOT") or os.environ.get("PROJECT_ROOT")
+    if env_root:
+        p = Path(env_root).expanduser()
+        if (p / "src").exists():
+            return p.resolve()
+
+    cwd = Path.cwd()
+    if (cwd / "src").exists():
+        return cwd.resolve()
+    if (cwd.parent / "src").exists():
+        return cwd.parent.resolve()
+
+    # Kaggle: codigo normalmente esta em /kaggle/input/<dataset>/...
+    kaggle_input = Path(os.environ.get("KAGGLE_INPUT_DIR", "/kaggle/input"))
+    if kaggle_input.exists():
+        candidates: list[Path] = []
+        for base in kaggle_input.iterdir():
+            if not base.is_dir():
+                continue
+            if (base / "src").exists():
+                candidates.append(base)
+                continue
+            # comum: dataset/<repo_root>/*
+            for child in base.iterdir():
+                if child.is_dir() and (child / "src").exists():
+                    candidates.append(child)
+
+        def _score(p: Path) -> tuple[int, str]:
+            s = 0
+            if (p / "src" / "l2o.py").exists():
+                s += 2
+            if (p / "scripts" / "generate_submission.py").exists():
+                s += 1
+            if (p / "notebooks" / "run_l2o.ipynb").exists():
+                s += 1
+            return (-s, str(p))
+
+        uniq = {p.resolve() for p in candidates}
+        candidates = sorted(uniq, key=_score)
+        if candidates:
+            return candidates[0]
+
+    raise FileNotFoundError(
+        "Nao encontrei o repo root. Rode do root/notebooks ou defina SANTA_REPO_ROOT (ou REPO_ROOT)."
+    )
+
+
+ROOT = resolve_repo_root()
+
+# Pasta gravavel (Kaggle: /kaggle/working)
+WORK_DIR = Path(os.environ.get("KAGGLE_WORKING_DIR", "/kaggle/working")) if Path("/kaggle/working").exists() else ROOT
+WORK_DIR.mkdir(parents=True, exist_ok=True)
+
+print("[paths] ROOT =", ROOT)
+print("[paths] WORK_DIR =", WORK_DIR)
 
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
@@ -185,6 +251,67 @@ def run_cmd(cmd: List[str]) -> None:
         raise RuntimeError(f"Command failed with code {result.returncode}")
 
 
+def run_cmd_capture(cmd: List[str]) -> str:
+    print("$", " ".join(cmd))
+    result = subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if result.returncode != 0:
+        raise RuntimeError(f"Command failed with code {result.returncode}:\n{result.stdout}")
+    return result.stdout
+
+
+def score_csv(csv_path: Path, *, nmax: int, check_overlap: bool) -> Dict[str, object]:
+    # Prefer in-process scorer (faster + avoids subprocess overhead).
+    try:
+        from scoring import score_submission  # noqa: E402
+    except Exception:
+        cmd = [sys.executable, str(ROOT / "scripts" / "score_submission.py"), str(csv_path), "--nmax", str(nmax)]
+        if not check_overlap:
+            cmd.append("--no-overlap")
+        out = run_cmd_capture(cmd).strip()
+        return json.loads(out) if out else {}
+
+    result = score_submission(
+        csv_path,
+        nmax=int(nmax),
+        check_overlap=bool(check_overlap),
+        require_complete=True,
+    )
+    try:
+        return dict(result.to_json())
+    except Exception:
+        # Fallback (should not happen): keep a minimal stable shape.
+        return {"nmax": int(nmax), "overlap_check": bool(check_overlap)}
+
+
+def generate_submission(
+    out_csv: Path,
+    *,
+    seed: int,
+    nmax: int,
+    args: Dict[str, object],
+) -> None:
+    cmd = [
+        sys.executable,
+        str(ROOT / "scripts" / "generate_submission.py"),
+        "--out",
+        str(out_csv),
+        "--seed",
+        str(seed),
+        "--nmax",
+        str(nmax),
+    ]
+    for key, value in args.items():
+        if value is None:
+            continue
+        flag = "--" + key.replace("_", "-")
+        if isinstance(value, bool):
+            if value:
+                cmd.append(flag)
+            continue
+        cmd += [flag, str(value)]
+    run_cmd(cmd)
+
+
 def l2o_config_from_meta(meta: Dict[str, object], *, reward: str, deterministic: bool) -> L2OConfig:
     def _get_int(key: str, default: int) -> int:
         val = meta.get(key, default)
@@ -330,6 +457,34 @@ def challenge_score_from_results(rows: List[Dict[str, float]], model: str, split
         mean_s = float(np.mean(grouped[n]))
         total += (mean_s * mean_s) / n
     return total
+
+
+def print_challenge_scores(
+    rows: List[Dict[str, float]],
+    *,
+    split: str,
+    models: Iterable[str] | None = None,
+    title: str | None = None,
+) -> Dict[str, float]:
+    """Print the Kaggle metric (sum(s_n^2/n)) on the evaluated subset.
+
+    Note: this uses the mean packing_score per (n) for the given split.
+    """
+    available = {str(r.get("model")) for r in rows if str(r.get("split")) == split}
+    if models is None:
+        selected = sorted(available)
+    else:
+        selected = [str(m) for m in models if str(m) in available]
+
+    if not selected:
+        return {}
+
+    scores = {m: float(challenge_score_from_results(rows, m, split)) for m in selected}
+    if title:
+        print(title)
+    for m in sorted(scores, key=lambda k: (scores[k], k)):
+        print(f"  {split:>5s}  {m:<16s}  score={scores[m]:.6f}")
+    return scores
 
 
 def write_csv(path: Path, rows: List[Dict[str, float]]) -> None:
@@ -505,7 +660,7 @@ L2O_REFINE_SA = False
 REFINE_STEPS = 100
 
 # %% Treino das politicas (setup)
-RUN_DIR = ROOT / "runs" / f"l2o_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+RUN_DIR = WORK_DIR / "runs" / f"l2o_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 RUN_DIR.mkdir(parents=True, exist_ok=True)
 
 points = np.array(TREE_POINTS, dtype=float)
@@ -1237,6 +1392,8 @@ results += evaluate_solver("grid", solve_grid, TRAIN_N_LIST, TRAIN_EVAL_SEEDS, p
 results += evaluate_solver("grid", solve_grid, VAL_N_LIST, VAL_EVAL_SEEDS, points, split="val")
 results += evaluate_solver("sa", solve_sa, TRAIN_N_LIST, TRAIN_EVAL_SEEDS, points, split="train")
 results += evaluate_solver("sa", solve_sa, VAL_N_LIST, VAL_EVAL_SEEDS, points, split="val")
+print_challenge_scores(results, split="train", models=["grid", "sa"], title="[eval] baselines (Kaggle metric on subset):")
+print_challenge_scores(results, split="val", models=["grid", "sa"])
 
 # %% Avaliacao: L2O
 results += evaluate_solver(
@@ -1271,6 +1428,8 @@ results += evaluate_solver(
     points,
     split="val",
 )
+print_challenge_scores(results, split="train", models=["l2o_mlp", "l2o_gnn"], title="[eval] l2o (Kaggle metric on subset):")
+print_challenge_scores(results, split="val", models=["l2o_mlp", "l2o_gnn"])
 
 # %% Avaliacao: modelos opcionais
 if bc_params is not None and bc_config is not None:
@@ -1363,6 +1522,14 @@ if L2O_REFINE_SA:
         split="val",
     )
 
+print_challenge_scores(
+    results,
+    split="train",
+    models=["l2o_bc", "sa_meta_init", "heatmap", "l2o_refine_grid", "l2o_refine_sa"],
+    title="[eval] optional models (Kaggle metric on subset):",
+)
+print_challenge_scores(results, split="val", models=["l2o_bc", "sa_meta_init", "heatmap", "l2o_refine_grid", "l2o_refine_sa"])
+
 # %% Avaliacao: ensemble
 if RUN_ENSEMBLE:
     ensemble_candidates = {
@@ -1393,6 +1560,8 @@ if RUN_ENSEMBLE:
         points,
         split="val",
     )
+    print_challenge_scores(results, split="train", models=["ensemble"], title="[eval] ensemble (Kaggle metric on subset):")
+    print_challenge_scores(results, split="val", models=["ensemble"])
 
 # %% Resumos e artifacts
 per_n = summarize_results(results)
@@ -1443,17 +1612,14 @@ meta = {
 save_eval_artifacts(RUN_DIR, results, per_n, overall, meta)
 plot_eval_curves(per_n, RUN_DIR / "eval_curve.png")
 
-# %% Score GNN (proposta do desafio)
-gnn_train_score = challenge_score_from_results(results, "l2o_gnn", "train")
-gnn_val_score = challenge_score_from_results(results, "l2o_gnn", "val")
-(RUN_DIR / "gnn_score.txt").write_text(
-    f"gnn_train_score={gnn_train_score:.6f}\n"
-    f"gnn_val_score={gnn_val_score:.6f}\n"
-)
-
-print("GNN score (challenge-style):")
-print(f"  train={gnn_train_score:.6f}")
-print(f"  val={gnn_val_score:.6f}")
+# %% Scores (Kaggle metric on eval subset)
+# Este score usa a mesma fórmula do Kaggle (sum(s_n^2 / n)), mas calculada apenas
+# no subset avaliado (TRAIN_N_LIST/VAL_N_LIST e seeds associados).
+challenge_scores = {
+    "train": print_challenge_scores(results, split="train", title="[eval] Kaggle metric on subset:"),
+    "val": print_challenge_scores(results, split="val"),
+}
+(RUN_DIR / "challenge_scores.json").write_text(json.dumps(challenge_scores, indent=2), encoding="utf-8")
 print("Eval artifacts saved to", RUN_DIR)
 
 # %% Gerar submission.csv (Kaggle)
@@ -1475,6 +1641,7 @@ SWEEP_KEEP_GOING = True
 RECIPES_MAX_RECIPES_PER_FAMILY = None
 RECIPES_MAX_LATTICE_VARIANTS = None
 
+# %% Salvar politicas treinadas (para usar no generate_submission/guided SA)
 # Salvar as politicas treinadas neste notebook (para usar no generate_submission/guided SA)
 MLP_POLICY_PATH = RUN_DIR / "l2o_mlp.npz"
 GNN_POLICY_PATH = RUN_DIR / "l2o_gnn.npz"
@@ -1490,51 +1657,7 @@ save_params_npz(
 )
 
 
-def run_cmd_capture(cmd: List[str]) -> str:
-    print("$", " ".join(cmd))
-    result = subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    if result.returncode != 0:
-        raise RuntimeError(f"Command failed with code {result.returncode}:\n{result.stdout}")
-    return result.stdout
-
-
-def score_csv(csv_path: Path, *, nmax: int, check_overlap: bool) -> Dict[str, object]:
-    cmd = [sys.executable, str(ROOT / "scripts" / "score_submission.py"), str(csv_path), "--nmax", str(nmax)]
-    if not check_overlap:
-        cmd.append("--no-overlap")
-    out = run_cmd_capture(cmd).strip()
-    return json.loads(out) if out else {}
-
-
-def generate_submission(
-    out_csv: Path,
-    *,
-    seed: int,
-    nmax: int,
-    args: Dict[str, object],
-) -> None:
-    cmd = [
-        sys.executable,
-        str(ROOT / "scripts" / "generate_submission.py"),
-        "--out",
-        str(out_csv),
-        "--seed",
-        str(seed),
-        "--nmax",
-        str(nmax),
-    ]
-    for key, value in args.items():
-        if value is None:
-            continue
-        flag = "--" + key.replace("_", "-")
-        if isinstance(value, bool):
-            if value:
-                cmd.append(flag)
-            continue
-        cmd += [flag, str(value)]
-    run_cmd(cmd)
-
-
+# %% Submission helpers (ensemble por puzzle)
 def _best_per_puzzle_ensemble(
     out_csv: Path,
     candidates: Dict[str, Path],
@@ -1592,8 +1715,7 @@ def _best_per_puzzle_ensemble(
 
     return {"selected_by_puzzle": {str(k): v for k, v in selected.items()}}
 
-
-# === Modelos disponiveis (paths) ===
+# %% Modelos disponiveis (paths)
 META_INIT_MODEL = str(meta_init_path) if (meta_init_path is not None and meta_init_path.exists()) else None
 HEATMAP_MODEL = str(heatmap_path) if (heatmap_path is not None and heatmap_path.exists()) else None
 
@@ -1616,7 +1738,8 @@ CANDIDATE_GUIDED_MODELS: Dict[str, Path] = dict(CANDIDATE_L2O_MODELS)
 # ## Experimentos de submission (1 célula = 1 experimento)
 #
 # Objetivo: cada célula abaixo gera um `submission.csv` (via `scripts/generate_submission.py`)
-# e já imprime o **score do desafio** (métrica do Kaggle) calculado por `scripts/score_submission.py`.
+# e já imprime o **score do desafio** (métrica do Kaggle) calculado pelo scorer local
+# (`src/scoring.py`, equivalente ao `scripts/score_submission.py`).
 #
 # Dica: deixe `REUSE=True` para não re-gerar CSVs já existentes.
 # %%
@@ -1833,8 +1956,6 @@ BASE_ARGS: Dict[str, object] = {
 
 # %% [markdown]
 # ## Baselines (lattice)
-# %%
-
 # %% (lattice_hex_rots0_15_30)
 args = {**BASE_ARGS, "sa_nmax": 0, "lattice_pattern": "hex", "lattice_margin": 0.02, "lattice_rotations": "0,15,30"}
 run_submission_experiment("lattice_hex_rots0_15_30", args)
@@ -1854,8 +1975,6 @@ run_submission_experiment("lattice_hex_const_rot15", args)
 
 # %% [markdown]
 # ## SA (Simulated Annealing)
-# %%
-
 # %% (sa_packing_random_geom)
 args = {
     **BASE_ARGS,
@@ -1942,8 +2061,6 @@ run_submission_experiment("sa_prefix_mixed_log_overlap001", args)
 
 # %% [markdown]
 # ## Refine (SA sobre o lattice/solver base)
-# %%
-
 # %% (refine_packing_mixed_geom)
 args = {
     **BASE_ARGS,
@@ -1999,8 +2116,6 @@ run_submission_experiment("refine_prefix_bbox_inward_log", args)
 
 # %% [markdown]
 # ## Block SA (meta-model)
-# %%
-
 # %% (block_cluster_b2_prefix)
 args = {
     **BASE_ARGS,
@@ -2070,8 +2185,6 @@ run_submission_experiment("block_template_square_b2_prefix", args)
 
 # %% [markdown]
 # ## LNS / ALNS (post-opt)
-# %%
-
 # %% (lns_mixed)
 args = {**BASE_ARGS, "lns_nmax": 200, "lns_passes": 10, "lns_destroy_mode": "mixed", "lns_destroy_k": 8, "lns_group_moves": 4}
 run_submission_experiment("lns_mixed", args)
@@ -2120,8 +2233,6 @@ run_submission_experiment("lns_alns_sa_accept_tabu10", args)
 
 # %% [markdown]
 # ## GA / Hill-climb (n pequeno)
-# %%
-
 # %% (hc20_lattice)
 args = {**BASE_ARGS, "hc_nmax": 20, "hc_passes": 2, "hc_step_xy": 0.01, "hc_step_deg": 2.0}
 run_submission_experiment("hc20_lattice", args)
@@ -2148,8 +2259,6 @@ run_submission_experiment("sa20_ga20", args)
 
 # %% [markdown]
 # ## Pipelines combinados (SA/block + refine + (A)LNS)
-# %%
-
 # %% (sa50_ref80_prefix)
 args = {**BASE_ARGS, "sa_nmax": 50, "sa_steps": 800, "sa_batch": 64, "sa_objective": "prefix", "sa_proposal": "mixed", "sa_cooling": "log", "sa_swap_prob": 0.05, "sa_swap_prob_end": 0.0, "refine_nmin": 80, "refine_steps": 900, "refine_batch": 24, "refine_objective": "prefix", "refine_proposal": "mixed", "refine_cooling": "log"}
 run_submission_experiment("sa50_ref80_prefix", args)
@@ -2205,8 +2314,6 @@ run_submission_experiment("block_b2_ref200_prefix_lns_alns_tabu5", args)
 
 # %% [markdown]
 # ## Model-based (meta-init / heatmap / L2O / guided)
-# %%
-
 # %% (meta_init_sa_prefix)  # requer meta_init_path existir
 args = {
     **BASE_ARGS,
@@ -2374,8 +2481,6 @@ run_submission_experiment("guided_refine_bc_lns_alns_tabu5", args)
 
 # %% [markdown]
 # ## Mother-prefix (resolve N=200 uma vez e emite prefixes)
-# %%
-
 # %% (mother_refine2000_prefix)
 args = {
     **BASE_ARGS,
@@ -2425,6 +2530,15 @@ args = {
 run_submission_experiment("mother_block_alns_tabu_refine2000_prefix", args)
 
 
+# %% [markdown]
+# ## Sweep automático de receitas (opcional)
+#
+# Gera uma pool grande de receitas (combinações de flags do `scripts/generate_submission.py`),
+# filtra as que dependem de modelos inexistentes e permite:
+# - `RUN_SUBMISSION_SWEEP=True`: sweep 2-stage (rápido + final) + (opcional) ensemble por puzzle
+# - `RUN_SUBMISSION_SWEEP=False`: gera 1 `submission.csv` com uma receita forte e calcula o score
+
+# %% Receitas automáticas (pool + filtro)
 def _stable_hash_dict(data: Dict[str, object]) -> str:
     blob = json.dumps(data, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha1(blob).hexdigest()[:10]
@@ -3315,6 +3429,7 @@ SUB_DIR.mkdir(parents=True, exist_ok=True)
 BEST_SEED_SWEEP_RECIPE_NAME: str | None = None
 BEST_SEED_SWEEP_RECIPE: Dict[str, object] | None = None
 
+# %% Experimento: sweep de submissions (2-stage)
 if RUN_SUBMISSION_SWEEP:
     # Sweep em 2 estagios:
     # 1) ranking rapido em n pequeno (p/ cortar combinacoes)
@@ -3559,6 +3674,11 @@ if RUN_SUBMISSION_SWEEP:
                 )
                 print("Best updated to ensemble.")
 else:
+    print("[submission_sweep] RUN_SUBMISSION_SWEEP=False; pule este cell.")
+
+
+# %% Experimento: gerar submission.csv (single)
+if not RUN_SUBMISSION_SWEEP:
     # Rodada unica (use nmax=200 + overlap_check=True para score final)
     def _pick_single_recipe() -> str:
         preferred_families = [
@@ -3602,6 +3722,8 @@ else:
     (RUN_DIR / "submission_score.json").write_text(json.dumps(score, indent=2))
     print("Submission saved to", out_csv)
     print("Score:", score.get("score"))
+else:
+    print("[single_submission] RUN_SUBMISSION_SWEEP=True; pule este cell.")
 
 # %% Maximo de experimentos: multi-start + ensemble por n (via scripts/sweep_ensemble.py)
 # Objetivo: rodar MUITAS seeds com uma receita forte (mother-prefix + refine no N=200) e
