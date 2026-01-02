@@ -34,7 +34,6 @@
 # Python
 __pycache__/
 *.pyc
-.python-version
 .pytest_cache/
 .ruff_cache/
 

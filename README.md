@@ -163,15 +163,26 @@ Este repo usa **Python/JAX** como base do solver, substituindo a base C++ anteri
 ### Setup
 
 ```bash
-python3 -m venv .venv
+bash scripts/setup_venv.sh
+```
+
+Requer **Python 3.12+** (este repo fixa `3.12.3` em `.python-version`). Se preferir manual:
+
+```bash
+python -m venv .venv
 source .venv/bin/activate
-pip install -U "jax[cpu]" numpy matplotlib
+python -m pip install -U pip
+python -m pip install -U -r requirements.txt
 
 # Opcional (acelera `polygons_intersect` no score local):
-python3 scripts/build_fastcollide.py
+python scripts/build_fastcollide.py
 ```
 
 Se voce tiver GPU/CUDA, instale o pacote JAX adequado ao seu ambiente.
+
+### Notebooks (VS Code/Jupyter)
+
+Depois do setup, selecione o interpretador/kernel da `.venv` (assim o `ipykernel` instalado em `requirements.txt` sera usado).
 
 ### Estrutura de codigo
 
