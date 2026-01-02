@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
@@ -454,3 +455,380 @@ def genetic_optimize(
             max_passes=hill_climb_passes,
         )
     return shift_poses_to_origin(points, best_pose)
+
+
+def _collides_candidate(state: _PackingState, cand_center: np.ndarray, cand_poly: np.ndarray) -> bool:
+    n = state.centers.shape[0]
+    for j in range(n):
+        dx = float(cand_center[0] - state.centers[j, 0])
+        dy = float(cand_center[1] - state.centers[j, 1])
+        if dx * dx + dy * dy > state.thr2:
+            continue
+        if polygons_intersect(cand_poly, state.polys[j]):
+            return True
+    return False
+
+
+def _collides_candidate_excluding(state: _PackingState, cand_center: np.ndarray, cand_poly: np.ndarray, exclude: np.ndarray) -> bool:
+    n = state.centers.shape[0]
+    for j in range(n):
+        if bool(exclude[j]):
+            continue
+        dx = float(cand_center[0] - state.centers[j, 0])
+        dy = float(cand_center[1] - state.centers[j, 1])
+        if dx * dx + dy * dy > state.thr2:
+            continue
+        if polygons_intersect(cand_poly, state.polys[j]):
+            return True
+    return False
+
+
+def _rotate_about_xy(xy: np.ndarray, *, center: np.ndarray, delta_deg: float) -> np.ndarray:
+    rad = math.radians(float(delta_deg))
+    c = math.cos(rad)
+    s = math.sin(rad)
+    v = xy - center[None, :]
+    x = v[:, 0]
+    y = v[:, 1]
+    xr = x * c - y * s
+    yr = x * s + y * c
+    return center[None, :] + np.stack([xr, yr], axis=1)
+
+
+def _sample_centers(
+    *,
+    rng: np.random.Generator,
+    min_x: float,
+    min_y: float,
+    max_x: float,
+    max_y: float,
+    pad: float,
+    n: int,
+) -> np.ndarray:
+    if n <= 0:
+        return np.zeros((0, 2), dtype=float)
+    xs = rng.uniform(min_x - pad, max_x + pad, size=(n,))
+    ys = rng.uniform(min_y - pad, max_y + pad, size=(n,))
+
+    # Bias half the samples toward the current AABB boundary.
+    half = n // 2
+    for i in range(half):
+        if rng.random() < 0.5:
+            # Pin x near min/max.
+            xs[i] = (min_x - pad) if rng.random() < 0.5 else (max_x + pad)
+            ys[i] = rng.uniform(min_y - pad, max_y + pad)
+        else:
+            # Pin y near min/max.
+            ys[i] = (min_y - pad) if rng.random() < 0.5 else (max_y + pad)
+            xs[i] = rng.uniform(min_x - pad, max_x + pad)
+
+    return np.stack([xs, ys], axis=1)
+
+
+def _pick_ruin_set(
+    state: _PackingState,
+    *,
+    rng: np.random.Generator,
+    k: int,
+    mode: str,
+) -> list[int]:
+    n = state.poses.shape[0]
+    if k <= 0 or n <= 1:
+        return []
+    k = min(k, n - 1)  # keep at least one tree fixed so we can rebuild reliably
+
+    chosen: list[int] = []
+    chosen_set: set[int] = set()
+
+    def _add(idx: int) -> None:
+        if idx in chosen_set:
+            return
+        chosen.append(idx)
+        chosen_set.add(idx)
+
+    if mode == "random":
+        idxs = rng.choice(n, size=(k,), replace=False)
+        return [int(i) for i in idxs]
+
+    if mode == "cluster":
+        anchor = int(rng.integers(0, n))
+        centers = state.centers
+        d2 = np.sum((centers - centers[anchor][None, :]) ** 2, axis=1)
+        order = np.argsort(d2, kind="mergesort")
+        for idx in order[:k]:
+            _add(int(idx))
+        return chosen
+
+    # boundary / mixed
+    boundary_n = k if mode == "boundary" else max(1, k // 2)
+    for _ in range(boundary_n):
+        idx, _axis, _center = _pick_boundary_tree(state.bboxes, rng=rng, k=8)
+        _add(int(idx))
+
+    while len(chosen) < k:
+        _add(int(rng.integers(0, n)))
+    return chosen
+
+
+def large_neighborhood_search(
+    points: np.ndarray,
+    poses: np.ndarray,
+    *,
+    seed: int = 1,
+    passes: int = 10,
+    destroy_k: int = 8,
+    destroy_mode: str = "mixed",
+    tabu_tenure: int = 0,
+    candidates: int = 64,
+    angle_samples: int = 8,
+    pad_scale: float = 2.0,
+    group_moves: int = 0,
+    group_size: int = 3,
+    group_trans_sigma: float = 0.05,
+    group_rot_sigma: float = 20.0,
+    t_start: float = 0.0,
+    t_end: float = 0.0,
+) -> np.ndarray:
+    """Large Neighborhood Search / (simplified) ALNS-style loop.
+
+    Operators:
+      - Ruin & recreate: remove `destroy_k` trees (boundary/random/cluster) and reinsert
+        greedily by sampling candidate centers/angles.
+      - Group rotation: rotate a small clustered group around its centroid (+ translation).
+
+    Acceptance:
+      - Always accept improvements.
+      - If `t_start > 0` and `t_end > 0`, accept worse moves with SA probability.
+
+    Notes:
+      - `destroy_mode="alns"` adaptively samples among {"boundary","random","cluster"} based on
+        recent successful moves (simple reaction-factor update).
+      - `tabu_tenure>0` keeps a tabu list of recent ruin-sets (tree-index tuples) to reduce cycles.
+    """
+
+    poses = np.array(poses, dtype=float, copy=True)
+    n = int(poses.shape[0])
+    if n <= 1 or passes <= 0:
+        return shift_poses_to_origin(points, poses)
+    if destroy_k <= 0:
+        destroy_k = 1
+
+    destroy_mode = str(destroy_mode)
+    if destroy_mode not in {"mixed", "boundary", "random", "cluster", "alns"}:
+        raise ValueError("destroy_mode must be one of: mixed, boundary, random, cluster, alns")
+
+    tabu_tenure = int(tabu_tenure)
+    if tabu_tenure < 0:
+        raise ValueError("tabu_tenure must be >= 0")
+    tabu: deque[tuple[int, ...]] | None = deque(maxlen=tabu_tenure) if tabu_tenure > 0 else None
+
+    alns_modes: tuple[str, ...] = ("boundary", "random", "cluster")
+    alns_weights = np.ones((len(alns_modes),), dtype=float)
+    alns_scores = np.zeros((len(alns_modes),), dtype=float)
+    alns_counts = np.zeros((len(alns_modes),), dtype=np.int32)
+    alns_reaction = 0.2
+    alns_update_every = 10
+
+    rng = np.random.default_rng(int(seed))
+    rad = float(polygon_radius(points))
+    pad = float(pad_scale) * 2.0 * rad
+
+    best = poses
+    best_score = _build_state(points, poses).score
+    current = poses
+    current_score = best_score
+
+    def _temp(pass_idx: int) -> float:
+        if t_start <= 0.0 or t_end <= 0.0 or passes <= 1:
+            return 0.0
+        frac = float(pass_idx) / float(max(passes - 1, 1))
+        return float(t_start) * (float(t_end) / float(t_start)) ** frac
+
+    for pass_idx in range(int(passes)):
+        base_state = _build_state(points, current)
+
+        # --- ALNS destroy-mode selection (only affects ruin&recreate operator)
+        ruin_mode = destroy_mode
+        ruin_mode_idx: int | None = None
+        if destroy_mode == "alns":
+            probs = alns_weights / float(np.sum(alns_weights))
+            ruin_mode_idx = int(rng.choice(len(alns_modes), p=probs))
+            ruin_mode = alns_modes[ruin_mode_idx]
+            alns_counts[ruin_mode_idx] += 1
+
+        # --- Operator 1: group rotations (cheap neighborhood expansion)
+        cand_from_group: np.ndarray | None = None
+        cand_group_score: float | None = None
+        if group_moves > 0 and group_size >= 2:
+            for _ in range(int(group_moves)):
+                anchor = int(rng.integers(0, n))
+                d2 = np.sum((base_state.centers - base_state.centers[anchor][None, :]) ** 2, axis=1)
+                order = np.argsort(d2, kind="mergesort")
+                group = [int(i) for i in order[: max(2, min(int(group_size), n))]]
+                exclude = np.zeros((n,), dtype=bool)
+                exclude[group] = True
+
+                dxy = rng.normal(0.0, float(group_trans_sigma), size=(2,))
+                ddeg = float(rng.normal(0.0, float(group_rot_sigma)))
+
+                cand = np.array(current, dtype=float, copy=True)
+                xy = cand[group, 0:2]
+                center = np.mean(xy, axis=0)
+                cand_xy = _rotate_about_xy(xy, center=center, delta_deg=ddeg) + dxy[None, :]
+                cand[group, 0:2] = cand_xy
+                cand[group, 2] = np.mod(cand[group, 2] + ddeg, 360.0)
+
+                # Collision check only vs non-group indices (exclude old group polys).
+                ok = True
+                cand_bboxes = base_state.bboxes.copy()
+                for idx in group:
+                    cand_poly = transform_polygon(points, cand[idx])
+                    cand_center = cand[idx, 0:2]
+                    if _collides_candidate_excluding(base_state, cand_center, cand_poly, exclude=exclude):
+                        ok = False
+                        break
+                    cand_bboxes[idx] = polygon_bbox(cand_poly)
+                if not ok:
+                    continue
+                cand_score = _packing_score_from_bboxes(cand_bboxes)
+                if cand_group_score is None or cand_score < float(cand_group_score):
+                    cand_from_group = cand
+                    cand_group_score = float(cand_score)
+
+        # --- Operator 2: ruin & recreate (large neighborhood)
+        removed_key: tuple[int, ...] | None = None
+        if tabu is None:
+            removed = _pick_ruin_set(base_state, rng=rng, k=int(destroy_k), mode=ruin_mode)
+            removed_key = tuple(sorted(removed)) if removed else None
+        else:
+            removed = []
+            for _ in range(10):
+                cand = _pick_ruin_set(base_state, rng=rng, k=int(destroy_k), mode=ruin_mode)
+                key = tuple(sorted(cand))
+                if key not in tabu:
+                    removed = cand
+                    removed_key = key
+                    break
+            if not removed:
+                removed = cand
+                removed_key = tuple(sorted(removed))
+
+        cand_from_ruin: np.ndarray | None = None
+        cand_ruin_score: float | None = None
+        if removed:
+            removed_set = set(removed)
+            keep = [i for i in range(n) if i not in removed_set]
+            keep_poses = current[keep]
+            keep_state = _build_state(points, keep_poses)
+
+            # Greedy reinsertion in random order.
+            insert_order = list(removed)
+            rng.shuffle(insert_order)
+
+            cand = np.array(current, dtype=float, copy=True)
+            success = True
+            for idx in insert_order:
+                # Bounding box of current kept packing.
+                min_x = float(np.min(keep_state.bboxes[:, 0]))
+                min_y = float(np.min(keep_state.bboxes[:, 1]))
+                max_x = float(np.max(keep_state.bboxes[:, 2]))
+                max_y = float(np.max(keep_state.bboxes[:, 3]))
+
+                # Always include the original pose as a candidate (may fail if earlier inserts moved into it).
+                orig_pose = np.array(current[idx], dtype=float, copy=False)
+                centers = _sample_centers(rng=rng, min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y, pad=pad, n=max(0, int(candidates) - 1))
+                centers = np.vstack([orig_pose[0:2][None, :], centers])
+
+                n_ang = max(1, int(angle_samples))
+                angles = rng.uniform(0.0, 360.0, size=(n_ang - 1,))
+                angles = np.concatenate([np.array([float(orig_pose[2])], dtype=float), angles], axis=0)
+
+                best_pose: np.ndarray | None = None
+                best_poly: np.ndarray | None = None
+                best_bbox: np.ndarray | None = None
+                best_score_local = float("inf")
+
+                for cxy in centers:
+                    for ang in angles:
+                        cand_pose = np.array([float(cxy[0]), float(cxy[1]), float(ang)], dtype=float)
+                        cand_poly = transform_polygon(points, cand_pose)
+                        cand_center = cand_pose[0:2]
+                        if _collides_candidate(keep_state, cand_center, cand_poly):
+                            continue
+                        cand_bbox = polygon_bbox(cand_poly)
+                        new_min_x = min(min_x, float(cand_bbox[0]))
+                        new_min_y = min(min_y, float(cand_bbox[1]))
+                        new_max_x = max(max_x, float(cand_bbox[2]))
+                        new_max_y = max(max_y, float(cand_bbox[3]))
+                        s = max(new_max_x - new_min_x, new_max_y - new_min_y)
+                        if s < best_score_local:
+                            best_score_local = float(s)
+                            best_pose = cand_pose
+                            best_poly = cand_poly
+                            best_bbox = cand_bbox
+
+                if best_pose is None or best_poly is None or best_bbox is None:
+                    success = False
+                    break
+
+                # Commit insertion into keep_state (append).
+                keep_state.poses = np.vstack([keep_state.poses, best_pose[None, :]])
+                keep_state.centers = np.vstack([keep_state.centers, best_pose[None, 0:2]])
+                keep_state.polys.append(best_poly)
+                keep_state.bboxes = np.vstack([keep_state.bboxes, best_bbox[None, :]])
+                keep_state.score = float(best_score_local)
+                cand[idx] = best_pose
+
+            if success:
+                cand_from_ruin = cand
+                cand_ruin_score = float(keep_state.score)
+
+        # --- Pick best candidate among operators
+        best_cand = None
+        best_cand_score = None
+        if cand_from_group is not None:
+            best_cand = cand_from_group
+            best_cand_score = float(cand_group_score) if cand_group_score is not None else None
+        if cand_from_ruin is not None:
+            if best_cand_score is None or (cand_ruin_score is not None and float(cand_ruin_score) < float(best_cand_score)):
+                best_cand = cand_from_ruin
+                best_cand_score = float(cand_ruin_score) if cand_ruin_score is not None else None
+
+        if best_cand is None or best_cand_score is None:
+            continue
+
+        # --- Acceptance (greedy or SA)
+        delta = float(best_cand_score) - float(current_score)
+        accept = delta < 0.0
+        temp = _temp(pass_idx)
+        if not accept and temp > 0.0:
+            accept = rng.random() < math.exp(-delta / temp)
+
+        best_is_ruin = best_cand is cand_from_ruin
+        if accept:
+            current = best_cand
+            current_score = float(best_cand_score)
+            if current_score < best_score:
+                best = current
+                best_score = current_score
+
+            if tabu is not None and best_is_ruin and removed_key is not None:
+                tabu.append(removed_key)
+
+        # --- ALNS weight update (periodic reaction-factor update)
+        if destroy_mode == "alns" and ruin_mode_idx is not None:
+            reward = 0.0
+            if accept and best_is_ruin:
+                reward = 5.0 if delta < 0.0 else 1.0
+            alns_scores[ruin_mode_idx] += reward
+
+            if (pass_idx + 1) % alns_update_every == 0:
+                for i in range(len(alns_modes)):
+                    avg = float(alns_scores[i]) / float(max(int(alns_counts[i]), 1))
+                    avg = max(avg, 1e-3)
+                    alns_weights[i] = (1.0 - alns_reaction) * float(alns_weights[i]) + alns_reaction * avg
+                alns_weights = np.clip(alns_weights, 1e-3, None)
+                alns_scores[:] = 0.0
+                alns_counts[:] = 0
+
+    return shift_poses_to_origin(points, best)

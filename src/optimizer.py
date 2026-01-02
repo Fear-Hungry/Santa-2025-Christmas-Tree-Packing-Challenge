@@ -41,6 +41,8 @@ def run_sa_batch(
     rot_sigma=15.0,
     rot_prob=0.3,
     rot_prob_end=-1.0,
+    swap_prob=0.0,
+    swap_prob_end=-1.0,
     cooling="geom",
     cooling_power=1.0,
     trans_sigma_nexp=0.0,
@@ -134,15 +136,27 @@ def run_sa_batch(
         rot_prob_final = jnp.where(rot_prob_end >= 0.0, rot_prob_end, rot_prob)
         current_rot_prob = rot_prob + (rot_prob_final - rot_prob) * anneal
         current_rot_prob = jnp.clip(current_rot_prob, 0.0, 1.0)
+
+        swap_prob_final = jnp.where(swap_prob_end >= 0.0, swap_prob_end, swap_prob)
+        current_swap_prob = swap_prob + (swap_prob_final - swap_prob) * anneal
+        current_swap_prob = jnp.clip(current_swap_prob, 0.0, 1.0)
         
         # 1. Propose Move
-        key, subkey_select, subkey_k, subkey_move, subkey_trans, subkey_rot, subkey_gate = jax.random.split(key, 7)
+        key, subkey_select, subkey_k, subkey_k2, subkey_swap, subkey_rot_choice, subkey_trans, subkey_rot, subkey_gate = jax.random.split(key, 9)
         
         batch_size = poses.shape[0]
         batch_idx = jnp.arange(batch_size)
 
         k_rand = jax.random.randint(subkey_k, (batch_size,), 0, n_trees)
-        move_choice = jax.random.uniform(subkey_move, (batch_size,))
+
+        # Swap is a permutation move (useful for objective='prefix'); it does not change
+        # the set of poses (only their order), so it cannot introduce new collisions.
+        swap_choice = jax.random.uniform(subkey_swap, (batch_size,))
+        if n_trees > 1:
+            do_swap = swap_choice < current_swap_prob
+        else:
+            do_swap = jnp.zeros((batch_size,), dtype=bool)
+        rot_choice = jax.random.uniform(subkey_rot_choice, (batch_size,))
 
         eps_xy = jax.random.normal(subkey_trans, (batch_size, 2))
         eps_theta = jax.random.normal(subkey_rot, (batch_size,))
@@ -177,17 +191,32 @@ def run_sa_batch(
 
         dtheta = eps_theta * (rot_sigma_eff * current_temp)
 
-        rot_mask = move_choice < current_rot_prob
+        rot_mask = rot_choice < current_rot_prob
         delta_xy = dxy * (~rot_mask)[:, None]
         delta_theta = dtheta * rot_mask
         delta = jnp.concatenate([delta_xy, delta_theta[:, None]], axis=1)
 
-        candidate_poses = poses.at[batch_idx, k].add(delta)
-        candidate_poses = candidate_poses.at[:, :, 2].set(jnp.mod(candidate_poses[:, :, 2], 360.0))
+        candidate_poses_single = poses.at[batch_idx, k].add(delta)
+        candidate_poses_single = candidate_poses_single.at[:, :, 2].set(jnp.mod(candidate_poses_single[:, :, 2], 360.0))
+
+        # Swap move (k1, k2) with k2 != k1 (when n_trees > 1).
+        k1 = k_rand
+        if n_trees > 1:
+            k2_raw = jax.random.randint(subkey_k2, (batch_size,), 0, n_trees - 1)
+            k2 = jnp.where(k2_raw >= k1, k2_raw + 1, k2_raw)
+        else:
+            k2 = k1
+        pose1 = poses[batch_idx, k1]
+        pose2 = poses[batch_idx, k2]
+        candidate_poses_swap = poses.at[batch_idx, k1].set(pose2)
+        candidate_poses_swap = candidate_poses_swap.at[batch_idx, k2].set(pose1)
+
+        candidate_poses = jnp.where(do_swap[:, None, None], candidate_poses_swap, candidate_poses_single)
         
         # 2. Check Constraints
         # Only the moved tree can introduce a new overlap, so we check one-vs-all.
-        is_colliding = jax.vmap(lambda p, idx: check_collision_for_index(p, base_poly, idx))(candidate_poses, k)
+        is_colliding_single = jax.vmap(lambda p, idx: check_collision_for_index(p, base_poly, idx))(candidate_poses, k)
+        is_colliding = jnp.where(do_swap, current_colliding, is_colliding_single)
         
         # 3. Calculate Score (+ optional overlap penalty)
         candidate_score = jax.vmap(score_fn)(candidate_poses)
@@ -195,7 +224,7 @@ def run_sa_batch(
         def _update_penalty() -> jax.Array:
             old_k = jax.vmap(lambda p, idx: _pair_penalty_for_index(p[:, :2], idx))(poses, k)
             new_k = jax.vmap(lambda p, idx: _pair_penalty_for_index(p[:, :2], idx))(candidate_poses, k)
-            return current_penalty + (new_k - old_k)
+            return current_penalty + (new_k - old_k) * (~do_swap).astype(current_penalty.dtype)
 
         candidate_penalty = jax.lax.cond(overlap_lambda_t > 0.0, _update_penalty, lambda: current_penalty)
         current_energy = current_score + overlap_lambda_t * current_penalty
@@ -475,6 +504,8 @@ def run_sa_batch_guided(
     rot_sigma=15.0,
     rot_prob=0.3,
     rot_prob_end=-1.0,
+    swap_prob=0.0,
+    swap_prob_end=-1.0,
     cooling="geom",
     cooling_power=1.0,
     trans_sigma_nexp=0.0,
@@ -568,6 +599,10 @@ def run_sa_batch_guided(
         current_rot_prob = rot_prob + (rot_prob_final - rot_prob) * anneal
         current_rot_prob = jnp.clip(current_rot_prob, 0.0, 1.0)
 
+        swap_prob_final = jnp.where(swap_prob_end >= 0.0, swap_prob_end, swap_prob)
+        current_swap_prob = swap_prob + (swap_prob_final - swap_prob) * anneal
+        current_swap_prob = jnp.clip(current_swap_prob, 0.0, 1.0)
+
         policy_prob_final = jnp.where(policy_prob_end >= 0.0, policy_prob_end, policy_prob)
         current_policy_prob = policy_prob + (policy_prob_final - policy_prob) * anneal
         current_policy_prob = jnp.clip(current_policy_prob, 0.0, 1.0)
@@ -580,9 +615,14 @@ def run_sa_batch_guided(
         batch_idx = jnp.arange(batch_size)
 
         # --- Heuristic proposal (baseline random SA move)
-        key, subkey_select, subkey_k, subkey_move, subkey_trans, subkey_rot, subkey_gate = jax.random.split(key, 7)
+        key, subkey_select, subkey_k, subkey_k2, subkey_swap, subkey_rot_choice, subkey_trans, subkey_rot, subkey_gate = jax.random.split(key, 9)
         k_rand = jax.random.randint(subkey_k, (batch_size,), 0, n_trees)
-        move_choice = jax.random.uniform(subkey_move, (batch_size,))
+        swap_choice = jax.random.uniform(subkey_swap, (batch_size,))
+        if n_trees > 1:
+            do_swap = swap_choice < current_swap_prob
+        else:
+            do_swap = jnp.zeros((batch_size,), dtype=bool)
+        rot_choice = jax.random.uniform(subkey_rot_choice, (batch_size,))
 
         eps_xy = jax.random.normal(subkey_trans, (batch_size, 2))
         eps_theta = jax.random.normal(subkey_rot, (batch_size,))
@@ -617,7 +657,7 @@ def run_sa_batch_guided(
 
         dtheta_h = eps_theta * (rot_sigma_eff * current_temp)
 
-        rot_mask = move_choice < current_rot_prob
+        rot_mask = rot_choice < current_rot_prob
         delta_xy = dxy_h * (~rot_mask)[:, None]
         delta_theta = dtheta_h * rot_mask
         delta_h = jnp.concatenate([delta_xy, delta_theta[:, None]], axis=1)
@@ -645,18 +685,33 @@ def run_sa_batch_guided(
         k = jnp.where(use_policy, k_p, k_h)
         delta = jnp.where(use_policy[:, None], delta_p, delta_h)
 
-        candidate_poses = poses.at[batch_idx, k].add(delta)
-        candidate_poses = candidate_poses.at[:, :, 2].set(jnp.mod(candidate_poses[:, :, 2], 360.0))
+        candidate_poses_single = poses.at[batch_idx, k].add(delta)
+        candidate_poses_single = candidate_poses_single.at[:, :, 2].set(jnp.mod(candidate_poses_single[:, :, 2], 360.0))
+
+        # Swap move (useful for objective='prefix'): permutes the order without changing geometry.
+        k1 = k_rand
+        if n_trees > 1:
+            k2_raw = jax.random.randint(subkey_k2, (batch_size,), 0, n_trees - 1)
+            k2 = jnp.where(k2_raw >= k1, k2_raw + 1, k2_raw)
+        else:
+            k2 = k1
+        pose1 = poses[batch_idx, k1]
+        pose2 = poses[batch_idx, k2]
+        candidate_poses_swap = poses.at[batch_idx, k1].set(pose2)
+        candidate_poses_swap = candidate_poses_swap.at[batch_idx, k2].set(pose1)
+
+        candidate_poses = jnp.where(do_swap[:, None, None], candidate_poses_swap, candidate_poses_single)
 
         # --- Constraints: only moved tree can introduce overlap
-        is_colliding = jax.vmap(lambda p, idx: check_collision_for_index(p, base_poly, idx))(candidate_poses, k)
+        is_colliding_single = jax.vmap(lambda p, idx: check_collision_for_index(p, base_poly, idx))(candidate_poses, k)
+        is_colliding = jnp.where(do_swap, current_colliding, is_colliding_single)
 
         # --- Score (+ optional overlap penalty) + Metropolis
         candidate_score = jax.vmap(score_fn)(candidate_poses)
         def _update_penalty() -> jax.Array:
             old_k = jax.vmap(lambda p, idx: _pair_penalty_for_index(p[:, :2], idx))(poses, k)
             new_k = jax.vmap(lambda p, idx: _pair_penalty_for_index(p[:, :2], idx))(candidate_poses, k)
-            return current_penalty + (new_k - old_k)
+            return current_penalty + (new_k - old_k) * (~do_swap).astype(current_penalty.dtype)
 
         candidate_penalty = jax.lax.cond(overlap_lambda_t > 0.0, _update_penalty, lambda: current_penalty)
         current_energy = current_score + overlap_lambda_t * current_penalty

@@ -47,6 +47,8 @@ def _run_sa(
     rot_sigma: float,
     rot_prob: float,
     rot_prob_end: float,
+    swap_prob: float,
+    swap_prob_end: float,
     cooling: str,
     cooling_power: float,
     trans_sigma_nexp: float,
@@ -96,6 +98,8 @@ def _run_sa(
         rot_sigma=rot_sigma,
         rot_prob=rot_prob,
         rot_prob_end=rot_prob_end,
+        swap_prob=swap_prob,
+        swap_prob_end=swap_prob_end,
         cooling=cooling,
         cooling_power=cooling_power,
         trans_sigma_nexp=trans_sigma_nexp,
@@ -508,6 +512,8 @@ def _run_sa_guided(
     rot_sigma: float,
     rot_prob: float,
     rot_prob_end: float,
+    swap_prob: float,
+    swap_prob_end: float,
     cooling: str,
     cooling_power: float,
     trans_sigma_nexp: float,
@@ -600,6 +606,8 @@ def _run_sa_guided(
         rot_sigma=rot_sigma,
         rot_prob=rot_prob,
         rot_prob_end=rot_prob_end,
+        swap_prob=swap_prob,
+        swap_prob_end=swap_prob_end,
         cooling=cooling,
         cooling_power=cooling_power,
         trans_sigma_nexp=trans_sigma_nexp,
@@ -787,6 +795,8 @@ def solve_n(
     sa_rot_sigma: float,
     sa_rot_prob: float,
     sa_rot_prob_end: float,
+    sa_swap_prob: float,
+    sa_swap_prob_end: float,
     sa_cooling: str,
     sa_cooling_power: float,
     sa_trans_sigma_nexp: float,
@@ -818,6 +828,8 @@ def solve_n(
     refine_rot_sigma: float,
     refine_rot_prob: float,
     refine_rot_prob_end: float,
+    refine_swap_prob: float,
+    refine_swap_prob_end: float,
     refine_cooling: str,
     refine_cooling_power: float,
     refine_trans_sigma_nexp: float,
@@ -831,6 +843,20 @@ def solve_n(
     refine_overlap_lambda: float,
     refine_allow_collisions: bool,
     refine_objective: str,
+    lns_nmax: int,
+    lns_passes: int,
+    lns_destroy_k: int,
+    lns_destroy_mode: str,
+    lns_tabu_tenure: int,
+    lns_candidates: int,
+    lns_angle_samples: int,
+    lns_pad_scale: float,
+    lns_group_moves: int,
+    lns_group_size: int,
+    lns_group_trans_sigma: float,
+    lns_group_rot_sigma: float,
+    lns_t_start: float,
+    lns_t_end: float,
     hc_nmax: int,
     hc_passes: int,
     hc_step_xy: float,
@@ -1023,6 +1049,8 @@ def solve_n(
                 rot_sigma=sa_rot_sigma,
                 rot_prob=sa_rot_prob,
                 rot_prob_end=sa_rot_prob_end,
+                swap_prob=sa_swap_prob,
+                swap_prob_end=sa_swap_prob_end,
                 cooling=sa_cooling,
                 cooling_power=sa_cooling_power,
                 trans_sigma_nexp=sa_trans_sigma_nexp,
@@ -1052,6 +1080,8 @@ def solve_n(
                 rot_sigma=sa_rot_sigma,
                 rot_prob=sa_rot_prob,
                 rot_prob_end=sa_rot_prob_end,
+                swap_prob=sa_swap_prob,
+                swap_prob_end=sa_swap_prob_end,
                 cooling=sa_cooling,
                 cooling_power=sa_cooling_power,
                 trans_sigma_nexp=sa_trans_sigma_nexp,
@@ -1091,6 +1121,8 @@ def solve_n(
                 rot_sigma=refine_rot_sigma,
                 rot_prob=refine_rot_prob,
                 rot_prob_end=refine_rot_prob_end,
+                swap_prob=refine_swap_prob,
+                swap_prob_end=refine_swap_prob_end,
                 cooling=refine_cooling,
                 cooling_power=refine_cooling_power,
                 trans_sigma_nexp=refine_trans_sigma_nexp,
@@ -1120,6 +1152,8 @@ def solve_n(
                 rot_sigma=refine_rot_sigma,
                 rot_prob=refine_rot_prob,
                 rot_prob_end=refine_rot_prob_end,
+                swap_prob=refine_swap_prob,
+                swap_prob_end=refine_swap_prob_end,
                 cooling=refine_cooling,
                 cooling_power=refine_cooling_power,
                 trans_sigma_nexp=refine_trans_sigma_nexp,
@@ -1139,6 +1173,28 @@ def solve_n(
             base = refined
 
     points = np.array(TREE_POINTS, dtype=float)
+
+    if lns_passes > 0 and lns_nmax > 0 and n <= lns_nmax:
+        from postopt_np import large_neighborhood_search  # noqa: E402
+
+        base = large_neighborhood_search(
+            points,
+            base,
+            seed=seed,
+            passes=lns_passes,
+            destroy_k=lns_destroy_k,
+            destroy_mode=lns_destroy_mode,
+            tabu_tenure=lns_tabu_tenure,
+            candidates=lns_candidates,
+            angle_samples=lns_angle_samples,
+            pad_scale=lns_pad_scale,
+            group_moves=lns_group_moves,
+            group_size=lns_group_size,
+            group_trans_sigma=lns_group_trans_sigma,
+            group_rot_sigma=lns_group_rot_sigma,
+            t_start=lns_t_start,
+            t_end=lns_t_end,
+        )
 
     if ga_gens > 0 and ga_nmax > 0 and n <= ga_nmax:
         from postopt_np import genetic_optimize  # noqa: E402
@@ -1187,6 +1243,13 @@ def main() -> int:
         action="store_true",
         help="Solve once for N=nmax and emit radial prefixes for n=1..nmax (nested solutions).",
     )
+    ap.add_argument(
+        "--mother-reorder",
+        type=str,
+        default="radial",
+        choices=["radial", "none"],
+        help="Ordering applied to the mother packing before emitting prefixes (radial recommended; none keeps solver order).",
+    )
 
     ap.add_argument("--sa-nmax", type=int, default=50, help="Use SA for n <= this threshold")
     ap.add_argument("--sa-batch", type=int, default=64, help="SA batch size")
@@ -1199,6 +1262,13 @@ def main() -> int:
         type=float,
         default=-1.0,
         help="Final SA rotation move probability (linear schedule; -1 keeps constant).",
+    )
+    ap.add_argument("--sa-swap-prob", type=float, default=0.0, help="SA swap move probability (useful for objective=prefix).")
+    ap.add_argument(
+        "--sa-swap-prob-end",
+        type=float,
+        default=-1.0,
+        help="Final SA swap move probability (linear schedule; -1 keeps constant).",
     )
     ap.add_argument("--sa-cooling", type=str, default="geom", choices=["geom", "linear", "log"])
     ap.add_argument("--sa-cooling-power", type=float, default=1.0, help="Power on anneal fraction (>=1 slows early cooling).")
@@ -1253,6 +1323,13 @@ def main() -> int:
         type=float,
         default=-1.0,
         help="Final refine rotation move probability (linear schedule; -1 keeps constant).",
+    )
+    ap.add_argument("--refine-swap-prob", type=float, default=0.0, help="Refine SA swap move probability (useful for objective=prefix).")
+    ap.add_argument(
+        "--refine-swap-prob-end",
+        type=float,
+        default=-1.0,
+        help="Final refine swap move probability (linear schedule; -1 keeps constant).",
     )
     ap.add_argument("--refine-cooling", type=str, default="geom", choices=["geom", "linear", "log"])
     ap.add_argument("--refine-cooling-power", type=float, default=1.0)
@@ -1322,6 +1399,21 @@ def main() -> int:
     ap.add_argument("--block-template-margin", type=float, default=0.02)
     ap.add_argument("--block-template-rotate", type=float, default=0.0)
 
+    ap.add_argument("--lns-nmax", type=int, default=0, help="Apply LNS/ALNS post-optimization for n <= this threshold (0=disabled).")
+    ap.add_argument("--lns-passes", type=int, default=0, help="LNS passes (0=disabled).")
+    ap.add_argument("--lns-destroy-k", type=int, default=8, help="Trees removed per ruin&recreate pass.")
+    ap.add_argument("--lns-destroy-mode", type=str, default="mixed", choices=["mixed", "boundary", "random", "cluster", "alns"])
+    ap.add_argument("--lns-tabu-tenure", type=int, default=0, help="Tabu tenure (passes) for recent ruin-sets (0 disables).")
+    ap.add_argument("--lns-candidates", type=int, default=64, help="Candidate centers per reinsertion (sampling).")
+    ap.add_argument("--lns-angle-samples", type=int, default=8, help="Angle samples per candidate reinsertion.")
+    ap.add_argument("--lns-pad-scale", type=float, default=2.0, help="Sampling padding around current bbox in multiples of 2*radius.")
+    ap.add_argument("--lns-group-moves", type=int, default=0, help="Group-rotation proposals per pass (0 disables).")
+    ap.add_argument("--lns-group-size", type=int, default=3, help="Group size for group rotations.")
+    ap.add_argument("--lns-group-trans-sigma", type=float, default=0.05, help="Group translation sigma (same units as x/y).")
+    ap.add_argument("--lns-group-rot-sigma", type=float, default=20.0, help="Group rotation sigma (deg).")
+    ap.add_argument("--lns-t-start", type=float, default=0.0, help="If >0, enable SA acceptance in LNS: start temperature.")
+    ap.add_argument("--lns-t-end", type=float, default=0.0, help="End temperature for LNS SA acceptance.")
+
     ap.add_argument("--hc-nmax", type=int, default=0, help="Apply deterministic hill-climb for n <= this threshold (0=disabled).")
     ap.add_argument("--hc-passes", type=int, default=2, help="Hill-climb passes over trees.")
     ap.add_argument("--hc-step-xy", type=float, default=0.01, help="Hill-climb translation step.")
@@ -1366,6 +1458,8 @@ def main() -> int:
                 sa_rot_sigma=args.sa_rot_sigma,
                 sa_rot_prob=args.sa_rot_prob,
                 sa_rot_prob_end=args.sa_rot_prob_end,
+                sa_swap_prob=args.sa_swap_prob,
+                sa_swap_prob_end=args.sa_swap_prob_end,
                 sa_cooling=args.sa_cooling,
                 sa_cooling_power=args.sa_cooling_power,
                 sa_trans_sigma_nexp=args.sa_trans_nexp,
@@ -1397,6 +1491,8 @@ def main() -> int:
                 refine_rot_sigma=args.refine_rot_sigma,
                 refine_rot_prob=args.refine_rot_prob,
                 refine_rot_prob_end=args.refine_rot_prob_end,
+                refine_swap_prob=args.refine_swap_prob,
+                refine_swap_prob_end=args.refine_swap_prob_end,
                 refine_cooling=args.refine_cooling,
                 refine_cooling_power=args.refine_cooling_power,
                 refine_trans_sigma_nexp=args.refine_trans_nexp,
@@ -1410,6 +1506,20 @@ def main() -> int:
                 refine_overlap_lambda=args.refine_overlap_lambda,
                 refine_allow_collisions=args.refine_allow_collisions,
                 refine_objective=args.refine_objective,
+                lns_nmax=args.lns_nmax,
+                lns_passes=args.lns_passes,
+                lns_destroy_k=args.lns_destroy_k,
+                lns_destroy_mode=args.lns_destroy_mode,
+                lns_tabu_tenure=args.lns_tabu_tenure,
+                lns_candidates=args.lns_candidates,
+                lns_angle_samples=args.lns_angle_samples,
+                lns_pad_scale=args.lns_pad_scale,
+                lns_group_moves=args.lns_group_moves,
+                lns_group_size=args.lns_group_size,
+                lns_group_trans_sigma=args.lns_group_trans_sigma,
+                lns_group_rot_sigma=args.lns_group_rot_sigma,
+                lns_t_start=args.lns_t_start,
+                lns_t_end=args.lns_t_end,
                 hc_nmax=args.hc_nmax,
                 hc_passes=args.hc_passes,
                 hc_step_xy=args.hc_step_xy,
@@ -1457,7 +1567,8 @@ def main() -> int:
 
             mother = np.array(mother, dtype=float)
             mother[:, 2] = np.mod(mother[:, 2], 360.0)
-            mother = _radial_reorder(points, mother)
+            if args.mother_reorder == "radial":
+                mother = _radial_reorder(points, mother)
 
             for n in range(1, args.nmax + 1):
                 poses = shift_poses_to_origin(points, mother[:n])
@@ -1481,6 +1592,8 @@ def main() -> int:
                     sa_rot_sigma=args.sa_rot_sigma,
                     sa_rot_prob=args.sa_rot_prob,
                     sa_rot_prob_end=args.sa_rot_prob_end,
+                    sa_swap_prob=args.sa_swap_prob,
+                    sa_swap_prob_end=args.sa_swap_prob_end,
                     sa_cooling=args.sa_cooling,
                     sa_cooling_power=args.sa_cooling_power,
                     sa_trans_sigma_nexp=args.sa_trans_nexp,
@@ -1512,6 +1625,8 @@ def main() -> int:
                     refine_rot_sigma=args.refine_rot_sigma,
                     refine_rot_prob=args.refine_rot_prob,
                     refine_rot_prob_end=args.refine_rot_prob_end,
+                    refine_swap_prob=args.refine_swap_prob,
+                    refine_swap_prob_end=args.refine_swap_prob_end,
                     refine_cooling=args.refine_cooling,
                     refine_cooling_power=args.refine_cooling_power,
                     refine_trans_sigma_nexp=args.refine_trans_nexp,
@@ -1525,6 +1640,20 @@ def main() -> int:
                     refine_overlap_lambda=args.refine_overlap_lambda,
                     refine_allow_collisions=args.refine_allow_collisions,
                     refine_objective=args.refine_objective,
+                    lns_nmax=args.lns_nmax,
+                    lns_passes=args.lns_passes,
+                    lns_destroy_k=args.lns_destroy_k,
+                    lns_destroy_mode=args.lns_destroy_mode,
+                    lns_tabu_tenure=args.lns_tabu_tenure,
+                    lns_candidates=args.lns_candidates,
+                    lns_angle_samples=args.lns_angle_samples,
+                    lns_pad_scale=args.lns_pad_scale,
+                    lns_group_moves=args.lns_group_moves,
+                    lns_group_size=args.lns_group_size,
+                    lns_group_trans_sigma=args.lns_group_trans_sigma,
+                    lns_group_rot_sigma=args.lns_group_rot_sigma,
+                    lns_t_start=args.lns_t_start,
+                    lns_t_end=args.lns_t_end,
                     hc_nmax=args.hc_nmax,
                     hc_passes=args.hc_passes,
                     hc_step_xy=args.hc_step_xy,

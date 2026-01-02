@@ -513,6 +513,66 @@ spacing = 2.0 * polygon_radius(points) * 1.2
 VIS_N = TRAIN_N_LIST[0]
 init = shift_poses_to_origin(points, grid_initial(VIS_N, spacing))
 
+# %% Solvers (needed early for sweep/eval)
+initial_cache: Dict[Tuple[int, int], np.ndarray] = {}
+
+
+def get_initial(n: int, seed: int) -> np.ndarray:
+    key = (n, seed)
+    if key not in initial_cache:
+        initial_cache[key] = make_initial(points, n, spacing, seed, INIT_MODE, RAND_SCALE)
+    return initial_cache[key]
+
+
+def solve_grid(n: int, seed: int) -> np.ndarray:
+    return get_initial(n, seed)
+
+
+def solve_sa(n: int, seed: int) -> np.ndarray:
+    init_pose = get_initial(n, seed)
+    init_batch = jnp.array(init_pose)[None, :, :]
+    key = jax.random.PRNGKey(seed)
+    best_poses, _ = run_sa_batch(
+        key,
+        SA_STEPS,
+        n,
+        init_batch,
+        trans_sigma=SA_TRANS_SIGMA,
+        rot_sigma=SA_ROT_SIGMA,
+        rot_prob=SA_ROT_PROB,
+        objective=SA_OBJECTIVE,
+    )
+    return np.array(best_poses[0])
+
+
+def solve_l2o(params, cfg: L2OConfig, *, steps: int | None = None) -> Callable[[int, int], np.ndarray]:
+    def _solve(n: int, seed: int) -> np.ndarray:
+        init_pose = get_initial(n, seed)
+        key = jax.random.PRNGKey(seed)
+        nsteps = EVAL_STEPS if steps is None else int(steps)
+        poses = optimize_with_l2o(key, params, jnp.array(init_pose), nsteps, cfg)
+        return np.array(poses)
+
+    return _solve
+
+
+def solve_l2o_refine(
+    base_solver: Callable[[int, int], np.ndarray],
+    params,
+    cfg: L2OConfig,
+    *,
+    steps: int | None = None,
+) -> Callable[[int, int], np.ndarray]:
+    def _solve(n: int, seed: int) -> np.ndarray:
+        base_pose = base_solver(n, seed)
+        key = jax.random.PRNGKey(seed)
+        nsteps = REFINE_STEPS if steps is None else int(steps)
+        poses = optimize_with_l2o(key, params, jnp.array(base_pose), nsteps, cfg)
+        return np.array(poses)
+
+    return _solve
+
+
 # %% Treino L2O (sweep -> seleciona os melhores)
 L2O_SWEEP_TOP_MODELS: Dict[str, Path] = {}
 mlp_meta: Dict[str, object] = {
@@ -1093,66 +1153,6 @@ if bc_policy_path is not None and bc_policy_path.exists():
     bc_params, bc_meta = load_params_npz(bc_policy_path)
     bc_config = l2o_config_from_meta(bc_meta, reward=REWARD, deterministic=True)
 
-# %% Solvers
-initial_cache: Dict[Tuple[int, int], np.ndarray] = {}
-
-
-def get_initial(n: int, seed: int) -> np.ndarray:
-    key = (n, seed)
-    if key not in initial_cache:
-        initial_cache[key] = make_initial(points, n, spacing, seed, INIT_MODE, RAND_SCALE)
-    return initial_cache[key]
-
-
-def solve_grid(n: int, seed: int) -> np.ndarray:
-    return get_initial(n, seed)
-
-
-def solve_sa(n: int, seed: int) -> np.ndarray:
-    init_pose = get_initial(n, seed)
-    init_batch = jnp.array(init_pose)[None, :, :]
-    key = jax.random.PRNGKey(seed)
-    best_poses, _ = run_sa_batch(
-        key,
-        SA_STEPS,
-        n,
-        init_batch,
-        trans_sigma=SA_TRANS_SIGMA,
-        rot_sigma=SA_ROT_SIGMA,
-        rot_prob=SA_ROT_PROB,
-        objective=SA_OBJECTIVE,
-    )
-    return np.array(best_poses[0])
-
-
-def solve_l2o(params, cfg: L2OConfig, *, steps: int | None = None) -> Callable[[int, int], np.ndarray]:
-    def _solve(n: int, seed: int) -> np.ndarray:
-        init_pose = get_initial(n, seed)
-        key = jax.random.PRNGKey(seed)
-        nsteps = EVAL_STEPS if steps is None else int(steps)
-        poses = optimize_with_l2o(key, params, jnp.array(init_pose), nsteps, cfg)
-        return np.array(poses)
-
-    return _solve
-
-
-def solve_l2o_refine(
-    base_solver: Callable[[int, int], np.ndarray],
-    params,
-    cfg: L2OConfig,
-    *,
-    steps: int | None = None,
-) -> Callable[[int, int], np.ndarray]:
-    def _solve(n: int, seed: int) -> np.ndarray:
-        base_pose = base_solver(n, seed)
-        key = jax.random.PRNGKey(seed)
-        nsteps = REFINE_STEPS if steps is None else int(steps)
-        poses = optimize_with_l2o(key, params, jnp.array(base_pose), nsteps, cfg)
-        return np.array(poses)
-
-    return _solve
-
-
 def solve_meta_init_sa(n: int, seed: int) -> np.ndarray:
     if meta_init_path is None or not meta_init_path.exists():
         return solve_sa(n, seed)
@@ -1461,7 +1461,7 @@ SUBMISSION_NMAX = 200
 SUBMISSION_SEED = 1
 SUBMISSION_OVERLAP_CHECK = True  # para score final, mantenha True
 
-RUN_SUBMISSION_SWEEP = True  # True = gera/score varias receitas + seeds
+RUN_SUBMISSION_SWEEP = False  # True = gera/score varias receitas + seeds
 SWEEP_NMAX = 50  # use 200 para score final
 SWEEP_SEEDS: List[int] | str = "1..4"
 SWEEP_SCORE_OVERLAP_CHECK = False  # durante sweep rapido, pode ser False; no final use True
@@ -1612,6 +1612,819 @@ for name, path in sorted(L2O_SWEEP_TOP_MODELS.items()):
 CANDIDATE_GUIDED_MODELS: Dict[str, Path] = dict(CANDIDATE_L2O_MODELS)
 
 
+# %% [markdown]
+# ## Experimentos de submission (1 célula = 1 experimento)
+#
+# Objetivo: cada célula abaixo gera um `submission.csv` (via `scripts/generate_submission.py`)
+# e já imprime o **score do desafio** (métrica do Kaggle) calculado por `scripts/score_submission.py`.
+#
+# Dica: deixe `REUSE=True` para não re-gerar CSVs já existentes.
+# %%
+SUBMISSION_NMAX = 200
+SUBMISSION_SEED = 1
+SUBMISSION_OVERLAP_CHECK = True
+REUSE = True
+
+SUBMISSION_CELL_DIR = RUN_DIR / "submission_cells"
+SUBMISSION_CELL_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _sanitize_name(name: str) -> str:
+    out = []
+    for ch in str(name).strip():
+        if ch.isalnum() or ch in {"-", "_", "."}:
+            out.append(ch)
+        else:
+            out.append("_")
+    cleaned = "".join(out).strip("._-")
+    return cleaned or "exp"
+
+
+def _path_exists(value: object) -> bool:
+    if value is None:
+        return False
+    try:
+        p = Path(str(value))
+    except Exception:
+        return False
+    return p.exists()
+
+
+def _check_required_models(args: Dict[str, object]) -> tuple[bool, list[str]]:
+    missing: list[str] = []
+    for k, v in args.items():
+        if v is None:
+            continue
+        if k.endswith("_model") or k == "guided_model":
+            if not _path_exists(v):
+                missing.append(k)
+    return (len(missing) == 0), missing
+
+
+def run_submission_experiment(
+    name: str,
+    args: Dict[str, object],
+    *,
+    seed: int = SUBMISSION_SEED,
+    nmax: int = SUBMISSION_NMAX,
+    check_overlap: bool = SUBMISSION_OVERLAP_CHECK,
+    reuse: bool = REUSE,
+) -> Dict[str, object] | None:
+    exp = _sanitize_name(name)
+    ok, missing = _check_required_models(args)
+    if not ok:
+        print(f"[skip] {exp} (modelos ausentes: {missing})")
+        return None
+
+    out_csv = SUBMISSION_CELL_DIR / f"{exp}_seed{int(seed)}_n{int(nmax)}.csv"
+    out_score = SUBMISSION_CELL_DIR / f"{exp}_seed{int(seed)}_n{int(nmax)}.score.json"
+    out_meta = SUBMISSION_CELL_DIR / f"{exp}_seed{int(seed)}_n{int(nmax)}.meta.json"
+
+    if not (reuse and out_csv.exists()):
+        generate_submission(out_csv, seed=int(seed), nmax=int(nmax), args=args)
+
+    score = score_csv(out_csv, nmax=int(nmax), check_overlap=bool(check_overlap))
+    out_score.write_text(json.dumps(score, indent=2), encoding="utf-8")
+    out_meta.write_text(
+        json.dumps(
+            {
+                "name": name,
+                "exp": exp,
+                "seed": int(seed),
+                "nmax": int(nmax),
+                "check_overlap": bool(check_overlap),
+                "csv": str(out_csv),
+                "args": args,
+            },
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+
+    val = score.get("score")
+    s_max = score.get("s_max")
+    print(f"[{exp}] score={val}  s_max={s_max}  csv={out_csv.name}")
+    return score
+
+
+# Base "vazio": lattice como fallback. Cada experimento sobrescreve o que precisa.
+BASE_ARGS: Dict[str, object] = {
+    "mother_prefix": False,
+    "mother_reorder": "radial",
+    "lattice_pattern": "hex",
+    "lattice_margin": 0.02,
+    "lattice_rotate": 0.0,
+    "lattice_rotations": "0,15,30",
+    "sa_nmax": 0,
+    "sa_batch": 64,
+    "sa_steps": 400,
+    "sa_trans_sigma": 0.2,
+    "sa_rot_sigma": 15.0,
+    "sa_rot_prob": 0.3,
+    "sa_rot_prob_end": -1.0,
+    "sa_swap_prob": 0.0,
+    "sa_swap_prob_end": -1.0,
+    "sa_cooling": "geom",
+    "sa_cooling_power": 1.0,
+    "sa_trans_nexp": 0.0,
+    "sa_rot_nexp": 0.0,
+    "sa_sigma_nref": 50.0,
+    "sa_objective": "packing",
+    "sa_proposal": "random",
+    "sa_smart_prob": 1.0,
+    "sa_smart_beta": 8.0,
+    "sa_smart_drift": 1.0,
+    "sa_smart_noise": 0.25,
+    "sa_overlap_lambda": 0.0,
+    "sa_allow_collisions": False,
+    "meta_init_model": None,
+    "heatmap_model": None,
+    "heatmap_nmax": 0,
+    "heatmap_steps": 200,
+    "l2o_model": None,
+    "l2o_init": "lattice",
+    "l2o_nmax": 0,
+    "l2o_steps": 250,
+    "l2o_trans_sigma": 0.2,
+    "l2o_rot_sigma": 10.0,
+    "l2o_deterministic": True,
+    "refine_nmin": 0,
+    "refine_batch": 16,
+    "refine_steps": 0,
+    "refine_trans_sigma": 0.2,
+    "refine_rot_sigma": 15.0,
+    "refine_rot_prob": 0.3,
+    "refine_rot_prob_end": -1.0,
+    "refine_swap_prob": 0.0,
+    "refine_swap_prob_end": -1.0,
+    "refine_cooling": "geom",
+    "refine_cooling_power": 1.0,
+    "refine_trans_nexp": 0.0,
+    "refine_rot_nexp": 0.0,
+    "refine_sigma_nref": 50.0,
+    "refine_objective": "packing",
+    "refine_proposal": "random",
+    "refine_smart_prob": 1.0,
+    "refine_smart_beta": 8.0,
+    "refine_smart_drift": 1.0,
+    "refine_smart_noise": 0.25,
+    "refine_overlap_lambda": 0.0,
+    "refine_allow_collisions": False,
+    "lns_nmax": 0,
+    "lns_passes": 0,
+    "lns_destroy_k": 8,
+    "lns_destroy_mode": "mixed",
+    "lns_tabu_tenure": 0,
+    "lns_candidates": 64,
+    "lns_angle_samples": 8,
+    "lns_pad_scale": 2.0,
+    "lns_group_moves": 0,
+    "lns_group_size": 3,
+    "lns_group_trans_sigma": 0.05,
+    "lns_group_rot_sigma": 20.0,
+    "lns_t_start": 0.0,
+    "lns_t_end": 0.0,
+    "guided_model": None,
+    "guided_prob": 1.0,
+    "guided_pmax": 0.05,
+    "guided_prob_end": -1.0,
+    "guided_pmax_end": -1.0,
+    "block_nmax": 0,
+    "block_size": 2,
+    "block_batch": 32,
+    "block_steps": 0,
+    "block_trans_sigma": 0.2,
+    "block_rot_sigma": 15.0,
+    "block_rot_prob": 0.25,
+    "block_rot_prob_end": -1.0,
+    "block_cooling": "geom",
+    "block_cooling_power": 1.0,
+    "block_trans_nexp": 0.0,
+    "block_rot_nexp": 0.0,
+    "block_sigma_nref": 50.0,
+    "block_overlap_lambda": 0.0,
+    "block_allow_collisions": False,
+    "block_objective": "packing",
+    "block_init": "cluster",
+    "block_template_pattern": "hex",
+    "block_template_margin": 0.02,
+    "block_template_rotate": 0.0,
+    "hc_nmax": 0,
+    "hc_passes": 0,
+    "hc_step_xy": 0.01,
+    "hc_step_deg": 2.0,
+    "ga_nmax": 0,
+    "ga_pop": 24,
+    "ga_gens": 0,
+    "ga_elite_frac": 0.25,
+    "ga_crossover_prob": 0.5,
+    "ga_mut_sigma_xy": 0.01,
+    "ga_mut_sigma_deg": 2.0,
+    "ga_directed_prob": 0.5,
+    "ga_directed_step_xy": 0.02,
+    "ga_directed_k": 8,
+    "ga_repair_iters": 200,
+    "ga_hc_passes": 0,
+    "ga_hc_step_xy": 0.01,
+    "ga_hc_step_deg": 2.0,
+}
+
+
+# %% [markdown]
+# ## Baselines (lattice)
+# %%
+
+# %% (lattice_hex_rots0_15_30)
+args = {**BASE_ARGS, "sa_nmax": 0, "lattice_pattern": "hex", "lattice_margin": 0.02, "lattice_rotations": "0,15,30"}
+run_submission_experiment("lattice_hex_rots0_15_30", args)
+
+# %% (lattice_hex_rots0_5_10_15_20_25_30)
+args = {**BASE_ARGS, "sa_nmax": 0, "lattice_pattern": "hex", "lattice_margin": 0.005, "lattice_rotations": "0,5,10,15,20,25,30"}
+run_submission_experiment("lattice_hex_rots0_5_10_15_20_25_30", args)
+
+# %% (lattice_square_rots0_15_30)
+args = {**BASE_ARGS, "sa_nmax": 0, "lattice_pattern": "square", "lattice_margin": 0.02, "lattice_rotations": "0,15,30"}
+run_submission_experiment("lattice_square_rots0_15_30", args)
+
+# %% (lattice_hex_const_rot15)
+args = {**BASE_ARGS, "sa_nmax": 0, "lattice_pattern": "hex", "lattice_margin": 0.02, "lattice_rotations": "none", "lattice_rotate": 15.0}
+run_submission_experiment("lattice_hex_const_rot15", args)
+
+
+# %% [markdown]
+# ## SA (Simulated Annealing)
+# %%
+
+# %% (sa_packing_random_geom)
+args = {
+    **BASE_ARGS,
+    "sa_nmax": 50,
+    "sa_steps": 800,
+    "sa_batch": 64,
+    "sa_objective": "packing",
+    "sa_proposal": "random",
+    "sa_cooling": "geom",
+}
+run_submission_experiment("sa_packing_random_geom", args)
+
+# %% (sa_packing_mixed_log)
+args = {
+    **BASE_ARGS,
+    "sa_nmax": 50,
+    "sa_steps": 800,
+    "sa_batch": 64,
+    "sa_objective": "packing",
+    "sa_proposal": "mixed",
+    "sa_cooling": "log",
+    "sa_smart_prob": 0.7,
+}
+run_submission_experiment("sa_packing_mixed_log", args)
+
+# %% (sa_packing_bbox_inward_geom)
+args = {
+    **BASE_ARGS,
+    "sa_nmax": 50,
+    "sa_steps": 800,
+    "sa_batch": 64,
+    "sa_objective": "packing",
+    "sa_proposal": "bbox_inward",
+    "sa_cooling": "geom",
+}
+run_submission_experiment("sa_packing_bbox_inward_geom", args)
+
+# %% (sa_prefix_mixed_log_swap)
+args = {
+    **BASE_ARGS,
+    "sa_nmax": 50,
+    "sa_steps": 900,
+    "sa_batch": 64,
+    "sa_objective": "prefix",
+    "sa_proposal": "mixed",
+    "sa_cooling": "log",
+    "sa_swap_prob": 0.05,
+    "sa_swap_prob_end": 0.0,
+    "sa_smart_prob": 0.7,
+}
+run_submission_experiment("sa_prefix_mixed_log_swap", args)
+
+# %% (sa_prefix_smart_log_swap)
+args = {
+    **BASE_ARGS,
+    "sa_nmax": 50,
+    "sa_steps": 900,
+    "sa_batch": 64,
+    "sa_objective": "prefix",
+    "sa_proposal": "smart",
+    "sa_cooling": "log",
+    "sa_swap_prob": 0.05,
+    "sa_swap_prob_end": 0.0,
+    "sa_smart_prob": 1.0,
+}
+run_submission_experiment("sa_prefix_smart_log_swap", args)
+
+# %% (sa_prefix_mixed_log_overlap001)
+args = {
+    **BASE_ARGS,
+    "sa_nmax": 50,
+    "sa_steps": 900,
+    "sa_batch": 64,
+    "sa_objective": "prefix",
+    "sa_proposal": "mixed",
+    "sa_cooling": "log",
+    "sa_swap_prob": 0.05,
+    "sa_swap_prob_end": 0.0,
+    "sa_overlap_lambda": 0.01,
+    "sa_smart_prob": 0.7,
+}
+run_submission_experiment("sa_prefix_mixed_log_overlap001", args)
+
+
+# %% [markdown]
+# ## Refine (SA sobre o lattice/solver base)
+# %%
+
+# %% (refine_packing_mixed_geom)
+args = {
+    **BASE_ARGS,
+    "refine_nmin": 80,
+    "refine_steps": 800,
+    "refine_batch": 24,
+    "refine_objective": "packing",
+    "refine_proposal": "mixed",
+    "refine_cooling": "geom",
+    "refine_smart_prob": 0.7,
+}
+run_submission_experiment("refine_packing_mixed_geom", args)
+
+# %% (refine_prefix_mixed_log)
+args = {
+    **BASE_ARGS,
+    "refine_nmin": 80,
+    "refine_steps": 900,
+    "refine_batch": 24,
+    "refine_objective": "prefix",
+    "refine_proposal": "mixed",
+    "refine_cooling": "log",
+    "refine_smart_prob": 0.7,
+}
+run_submission_experiment("refine_prefix_mixed_log", args)
+
+# %% (refine_prefix_mixed_log_overlap001)
+args = {
+    **BASE_ARGS,
+    "refine_nmin": 80,
+    "refine_steps": 900,
+    "refine_batch": 24,
+    "refine_objective": "prefix",
+    "refine_proposal": "mixed",
+    "refine_cooling": "log",
+    "refine_overlap_lambda": 0.01,
+    "refine_smart_prob": 0.7,
+}
+run_submission_experiment("refine_prefix_mixed_log_overlap001", args)
+
+# %% (refine_prefix_bbox_inward_log)
+args = {
+    **BASE_ARGS,
+    "refine_nmin": 80,
+    "refine_steps": 900,
+    "refine_batch": 24,
+    "refine_objective": "prefix",
+    "refine_proposal": "bbox_inward",
+    "refine_cooling": "log",
+}
+run_submission_experiment("refine_prefix_bbox_inward_log", args)
+
+
+# %% [markdown]
+# ## Block SA (meta-model)
+# %%
+
+# %% (block_cluster_b2_prefix)
+args = {
+    **BASE_ARGS,
+    "block_nmax": 200,
+    "block_init": "cluster",
+    "block_size": 2,
+    "block_steps": 350,
+    "block_batch": 32,
+    "block_objective": "prefix",
+}
+run_submission_experiment("block_cluster_b2_prefix", args)
+
+# %% (block_cluster_b3_prefix)
+args = {
+    **BASE_ARGS,
+    "block_nmax": 200,
+    "block_init": "cluster",
+    "block_size": 3,
+    "block_steps": 350,
+    "block_batch": 32,
+    "block_objective": "prefix",
+}
+run_submission_experiment("block_cluster_b3_prefix", args)
+
+# %% (block_cluster_b4_prefix)
+args = {
+    **BASE_ARGS,
+    "block_nmax": 200,
+    "block_init": "cluster",
+    "block_size": 4,
+    "block_steps": 350,
+    "block_batch": 32,
+    "block_objective": "prefix",
+}
+run_submission_experiment("block_cluster_b4_prefix", args)
+
+# %% (block_template_hex_b2_prefix)
+args = {
+    **BASE_ARGS,
+    "block_nmax": 200,
+    "block_init": "template",
+    "block_template_pattern": "hex",
+    "block_template_margin": 0.02,
+    "block_template_rotate": 0.0,
+    "block_size": 2,
+    "block_steps": 350,
+    "block_batch": 32,
+    "block_objective": "prefix",
+}
+run_submission_experiment("block_template_hex_b2_prefix", args)
+
+# %% (block_template_square_b2_prefix)
+args = {
+    **BASE_ARGS,
+    "block_nmax": 200,
+    "block_init": "template",
+    "block_template_pattern": "square",
+    "block_template_margin": 0.02,
+    "block_template_rotate": 0.0,
+    "block_size": 2,
+    "block_steps": 350,
+    "block_batch": 32,
+    "block_objective": "prefix",
+}
+run_submission_experiment("block_template_square_b2_prefix", args)
+
+
+# %% [markdown]
+# ## LNS / ALNS (post-opt)
+# %%
+
+# %% (lns_mixed)
+args = {**BASE_ARGS, "lns_nmax": 200, "lns_passes": 10, "lns_destroy_mode": "mixed", "lns_destroy_k": 8, "lns_group_moves": 4}
+run_submission_experiment("lns_mixed", args)
+
+# %% (lns_mixed_tabu5)
+args = {**BASE_ARGS, "lns_nmax": 200, "lns_passes": 10, "lns_destroy_mode": "mixed", "lns_tabu_tenure": 5, "lns_destroy_k": 8, "lns_group_moves": 4}
+run_submission_experiment("lns_mixed_tabu5", args)
+
+# %% (lns_boundary_tabu5)
+args = {**BASE_ARGS, "lns_nmax": 200, "lns_passes": 10, "lns_destroy_mode": "boundary", "lns_tabu_tenure": 5, "lns_destroy_k": 10, "lns_group_moves": 4}
+run_submission_experiment("lns_boundary_tabu5", args)
+
+# %% (lns_cluster_tabu5)
+args = {**BASE_ARGS, "lns_nmax": 200, "lns_passes": 10, "lns_destroy_mode": "cluster", "lns_tabu_tenure": 5, "lns_destroy_k": 10, "lns_group_moves": 4}
+run_submission_experiment("lns_cluster_tabu5", args)
+
+# %% (lns_random)
+args = {**BASE_ARGS, "lns_nmax": 200, "lns_passes": 10, "lns_destroy_mode": "random", "lns_destroy_k": 8, "lns_group_moves": 4}
+run_submission_experiment("lns_random", args)
+
+# %% (lns_alns)
+args = {**BASE_ARGS, "lns_nmax": 200, "lns_passes": 10, "lns_destroy_mode": "alns", "lns_destroy_k": 8, "lns_group_moves": 4}
+run_submission_experiment("lns_alns", args)
+
+# %% (lns_alns_tabu5)
+args = {**BASE_ARGS, "lns_nmax": 200, "lns_passes": 10, "lns_destroy_mode": "alns", "lns_tabu_tenure": 5, "lns_destroy_k": 8, "lns_group_moves": 4}
+run_submission_experiment("lns_alns_tabu5", args)
+
+# %% (lns_alns_sa_accept_tabu10)
+args = {
+    **BASE_ARGS,
+    "lns_nmax": 200,
+    "lns_passes": 20,
+    "lns_destroy_mode": "alns",
+    "lns_tabu_tenure": 10,
+    "lns_destroy_k": 10,
+    "lns_candidates": 96,
+    "lns_angle_samples": 12,
+    "lns_group_moves": 6,
+    "lns_group_size": 4,
+    "lns_t_start": 0.2,
+    "lns_t_end": 0.02,
+}
+run_submission_experiment("lns_alns_sa_accept_tabu10", args)
+
+
+# %% [markdown]
+# ## GA / Hill-climb (n pequeno)
+# %%
+
+# %% (hc20_lattice)
+args = {**BASE_ARGS, "hc_nmax": 20, "hc_passes": 2, "hc_step_xy": 0.01, "hc_step_deg": 2.0}
+run_submission_experiment("hc20_lattice", args)
+
+# %% (ga20_lattice)
+args = {**BASE_ARGS, "ga_nmax": 20, "ga_gens": 20, "ga_pop": 24, "ga_mut_sigma_xy": 0.01, "ga_mut_sigma_deg": 2.0}
+run_submission_experiment("ga20_lattice", args)
+
+# %% (sa20_ga20)
+args = {
+    **BASE_ARGS,
+    "sa_nmax": 20,
+    "sa_steps": 600,
+    "sa_batch": 64,
+    "sa_objective": "packing",
+    "sa_proposal": "mixed",
+    "sa_cooling": "geom",
+    "ga_nmax": 20,
+    "ga_gens": 20,
+    "ga_pop": 24,
+}
+run_submission_experiment("sa20_ga20", args)
+
+
+# %% [markdown]
+# ## Pipelines combinados (SA/block + refine + (A)LNS)
+# %%
+
+# %% (sa50_ref80_prefix)
+args = {**BASE_ARGS, "sa_nmax": 50, "sa_steps": 800, "sa_batch": 64, "sa_objective": "prefix", "sa_proposal": "mixed", "sa_cooling": "log", "sa_swap_prob": 0.05, "sa_swap_prob_end": 0.0, "refine_nmin": 80, "refine_steps": 900, "refine_batch": 24, "refine_objective": "prefix", "refine_proposal": "mixed", "refine_cooling": "log"}
+run_submission_experiment("sa50_ref80_prefix", args)
+
+# %% (sa50_ref80_prefix_lns_alns_tabu5)
+args = {
+    **BASE_ARGS,
+    "sa_nmax": 50,
+    "sa_steps": 800,
+    "sa_batch": 64,
+    "sa_objective": "prefix",
+    "sa_proposal": "mixed",
+    "sa_cooling": "log",
+    "sa_swap_prob": 0.05,
+    "sa_swap_prob_end": 0.0,
+    "refine_nmin": 80,
+    "refine_steps": 900,
+    "refine_batch": 24,
+    "refine_objective": "prefix",
+    "refine_proposal": "mixed",
+    "refine_cooling": "log",
+    "lns_nmax": 200,
+    "lns_passes": 10,
+    "lns_destroy_mode": "alns",
+    "lns_tabu_tenure": 5,
+    "lns_group_moves": 4,
+}
+run_submission_experiment("sa50_ref80_prefix_lns_alns_tabu5", args)
+
+# %% (block_b2_ref200_prefix_lns_alns_tabu5)
+args = {
+    **BASE_ARGS,
+    "block_nmax": 200,
+    "block_init": "cluster",
+    "block_size": 2,
+    "block_steps": 350,
+    "block_batch": 32,
+    "block_objective": "prefix",
+    "lns_nmax": 200,
+    "lns_passes": 10,
+    "lns_destroy_mode": "alns",
+    "lns_tabu_tenure": 5,
+    "lns_group_moves": 4,
+    "refine_nmin": 200,
+    "refine_steps": 1200,
+    "refine_batch": 64,
+    "refine_objective": "prefix",
+    "refine_proposal": "mixed",
+    "refine_cooling": "log",
+}
+run_submission_experiment("block_b2_ref200_prefix_lns_alns_tabu5", args)
+
+
+# %% [markdown]
+# ## Model-based (meta-init / heatmap / L2O / guided)
+# %%
+
+# %% (meta_init_sa_prefix)  # requer meta_init_path existir
+args = {
+    **BASE_ARGS,
+    "meta_init_model": str(meta_init_path) if (meta_init_path is not None and meta_init_path.exists()) else None,
+    "sa_nmax": 50,
+    "sa_steps": 900,
+    "sa_batch": 64,
+    "sa_objective": "prefix",
+    "sa_proposal": "mixed",
+    "sa_cooling": "log",
+    "sa_swap_prob": 0.05,
+    "sa_swap_prob_end": 0.0,
+}
+run_submission_experiment("meta_init_sa_prefix", args)
+
+# %% (heatmap20_only)  # requer heatmap_path existir
+args = {
+    **BASE_ARGS,
+    "heatmap_model": str(heatmap_path) if (heatmap_path is not None and heatmap_path.exists()) else None,
+    "heatmap_nmax": 20,
+    "heatmap_steps": 250,
+}
+run_submission_experiment("heatmap20_only", args)
+
+# %% (heatmap20_sa50_ref80_prefix)  # requer heatmap_path existir
+args = {
+    **BASE_ARGS,
+    "heatmap_model": str(heatmap_path) if (heatmap_path is not None and heatmap_path.exists()) else None,
+    "heatmap_nmax": 20,
+    "heatmap_steps": 250,
+    "sa_nmax": 50,
+    "sa_steps": 800,
+    "sa_batch": 64,
+    "sa_objective": "prefix",
+    "sa_proposal": "mixed",
+    "sa_cooling": "log",
+    "sa_swap_prob": 0.05,
+    "sa_swap_prob_end": 0.0,
+    "refine_nmin": 80,
+    "refine_steps": 900,
+    "refine_batch": 24,
+    "refine_objective": "prefix",
+    "refine_proposal": "mixed",
+    "refine_cooling": "log",
+}
+run_submission_experiment("heatmap20_sa50_ref80_prefix", args)
+
+# %% (l2o20_gnn)  # requer policy treinada existir (GNN_POLICY_PATH)
+args = {
+    **BASE_ARGS,
+    "l2o_model": str(GNN_POLICY_PATH) if GNN_POLICY_PATH.exists() else None,
+    "l2o_init": "lattice",
+    "l2o_nmax": 20,
+    "l2o_steps": 300,
+    "l2o_deterministic": True,
+}
+run_submission_experiment("l2o20_gnn", args)
+
+# %% (guided_refine_gnn_lns_alns_tabu5)  # requer policy existir
+args = {
+    **BASE_ARGS,
+    "guided_model": str(GNN_POLICY_PATH) if GNN_POLICY_PATH.exists() else None,
+    "guided_prob": 1.0,
+    "guided_pmax": 0.05,
+    "sa_nmax": 50,
+    "sa_steps": 800,
+    "sa_batch": 64,
+    "sa_objective": "prefix",
+    "sa_proposal": "mixed",
+    "sa_cooling": "log",
+    "sa_swap_prob": 0.05,
+    "sa_swap_prob_end": 0.0,
+    "refine_nmin": 80,
+    "refine_steps": 900,
+    "refine_batch": 24,
+    "refine_objective": "prefix",
+    "refine_proposal": "mixed",
+    "refine_cooling": "log",
+    "lns_nmax": 200,
+    "lns_passes": 10,
+    "lns_destroy_mode": "alns",
+    "lns_tabu_tenure": 5,
+    "lns_group_moves": 4,
+}
+run_submission_experiment("guided_refine_gnn_lns_alns_tabu5", args)
+
+# %% (l2o20_mlp)  # requer policy treinada existir (MLP_POLICY_PATH)
+args = {
+    **BASE_ARGS,
+    "l2o_model": str(MLP_POLICY_PATH) if MLP_POLICY_PATH.exists() else None,
+    "l2o_init": "lattice",
+    "l2o_nmax": 20,
+    "l2o_steps": 300,
+    "l2o_deterministic": True,
+}
+run_submission_experiment("l2o20_mlp", args)
+
+# %% (guided_refine_mlp_lns_alns_tabu5)  # requer policy existir
+args = {
+    **BASE_ARGS,
+    "guided_model": str(MLP_POLICY_PATH) if MLP_POLICY_PATH.exists() else None,
+    "guided_prob": 1.0,
+    "guided_pmax": 0.05,
+    "sa_nmax": 50,
+    "sa_steps": 800,
+    "sa_batch": 64,
+    "sa_objective": "prefix",
+    "sa_proposal": "mixed",
+    "sa_cooling": "log",
+    "sa_swap_prob": 0.05,
+    "sa_swap_prob_end": 0.0,
+    "refine_nmin": 80,
+    "refine_steps": 900,
+    "refine_batch": 24,
+    "refine_objective": "prefix",
+    "refine_proposal": "mixed",
+    "refine_cooling": "log",
+    "lns_nmax": 200,
+    "lns_passes": 10,
+    "lns_destroy_mode": "alns",
+    "lns_tabu_tenure": 5,
+    "lns_group_moves": 4,
+}
+run_submission_experiment("guided_refine_mlp_lns_alns_tabu5", args)
+
+# %% (l2o20_bc)  # requer bc_policy_path existir
+args = {
+    **BASE_ARGS,
+    "l2o_model": str(bc_policy_path) if (bc_policy_path is not None and bc_policy_path.exists()) else None,
+    "l2o_init": "lattice",
+    "l2o_nmax": 20,
+    "l2o_steps": 300,
+    "l2o_deterministic": True,
+}
+run_submission_experiment("l2o20_bc", args)
+
+# %% (guided_refine_bc_lns_alns_tabu5)  # requer bc_policy_path existir
+args = {
+    **BASE_ARGS,
+    "guided_model": str(bc_policy_path) if (bc_policy_path is not None and bc_policy_path.exists()) else None,
+    "guided_prob": 1.0,
+    "guided_pmax": 0.05,
+    "sa_nmax": 50,
+    "sa_steps": 800,
+    "sa_batch": 64,
+    "sa_objective": "prefix",
+    "sa_proposal": "mixed",
+    "sa_cooling": "log",
+    "sa_swap_prob": 0.05,
+    "sa_swap_prob_end": 0.0,
+    "refine_nmin": 80,
+    "refine_steps": 900,
+    "refine_batch": 24,
+    "refine_objective": "prefix",
+    "refine_proposal": "mixed",
+    "refine_cooling": "log",
+    "lns_nmax": 200,
+    "lns_passes": 10,
+    "lns_destroy_mode": "alns",
+    "lns_tabu_tenure": 5,
+    "lns_group_moves": 4,
+}
+run_submission_experiment("guided_refine_bc_lns_alns_tabu5", args)
+
+
+# %% [markdown]
+# ## Mother-prefix (resolve N=200 uma vez e emite prefixes)
+# %%
+
+# %% (mother_refine2000_prefix)
+args = {
+    **BASE_ARGS,
+    "mother_prefix": True,
+    "mother_reorder": "radial",
+    "sa_nmax": 0,
+    "refine_nmin": 200,
+    "refine_steps": 2000,
+    "refine_batch": 64,
+    "refine_objective": "prefix",
+    "refine_proposal": "mixed",
+    "refine_cooling": "log",
+    "refine_trans_sigma": 0.35,
+    "refine_rot_sigma": 25.0,
+    "refine_rot_prob": 0.4,
+    "refine_rot_prob_end": 0.1,
+}
+run_submission_experiment("mother_refine2000_prefix", args)
+
+# %% (mother_block_alns_tabu_refine2000_prefix)
+args = {
+    **BASE_ARGS,
+    "mother_prefix": True,
+    "mother_reorder": "radial",
+    "block_nmax": 200,
+    "block_init": "cluster",
+    "block_size": 2,
+    "block_steps": 500,
+    "block_batch": 32,
+    "block_objective": "prefix",
+    "lns_nmax": 200,
+    "lns_passes": 10,
+    "lns_destroy_mode": "alns",
+    "lns_tabu_tenure": 5,
+    "lns_group_moves": 4,
+    "refine_nmin": 200,
+    "refine_steps": 2000,
+    "refine_batch": 64,
+    "refine_objective": "prefix",
+    "refine_proposal": "mixed",
+    "refine_cooling": "log",
+    "refine_trans_sigma": 0.35,
+    "refine_rot_sigma": 25.0,
+    "refine_rot_prob": 0.4,
+    "refine_rot_prob_end": 0.1,
+}
+run_submission_experiment("mother_block_alns_tabu_refine2000_prefix", args)
+
+
 def _stable_hash_dict(data: Dict[str, object]) -> str:
     blob = json.dumps(data, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha1(blob).hexdigest()[:10]
@@ -1632,7 +2445,22 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
         "sa_trans_sigma": 0.2,
         "sa_rot_sigma": 15.0,
         "sa_rot_prob": 0.3,
+        "sa_rot_prob_end": -1.0,
+        "sa_swap_prob": 0.0,
+        "sa_swap_prob_end": -1.0,
+        "sa_cooling": "geom",
+        "sa_cooling_power": 1.0,
+        "sa_trans_nexp": 0.0,
+        "sa_rot_nexp": 0.0,
+        "sa_sigma_nref": 50.0,
         "sa_objective": "packing",
+        "sa_proposal": "random",
+        "sa_smart_prob": 1.0,
+        "sa_smart_beta": 8.0,
+        "sa_smart_drift": 1.0,
+        "sa_smart_noise": 0.25,
+        "sa_overlap_lambda": 0.0,
+        "sa_allow_collisions": False,
         "meta_init_model": None,
         "heatmap_model": None,
         "heatmap_nmax": 0,
@@ -1647,16 +2475,50 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
         "lattice_pattern": "hex",
         "lattice_margin": 0.02,
         "lattice_rotate": 0.0,
+        "lattice_rotations": "0,15,30",
+        "mother_prefix": False,
+        "mother_reorder": "radial",
         "refine_nmin": 0,
         "refine_batch": 16,
         "refine_steps": 0,
         "refine_trans_sigma": 0.2,
         "refine_rot_sigma": 15.0,
         "refine_rot_prob": 0.3,
+        "refine_rot_prob_end": -1.0,
+        "refine_swap_prob": 0.0,
+        "refine_swap_prob_end": -1.0,
+        "refine_cooling": "geom",
+        "refine_cooling_power": 1.0,
+        "refine_trans_nexp": 0.0,
+        "refine_rot_nexp": 0.0,
+        "refine_sigma_nref": 50.0,
         "refine_objective": "packing",
+        "refine_proposal": "random",
+        "refine_smart_prob": 1.0,
+        "refine_smart_beta": 8.0,
+        "refine_smart_drift": 1.0,
+        "refine_smart_noise": 0.25,
+        "refine_overlap_lambda": 0.0,
+        "refine_allow_collisions": False,
+        "lns_nmax": 0,
+        "lns_passes": 0,
+        "lns_destroy_k": 8,
+        "lns_destroy_mode": "mixed",
+        "lns_tabu_tenure": 0,
+        "lns_candidates": 64,
+        "lns_angle_samples": 8,
+        "lns_pad_scale": 2.0,
+        "lns_group_moves": 0,
+        "lns_group_size": 3,
+        "lns_group_trans_sigma": 0.05,
+        "lns_group_rot_sigma": 20.0,
+        "lns_t_start": 0.0,
+        "lns_t_end": 0.0,
         "guided_model": None,
         "guided_prob": 1.0,
         "guided_pmax": 0.05,
+        "guided_prob_end": -1.0,
+        "guided_pmax_end": -1.0,
         "block_nmax": 0,
         "block_size": 2,
         "block_batch": 32,
@@ -1664,92 +2526,355 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
         "block_trans_sigma": 0.2,
         "block_rot_sigma": 15.0,
         "block_rot_prob": 0.25,
+        "block_rot_prob_end": -1.0,
+        "block_cooling": "geom",
+        "block_cooling_power": 1.0,
+        "block_trans_nexp": 0.0,
+        "block_rot_nexp": 0.0,
+        "block_sigma_nref": 50.0,
+        "block_overlap_lambda": 0.0,
+        "block_allow_collisions": False,
         "block_objective": "packing",
         "block_init": "cluster",
         "block_template_pattern": "hex",
         "block_template_margin": 0.02,
         "block_template_rotate": 0.0,
+        "hc_nmax": 0,
+        "hc_passes": 2,
+        "hc_step_xy": 0.01,
+        "hc_step_deg": 2.0,
+        "ga_nmax": 0,
+        "ga_pop": 24,
+        "ga_gens": 20,
+        "ga_elite_frac": 0.25,
+        "ga_crossover_prob": 0.5,
+        "ga_mut_sigma_xy": 0.01,
+        "ga_mut_sigma_deg": 2.0,
+        "ga_directed_prob": 0.5,
+        "ga_directed_step_xy": 0.02,
+        "ga_directed_k": 8,
+        "ga_repair_iters": 200,
+        "ga_hc_passes": 0,
+        "ga_hc_step_xy": 0.01,
+        "ga_hc_step_deg": 2.0,
     }
 
     # ===== Experiment grids (ajuste aqui) =====
     # Lattice sweep (base/fallback de tudo).
     lattice_variants_all: List[Dict[str, object]] = []
-    for pattern, margin, rot in itertools.product(
-        ["hex", "square"],
-        [0.0, 0.01, 0.02],
-        [0.0, 15.0, 30.0],
-    ):
-        lattice_variants_all.append({"lattice_pattern": pattern, "lattice_margin": float(margin), "lattice_rotate": float(rot)})
+    lattice_margins = [0.0, 0.005, 0.01, 0.015, 0.02]
+    lattice_rot_sets = [
+        "0,15,30",
+        "0,10,20,30",
+        "0,5,10,15,20,25,30",
+        "0,9,18,27,36",
+    ]
+    lattice_const_rots = [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0]
+
+    # Multi-rotation: picks best lattice per n.
+    for pattern, margin, rots in itertools.product(["hex", "square"], lattice_margins, lattice_rot_sets):
+        lattice_variants_all.append(
+            {
+                "lattice_pattern": pattern,
+                "lattice_margin": float(margin),
+                "lattice_rotations": str(rots),
+            }
+        )
+
+    # Constant rotation: disable rotate-set and use `lattice_rotate`.
+    for pattern, margin, rot in itertools.product(["hex", "square"], lattice_margins, lattice_const_rots):
+        lattice_variants_all.append(
+            {
+                "lattice_pattern": pattern,
+                "lattice_margin": float(margin),
+                "lattice_rotations": "none",
+                "lattice_rotate": float(rot),
+            }
+        )
 
     # SA (n pequeno): custo principal do solver -> vale experimentar.
-    sa_presets: Dict[str, Dict[str, object]] = {
+    sa_level_presets: Dict[str, Dict[str, object]] = {
         "sa30": {"sa_nmax": 30, "sa_batch": 64, "sa_steps": 400, "sa_trans_sigma": 0.2, "sa_rot_sigma": 15.0, "sa_rot_prob": 0.3},
         "sa50": {"sa_nmax": 50, "sa_batch": 64, "sa_steps": 500, "sa_trans_sigma": 0.2, "sa_rot_sigma": 15.0, "sa_rot_prob": 0.3},
         "sa80": {"sa_nmax": 80, "sa_batch": 96, "sa_steps": 600, "sa_trans_sigma": 0.2, "sa_rot_sigma": 18.0, "sa_rot_prob": 0.35},
     }
+    sa_objectives = ["packing", "prefix"]
+    sa_proposals = ["random", "mixed", "bbox_inward", "bbox", "inward", "smart"]
+    sa_coolings = ["geom", "linear", "log"]
+    sa_overlap_lambdas = [0.0, 0.01]
+    sa_presets: Dict[str, Dict[str, object]] = {}
+    for lvl_name, lvl_cfg in sa_level_presets.items():
+        for objective, proposal, cooling, overlap_lambda in itertools.product(
+            sa_objectives,
+            sa_proposals,
+            sa_coolings,
+            sa_overlap_lambdas,
+        ):
+            cfg: Dict[str, object] = dict(lvl_cfg)
+            cfg.update(
+                {
+                    "sa_objective": str(objective),
+                    "sa_proposal": str(proposal),
+                    "sa_cooling": str(cooling),
+                    "sa_overlap_lambda": float(overlap_lambda),
+                    # Swap é útil principalmente quando objetivo=prefix (reordena prefixos sem mexer na geometria).
+                    "sa_swap_prob": 0.05 if objective == "prefix" else 0.0,
+                    "sa_swap_prob_end": 0.0 if objective == "prefix" else -1.0,
+                }
+            )
+            if proposal != "random":
+                cfg.update(
+                    {
+                        "sa_smart_prob": 0.7,
+                        "sa_smart_beta": 8.0,
+                        "sa_smart_drift": 1.0,
+                        "sa_smart_noise": 0.25,
+                    }
+                )
+
+            key = f"{lvl_name}_{objective}_{proposal}_{cooling}_ol{overlap_lambda:g}"
+            sa_presets[key] = cfg
 
     # Refine (n alto): warm-start lattice/l2o e refina via SA.
-    refine_presets: Dict[str, Dict[str, object]] = {
-        "ref80_200": {
-            "refine_nmin": 80,
-            "refine_batch": 16,
-            "refine_steps": 200,
-            "refine_trans_sigma": 0.2,
-            "refine_rot_sigma": 15.0,
-            "refine_rot_prob": 0.3,
-        },
-        "ref80_400": {
-            "refine_nmin": 80,
-            "refine_batch": 24,
-            "refine_steps": 400,
-            "refine_trans_sigma": 0.2,
-            "refine_rot_sigma": 15.0,
-            "refine_rot_prob": 0.3,
-        },
-        "ref120_300": {
-            "refine_nmin": 120,
-            "refine_batch": 24,
-            "refine_steps": 300,
-            "refine_trans_sigma": 0.2,
-            "refine_rot_sigma": 15.0,
-            "refine_rot_prob": 0.3,
-        },
+    refine_level_presets: Dict[str, Dict[str, object]] = {
+        "ref80_200": {"refine_nmin": 80, "refine_batch": 16, "refine_steps": 200, "refine_trans_sigma": 0.2, "refine_rot_sigma": 15.0, "refine_rot_prob": 0.3},
+        "ref80_400": {"refine_nmin": 80, "refine_batch": 24, "refine_steps": 400, "refine_trans_sigma": 0.2, "refine_rot_sigma": 15.0, "refine_rot_prob": 0.3},
+        "ref120_300": {"refine_nmin": 120, "refine_batch": 24, "refine_steps": 300, "refine_trans_sigma": 0.2, "refine_rot_sigma": 15.0, "refine_rot_prob": 0.3},
+        # heavy: usado principalmente com mother_prefix (n=200)
+        "ref200_2000": {"refine_nmin": 200, "refine_batch": 64, "refine_steps": 2000, "refine_trans_sigma": 0.35, "refine_rot_sigma": 25.0, "refine_rot_prob": 0.4, "refine_rot_prob_end": 0.1},
     }
+    refine_objectives = ["packing", "prefix"]
+    refine_proposals = ["random", "mixed", "bbox_inward", "bbox", "inward", "smart"]
+    refine_coolings = ["geom", "linear", "log"]
+    refine_overlap_lambdas = [0.0, 0.01]
+    refine_presets: Dict[str, Dict[str, object]] = {}
+    for lvl_name, lvl_cfg in refine_level_presets.items():
+        for objective, proposal, cooling, overlap_lambda in itertools.product(
+            refine_objectives,
+            refine_proposals,
+            refine_coolings,
+            refine_overlap_lambdas,
+        ):
+            cfg: Dict[str, object] = dict(lvl_cfg)
+            cfg.update(
+                {
+                    "refine_objective": str(objective),
+                    "refine_proposal": str(proposal),
+                    "refine_cooling": str(cooling),
+                    "refine_overlap_lambda": float(overlap_lambda),
+                    # schedules úteis para "esfriar" no fim
+                    "refine_rot_prob_end": float(lvl_cfg.get("refine_rot_prob_end", -1.0)),
+                }
+            )
+            if proposal != "random":
+                cfg.update(
+                    {
+                        "refine_smart_prob": 0.7,
+                        "refine_smart_beta": 8.0,
+                        "refine_smart_drift": 1.0,
+                        "refine_smart_noise": 0.25,
+                    }
+                )
+            key = f"{lvl_name}_{objective}_{proposal}_{cooling}_ol{overlap_lambda:g}"
+            refine_presets[key] = cfg
 
     # Meta-model blocks (2..4): cluster trees into rigid groups and optimize blocks before per-tree refinement.
-    block_presets: Dict[str, Dict[str, object]] = {
-        "blk200_b2": {
+    block_sizes = [2, 3, 4]
+    block_objectives = ["packing", "prefix"]
+    block_steps_list = [200, 350, 500]
+    block_presets: Dict[str, Dict[str, object]] = {}
+
+    # Cluster-init blocks (cheap).
+    for size, objective, steps in itertools.product(block_sizes, block_objectives, block_steps_list):
+        cfg: Dict[str, object] = {
             "block_nmax": 200,
-            "block_size": 2,
+            "block_size": int(size),
             "block_batch": 32,
-            "block_steps": 250,
+            "block_steps": int(steps),
             "block_trans_sigma": 0.2,
             "block_rot_sigma": 20.0,
             "block_rot_prob": 0.25,
-            "block_objective": "packing",
+            "block_objective": str(objective),
             "block_init": "cluster",
+        }
+        key = f"blk200_cluster_b{size}_{objective}_s{steps}"
+        block_presets[key] = cfg
+
+    # Template-init blocks (more structured).
+    template_patterns = ["hex", "square"]
+    template_rotates = [0.0, 15.0, 30.0]
+    template_margins = [0.0, 0.02]
+    for size, objective, steps, tpat, trot, tmar in itertools.product(
+        block_sizes,
+        block_objectives,
+        block_steps_list,
+        template_patterns,
+        template_rotates,
+        template_margins,
+    ):
+        cfg = {
+            "block_nmax": 200,
+            "block_size": int(size),
+            "block_batch": 32,
+            "block_steps": int(steps),
+            "block_trans_sigma": 0.2,
+            "block_rot_sigma": 20.0,
+            "block_rot_prob": 0.25,
+            "block_objective": str(objective),
+            "block_init": "template",
+            "block_template_pattern": str(tpat),
+            "block_template_margin": float(tmar),
+            "block_template_rotate": float(trot),
+        }
+        key = f"blk200_template_{tpat}_r{trot:g}_m{tmar:g}_b{size}_{objective}_s{steps}"
+        block_presets[key] = cfg
+
+    # Large Neighborhood Search / ALNS-style post-opt (n pequeno/medio).
+    lns_presets: Dict[str, Dict[str, object]] = {
+        "lns10": {
+            "lns_nmax": 200,
+            "lns_passes": 10,
+            "lns_destroy_k": 8,
+            "lns_destroy_mode": "mixed",
+            "lns_tabu_tenure": 0,
+            "lns_candidates": 64,
+            "lns_angle_samples": 8,
+            "lns_pad_scale": 2.0,
+            "lns_group_moves": 4,
+            "lns_group_size": 3,
+            "lns_group_trans_sigma": 0.05,
+            "lns_group_rot_sigma": 20.0,
+            "lns_t_start": 0.0,
+            "lns_t_end": 0.0,
         },
-        "blk200_b3": {
-            "block_nmax": 200,
-            "block_size": 3,
-            "block_batch": 32,
-            "block_steps": 250,
-            "block_trans_sigma": 0.2,
-            "block_rot_sigma": 20.0,
-            "block_rot_prob": 0.25,
-            "block_objective": "packing",
-            "block_init": "cluster",
+        "lns10_mixed_t5": {
+            "lns_nmax": 200,
+            "lns_passes": 10,
+            "lns_destroy_k": 8,
+            "lns_destroy_mode": "mixed",
+            "lns_tabu_tenure": 5,
+            "lns_candidates": 64,
+            "lns_angle_samples": 8,
+            "lns_pad_scale": 2.0,
+            "lns_group_moves": 4,
+            "lns_group_size": 3,
+            "lns_group_trans_sigma": 0.05,
+            "lns_group_rot_sigma": 20.0,
+            "lns_t_start": 0.0,
+            "lns_t_end": 0.0,
         },
-        "blk200_b4": {
-            "block_nmax": 200,
-            "block_size": 4,
-            "block_batch": 32,
-            "block_steps": 250,
-            "block_trans_sigma": 0.2,
-            "block_rot_sigma": 20.0,
-            "block_rot_prob": 0.25,
-            "block_objective": "packing",
-            "block_init": "cluster",
+        "lns10_sa": {
+            "lns_nmax": 200,
+            "lns_passes": 10,
+            "lns_destroy_k": 8,
+            "lns_destroy_mode": "mixed",
+            "lns_tabu_tenure": 0,
+            "lns_candidates": 64,
+            "lns_angle_samples": 8,
+            "lns_pad_scale": 2.0,
+            "lns_group_moves": 4,
+            "lns_group_size": 3,
+            "lns_group_trans_sigma": 0.05,
+            "lns_group_rot_sigma": 20.0,
+            "lns_t_start": 0.2,
+            "lns_t_end": 0.02,
+        },
+        "lns10_boundary_t5": {
+            "lns_nmax": 200,
+            "lns_passes": 10,
+            "lns_destroy_k": 10,
+            "lns_destroy_mode": "boundary",
+            "lns_tabu_tenure": 5,
+            "lns_candidates": 96,
+            "lns_angle_samples": 10,
+            "lns_pad_scale": 2.0,
+            "lns_group_moves": 4,
+            "lns_group_size": 3,
+            "lns_group_trans_sigma": 0.05,
+            "lns_group_rot_sigma": 20.0,
+            "lns_t_start": 0.0,
+            "lns_t_end": 0.0,
+        },
+        "lns10_cluster_t5": {
+            "lns_nmax": 200,
+            "lns_passes": 10,
+            "lns_destroy_k": 10,
+            "lns_destroy_mode": "cluster",
+            "lns_tabu_tenure": 5,
+            "lns_candidates": 96,
+            "lns_angle_samples": 10,
+            "lns_pad_scale": 2.0,
+            "lns_group_moves": 4,
+            "lns_group_size": 3,
+            "lns_group_trans_sigma": 0.05,
+            "lns_group_rot_sigma": 20.0,
+            "lns_t_start": 0.0,
+            "lns_t_end": 0.0,
+        },
+        "lns10_random": {
+            "lns_nmax": 200,
+            "lns_passes": 10,
+            "lns_destroy_k": 8,
+            "lns_destroy_mode": "random",
+            "lns_tabu_tenure": 0,
+            "lns_candidates": 64,
+            "lns_angle_samples": 8,
+            "lns_pad_scale": 2.0,
+            "lns_group_moves": 4,
+            "lns_group_size": 3,
+            "lns_group_trans_sigma": 0.05,
+            "lns_group_rot_sigma": 20.0,
+            "lns_t_start": 0.0,
+            "lns_t_end": 0.0,
+        },
+        # New: adaptive LNS (ALNS) + tabu
+        "lns10_alns": {
+            "lns_nmax": 200,
+            "lns_passes": 10,
+            "lns_destroy_k": 8,
+            "lns_destroy_mode": "alns",
+            "lns_tabu_tenure": 0,
+            "lns_candidates": 64,
+            "lns_angle_samples": 8,
+            "lns_pad_scale": 2.0,
+            "lns_group_moves": 4,
+            "lns_group_size": 3,
+            "lns_group_trans_sigma": 0.05,
+            "lns_group_rot_sigma": 20.0,
+            "lns_t_start": 0.0,
+            "lns_t_end": 0.0,
+        },
+        "lns10_alns_t5": {
+            "lns_nmax": 200,
+            "lns_passes": 10,
+            "lns_destroy_k": 8,
+            "lns_destroy_mode": "alns",
+            "lns_tabu_tenure": 5,
+            "lns_candidates": 64,
+            "lns_angle_samples": 8,
+            "lns_pad_scale": 2.0,
+            "lns_group_moves": 4,
+            "lns_group_size": 3,
+            "lns_group_trans_sigma": 0.05,
+            "lns_group_rot_sigma": 20.0,
+            "lns_t_start": 0.0,
+            "lns_t_end": 0.0,
+        },
+        "lns20_alns_sa_t10": {
+            "lns_nmax": 200,
+            "lns_passes": 20,
+            "lns_destroy_k": 10,
+            "lns_destroy_mode": "alns",
+            "lns_tabu_tenure": 10,
+            "lns_candidates": 96,
+            "lns_angle_samples": 12,
+            "lns_pad_scale": 2.0,
+            "lns_group_moves": 6,
+            "lns_group_size": 4,
+            "lns_group_trans_sigma": 0.05,
+            "lns_group_rot_sigma": 20.0,
+            "lns_t_start": 0.2,
+            "lns_t_end": 0.02,
         },
     }
 
@@ -1758,18 +2883,113 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
         "guided_p005": {"guided_prob": 1.0, "guided_pmax": 0.05},
         "guided_p02": {"guided_prob": 1.0, "guided_pmax": 0.02},
         "guided_mix": {"guided_prob": 0.5, "guided_pmax": 0.05},
+        "guided_sched": {"guided_prob": 1.0, "guided_pmax": 0.05, "guided_prob_end": 0.5, "guided_pmax_end": 0.08},
+        "guided_sched2": {"guided_prob": 0.8, "guided_pmax": 0.03, "guided_prob_end": 0.4, "guided_pmax_end": 0.06},
     }
 
     # L2O knobs (n pequeno): policy pode substituir SA inicial.
     l2o_presets: Dict[str, Dict[str, object]] = {
-        "l2o10": {"l2o_init": "lattice", "l2o_nmax": 10, "l2o_steps": 200, "l2o_trans_sigma": 0.2, "l2o_rot_sigma": 10.0, "l2o_deterministic": True},
-        "l2o20": {"l2o_init": "lattice", "l2o_nmax": 20, "l2o_steps": 250, "l2o_trans_sigma": 0.2, "l2o_rot_sigma": 10.0, "l2o_deterministic": True},
+        "l2o10_det": {"l2o_init": "lattice", "l2o_nmax": 10, "l2o_steps": 200, "l2o_trans_sigma": 0.2, "l2o_rot_sigma": 10.0, "l2o_deterministic": True},
+        "l2o10_stoch": {"l2o_init": "lattice", "l2o_nmax": 10, "l2o_steps": 250, "l2o_trans_sigma": 0.2, "l2o_rot_sigma": 10.0, "l2o_deterministic": False},
+        "l2o20_det": {"l2o_init": "lattice", "l2o_nmax": 20, "l2o_steps": 250, "l2o_trans_sigma": 0.2, "l2o_rot_sigma": 10.0, "l2o_deterministic": True},
+        "l2o30_det": {"l2o_init": "lattice", "l2o_nmax": 30, "l2o_steps": 300, "l2o_trans_sigma": 0.2, "l2o_rot_sigma": 10.0, "l2o_deterministic": True},
+        "l2o20_grid": {"l2o_init": "grid", "l2o_nmax": 20, "l2o_steps": 250, "l2o_trans_sigma": 0.2, "l2o_rot_sigma": 10.0, "l2o_deterministic": True},
     }
 
     # Heatmap knobs (n muito pequeno): meta-optimizer alternativo ao SA/L2O.
     heatmap_presets: Dict[str, Dict[str, object]] = {
         "heat10": {"heatmap_nmax": 10, "heatmap_steps": 200},
         "heat20": {"heatmap_nmax": 20, "heatmap_steps": 250},
+        "heat30": {"heatmap_nmax": 30, "heatmap_steps": 350},
+    }
+
+    # Post-opt knobs (n pequeno): hill-climb e GA (opcional).
+    hc_presets: Dict[str, Dict[str, object]] = {
+        "hc20": {"hc_nmax": 20, "hc_passes": 2, "hc_step_xy": 0.01, "hc_step_deg": 2.0},
+        "hc50": {"hc_nmax": 50, "hc_passes": 2, "hc_step_xy": 0.01, "hc_step_deg": 2.0},
+    }
+    ga_presets: Dict[str, Dict[str, object]] = {
+        "ga20": {"ga_nmax": 20, "ga_pop": 24, "ga_gens": 20, "ga_elite_frac": 0.25, "ga_crossover_prob": 0.5, "ga_mut_sigma_xy": 0.01, "ga_mut_sigma_deg": 2.0, "ga_repair_iters": 200},
+        "ga50": {"ga_nmax": 50, "ga_pop": 32, "ga_gens": 25, "ga_elite_frac": 0.25, "ga_crossover_prob": 0.5, "ga_mut_sigma_xy": 0.01, "ga_mut_sigma_deg": 2.0, "ga_repair_iters": 250},
+    }
+
+    # Mother-prefix presets: resolve N=nmax once e emite prefixes.
+    mother_presets: Dict[str, Dict[str, object]] = {
+        "mother_ref2000_prefix": {
+            "mother_prefix": True,
+            "mother_reorder": "radial",
+            "sa_nmax": 0,
+            "refine_nmin": 200,
+            "refine_steps": 2000,
+            "refine_batch": 64,
+            "refine_objective": "prefix",
+            "refine_proposal": "mixed",
+            "refine_cooling": "log",
+            "refine_trans_sigma": 0.35,
+            "refine_rot_sigma": 25.0,
+            "refine_rot_prob": 0.4,
+            "refine_rot_prob_end": 0.1,
+        },
+        "mother_sa5000_prefix": {
+            "mother_prefix": True,
+            "mother_reorder": "radial",
+            "sa_nmax": 200,
+            "sa_batch": 128,
+            "sa_steps": 5000,
+            "sa_trans_sigma": 0.25,
+            "sa_rot_sigma": 25.0,
+            "sa_rot_prob": 0.4,
+            "sa_rot_prob_end": 0.1,
+            "sa_objective": "prefix",
+            "sa_proposal": "mixed",
+            "sa_cooling": "log",
+            "sa_swap_prob": 0.05,
+            "sa_swap_prob_end": 0.0,
+            "sa_overlap_lambda": 0.01,
+            "refine_nmin": 200,
+            "refine_steps": 1000,
+            "refine_batch": 64,
+            "refine_objective": "prefix",
+            "refine_proposal": "mixed",
+            "refine_cooling": "log",
+            "refine_trans_sigma": 0.35,
+            "refine_rot_sigma": 25.0,
+            "refine_rot_prob": 0.4,
+            "refine_rot_prob_end": 0.1,
+        },
+        "mother_blk_ref_prefix": {
+            "mother_prefix": True,
+            "mother_reorder": "radial",
+            "sa_nmax": 0,
+            "block_nmax": 200,
+            "block_size": 2,
+            "block_steps": 350,
+            "block_batch": 32,
+            "block_objective": "prefix",
+            "block_init": "cluster",
+            "lns_nmax": 200,
+            "lns_passes": 10,
+            "lns_destroy_k": 8,
+            "lns_destroy_mode": "alns",
+            "lns_tabu_tenure": 5,
+            "lns_candidates": 64,
+            "lns_angle_samples": 8,
+            "lns_pad_scale": 2.0,
+            "lns_group_moves": 4,
+            "lns_group_size": 3,
+            "lns_group_trans_sigma": 0.05,
+            "lns_group_rot_sigma": 20.0,
+            "refine_nmin": 200,
+            "refine_steps": 2000,
+            "refine_batch": 64,
+            "refine_objective": "prefix",
+            "refine_proposal": "mixed",
+            "refine_cooling": "log",
+            "refine_trans_sigma": 0.35,
+            "refine_rot_sigma": 25.0,
+            "refine_rot_prob": 0.4,
+            "refine_rot_prob_end": 0.1,
+        },
     }
 
     # Limites para nao explodir combinacoes (aumente/disable para explorar mais).
@@ -1843,10 +3063,31 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
                             meta_extra={"lattice": lat, "block": blk_name, "sa": sa_name, "refine": ref_name, "meta_init": True},
                         )
 
+    # ---- LNS / ALNS post-opt variants ----
+    for lat in lattice_variants:
+        for lns_name, lns_cfg in lns_presets.items():
+            add_recipe("lns", {**lat, **lns_cfg}, meta_extra={"lattice": lat, "lns": lns_name})
+            for ref_name, ref_cfg in refine_presets.items():
+                add_recipe("refine_lns", {**lat, **ref_cfg, **lns_cfg}, meta_extra={"lattice": lat, "refine": ref_name, "lns": lns_name})
+            for sa_name, sa_cfg in sa_presets.items():
+                for ref_name, ref_cfg in refine_presets.items():
+                    add_recipe(
+                        "sa_refine_lns",
+                        {**lat, **sa_cfg, **ref_cfg, **lns_cfg},
+                        meta_extra={"lattice": lat, "sa": sa_name, "refine": ref_name, "lns": lns_name},
+                    )
+            for blk_name, blk_cfg in block_presets.items():
+                for ref_name, ref_cfg in refine_presets.items():
+                    add_recipe(
+                        "block_refine_lns",
+                        {**lat, **blk_cfg, **ref_cfg, **lns_cfg},
+                        meta_extra={"lattice": lat, "block": blk_name, "refine": ref_name, "lns": lns_name},
+                    )
+
     # ---- Guided SA (em cima do melhor preset base) ----
-    guided_lattice = lattice_variants[:2] if lattice_variants else [{"lattice_pattern": "hex", "lattice_margin": 0.02, "lattice_rotate": 0.0}]
-    guided_sa = sa_presets.get("sa50", next(iter(sa_presets.values())))
-    guided_ref = refine_presets.get("ref80_200", next(iter(refine_presets.values())))
+    guided_lattice = lattice_variants[:2] if lattice_variants else [{"lattice_pattern": "hex", "lattice_margin": 0.02, "lattice_rotate": 0.0, "lattice_rotations": "0,15,30"}]
+    guided_sa = sa_presets.get("sa50_prefix_mixed_log_ol0", next(iter(sa_presets.values())))
+    guided_ref = refine_presets.get("ref80_200_prefix_mixed_log_ol0", next(iter(refine_presets.values())))
     for model_name, model_path in CANDIDATE_GUIDED_MODELS.items():
         for lat in guided_lattice:
             for g_name, g_cfg in guided_presets.items():
@@ -1861,6 +3102,18 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
                         {**lat, **guided_sa, **guided_ref, **g_cfg, "guided_model": str(model_path), "meta_init_model": META_INIT_MODEL},
                         meta_extra={"guided_model": model_name, "guided": g_name, "lattice": lat, "meta_init": True},
                     )
+                for lns_name, lns_cfg in lns_presets.items():
+                    add_recipe(
+                        "guided_refine_lns",
+                        {**lat, **guided_sa, **guided_ref, **g_cfg, "guided_model": str(model_path), **lns_cfg},
+                        meta_extra={"guided_model": model_name, "guided": g_name, "lns": lns_name, "lattice": lat},
+                    )
+                    if META_INIT_MODEL is not None:
+                        add_recipe(
+                            "guided_refine_lns_meta",
+                            {**lat, **guided_sa, **guided_ref, **g_cfg, "guided_model": str(model_path), **lns_cfg, "meta_init_model": META_INIT_MODEL},
+                            meta_extra={"guided_model": model_name, "guided": g_name, "lns": lns_name, "lattice": lat, "meta_init": True},
+                        )
 
                 for blk_name, blk_cfg in block_presets.items():
                     add_recipe(
@@ -1874,11 +3127,23 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
                             {**lat, **blk_cfg, **guided_sa, **guided_ref, **g_cfg, "guided_model": str(model_path), "meta_init_model": META_INIT_MODEL},
                             meta_extra={"guided_model": model_name, "guided": g_name, "block": blk_name, "lattice": lat, "meta_init": True},
                         )
+                    for lns_name, lns_cfg in lns_presets.items():
+                        add_recipe(
+                            "guided_block_refine_lns",
+                            {**lat, **blk_cfg, **guided_sa, **guided_ref, **g_cfg, "guided_model": str(model_path), **lns_cfg},
+                            meta_extra={"guided_model": model_name, "guided": g_name, "block": blk_name, "lns": lns_name, "lattice": lat},
+                        )
+                        if META_INIT_MODEL is not None:
+                            add_recipe(
+                                "guided_block_refine_lns_meta",
+                                {**lat, **blk_cfg, **guided_sa, **guided_ref, **g_cfg, "guided_model": str(model_path), **lns_cfg, "meta_init_model": META_INIT_MODEL},
+                                meta_extra={"guided_model": model_name, "guided": g_name, "block": blk_name, "lns": lns_name, "lattice": lat, "meta_init": True},
+                            )
 
     # ---- L2O (n pequeno) + SA/refine ----
     l2o_lattice = lattice_variants[:2] if lattice_variants else [{"lattice_pattern": "hex", "lattice_margin": 0.02, "lattice_rotate": 0.0}]
-    l2o_sa = sa_presets.get("sa50", next(iter(sa_presets.values())))
-    l2o_ref = refine_presets.get("ref80_200", next(iter(refine_presets.values())))
+    l2o_sa = sa_presets.get("sa50_prefix_mixed_log_ol0", next(iter(sa_presets.values())))
+    l2o_ref = refine_presets.get("ref80_200_prefix_mixed_log_ol0", next(iter(refine_presets.values())))
     for model_name, model_path in CANDIDATE_L2O_MODELS.items():
         for lat in l2o_lattice:
             for l2o_name, l2o_cfg in l2o_presets.items():
@@ -1893,6 +3158,18 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
                         {**lat, **l2o_sa, **l2o_ref, **l2o_cfg, "l2o_model": str(model_path), "meta_init_model": META_INIT_MODEL},
                         meta_extra={"l2o_model": model_name, "l2o": l2o_name, "lattice": lat, "meta_init": True},
                     )
+                for lns_name, lns_cfg in lns_presets.items():
+                    add_recipe(
+                        "l2o_refine_lns",
+                        {**lat, **l2o_sa, **l2o_ref, **l2o_cfg, "l2o_model": str(model_path), **lns_cfg},
+                        meta_extra={"l2o_model": model_name, "l2o": l2o_name, "lns": lns_name, "lattice": lat},
+                    )
+                    if META_INIT_MODEL is not None:
+                        add_recipe(
+                            "l2o_refine_lns_meta",
+                            {**lat, **l2o_sa, **l2o_ref, **l2o_cfg, "l2o_model": str(model_path), **lns_cfg, "meta_init_model": META_INIT_MODEL},
+                            meta_extra={"l2o_model": model_name, "l2o": l2o_name, "lns": lns_name, "lattice": lat, "meta_init": True},
+                        )
 
     # ---- Heatmap variants ----
     if HEATMAP_MODEL is not None:
@@ -1908,17 +3185,62 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
                 add_recipe(
                     "heatmap_sa_refine",
                     {**lat, **h_cfg, "heatmap_model": HEATMAP_MODEL, **guided_sa, **guided_ref},
-                    meta_extra={"heatmap": h_name, "lattice": lat, "sa": "sa50", "refine": "ref80_200"},
+                    meta_extra={"heatmap": h_name, "lattice": lat, "sa": "sa50_prefix_mixed_log_ol0", "refine": "ref80_200_prefix_mixed_log_ol0"},
                 )
                 # heatmap + l2o (com o melhor modelo disponivel) + refine
                 best_l2o_name = next(iter(CANDIDATE_L2O_MODELS))
                 best_l2o_path = CANDIDATE_L2O_MODELS[best_l2o_name]
-                best_l2o_cfg = l2o_presets.get("l2o10", next(iter(l2o_presets.values())))
+                best_l2o_cfg = l2o_presets.get("l2o10_det", next(iter(l2o_presets.values())))
                 add_recipe(
                     "heatmap_l2o_refine",
                     {**lat, **h_cfg, "heatmap_model": HEATMAP_MODEL, **best_l2o_cfg, "l2o_model": str(best_l2o_path), **guided_sa, **guided_ref},
-                    meta_extra={"heatmap": h_name, "l2o_model": best_l2o_name, "l2o": "l2o10", "lattice": lat},
+                    meta_extra={"heatmap": h_name, "l2o_model": best_l2o_name, "l2o": "l2o10_det", "lattice": lat},
                 )
+
+    # ---- Post-opt (hill-climb / GA) variants ----
+    post_lattice = lattice_variants[:2] if lattice_variants else [{"lattice_pattern": "hex", "lattice_margin": 0.02, "lattice_rotate": 0.0, "lattice_rotations": "0,15,30"}]
+    for lat in post_lattice:
+        for hc_name, hc_cfg in hc_presets.items():
+            add_recipe("hc", {**lat, **hc_cfg}, meta_extra={"lattice": lat, "hc": hc_name})
+            add_recipe(
+                "sa_refine_hc",
+                {**lat, **guided_sa, **guided_ref, **hc_cfg},
+                meta_extra={"lattice": lat, "sa": "sa50_prefix_mixed_log_ol0", "refine": "ref80_200_prefix_mixed_log_ol0", "hc": hc_name},
+            )
+            for lns_name, lns_cfg in lns_presets.items():
+                add_recipe(
+                    "sa_refine_lns_hc",
+                    {**lat, **guided_sa, **guided_ref, **lns_cfg, **hc_cfg},
+                    meta_extra={"lattice": lat, "sa": "sa50_prefix_mixed_log_ol0", "refine": "ref80_200_prefix_mixed_log_ol0", "lns": lns_name, "hc": hc_name},
+                )
+
+        for ga_name, ga_cfg in ga_presets.items():
+            add_recipe("ga", {**lat, **ga_cfg}, meta_extra={"lattice": lat, "ga": ga_name})
+            add_recipe(
+                "sa_refine_ga",
+                {**lat, **guided_sa, **guided_ref, **ga_cfg},
+                meta_extra={"lattice": lat, "sa": "sa50_prefix_mixed_log_ol0", "refine": "ref80_200_prefix_mixed_log_ol0", "ga": ga_name},
+            )
+            for lns_name, lns_cfg in lns_presets.items():
+                add_recipe(
+                    "sa_refine_lns_ga",
+                    {**lat, **guided_sa, **guided_ref, **lns_cfg, **ga_cfg},
+                    meta_extra={"lattice": lat, "sa": "sa50_prefix_mixed_log_ol0", "refine": "ref80_200_prefix_mixed_log_ol0", "lns": lns_name, "ga": ga_name},
+                )
+
+    # ---- Mother-prefix variants (solve N once, emit prefixes) ----
+    mother_lattice = lattice_variants[:2] if lattice_variants else [{"lattice_pattern": "hex", "lattice_margin": 0.02, "lattice_rotate": 0.0, "lattice_rotations": "0,15,30"}]
+    for lat in mother_lattice:
+        for m_name, m_cfg in mother_presets.items():
+            add_recipe("mother", {**lat, **m_cfg}, meta_extra={"lattice": lat, "mother": m_name})
+            # mother + guided refine (usa policy no refine/SA quando habilitado)
+            for model_name, model_path in CANDIDATE_GUIDED_MODELS.items():
+                for g_name, g_cfg in guided_presets.items():
+                    add_recipe(
+                        "mother_guided",
+                        {**lat, **m_cfg, **g_cfg, "guided_model": str(model_path)},
+                        meta_extra={"lattice": lat, "mother": m_name, "guided_model": model_name, "guided": g_name},
+                    )
 
     # ---- Cap recipes per family ----
     if MAX_RECIPES_PER_FAMILY is not None:
@@ -1940,9 +3262,13 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
         "sa_presets": sorted(sa_presets.keys()),
         "refine_presets": sorted(refine_presets.keys()),
         "block_presets": sorted(block_presets.keys()),
+        "lns_presets": sorted(lns_presets.keys()),
         "guided_presets": sorted(guided_presets.keys()),
         "l2o_presets": sorted(l2o_presets.keys()),
         "heatmap_presets": sorted(heatmap_presets.keys()),
+        "hc_presets": sorted(hc_presets.keys()),
+        "ga_presets": sorted(ga_presets.keys()),
+        "mother_presets": sorted(mother_presets.keys()),
     }
 
     return recipes, meta, settings
@@ -2236,6 +3562,16 @@ else:
     # Rodada unica (use nmax=200 + overlap_check=True para score final)
     def _pick_single_recipe() -> str:
         preferred_families = [
+            "guided_block_refine_lns_meta",
+            "guided_block_refine_lns",
+            "guided_refine_lns_meta",
+            "guided_refine_lns",
+            "l2o_refine_lns_meta",
+            "l2o_refine_lns",
+            "sa_refine_lns",
+            "refine_lns",
+            "block_refine_lns",
+            "lns",
             "guided_block_refine_meta",
             "guided_block_refine",
             "block_sa_refine_meta",
@@ -2270,7 +3606,7 @@ else:
 # %% Maximo de experimentos: multi-start + ensemble por n (via scripts/sweep_ensemble.py)
 # Objetivo: rodar MUITAS seeds com uma receita forte (mother-prefix + refine no N=200) e
 # deixar o ensemble escolher o melhor s_n por puzzle.
-RUN_MAX_SEED_SWEEP = True
+RUN_MAX_SEED_SWEEP = False
 MAX_SEED_SWEEP_SEEDS = "1..200"  # aumente se quiser (ex.: 1..500)
 MAX_SEED_SWEEP_JOBS = max(1, int(os.cpu_count() or 1))  # candidatos em paralelo (ajuste conforme CPU/RAM)
 MAX_SEED_SWEEP_TAG = "max_seed_sweep"
@@ -2282,12 +3618,27 @@ DEFAULT_MAX_SEED_SWEEP_RECIPE: Dict[str, object] = {
     "sa_nmax": 0,
     "lattice_pattern": "hex",
     "lattice_margin": 0.005,
+    "lattice_rotations": "0,5,10,15,20,25,30",
     "block_nmax": 200,
     "block_size": 2,
     "block_steps": 200,
     "block_batch": 32,
     "block_objective": "prefix",
     "block_init": "cluster",
+    "lns_nmax": 200,
+    "lns_passes": 10,
+    "lns_destroy_k": 8,
+    "lns_destroy_mode": "alns",
+    "lns_tabu_tenure": 5,
+    "lns_candidates": 64,
+    "lns_angle_samples": 8,
+    "lns_pad_scale": 2.0,
+    "lns_group_moves": 4,
+    "lns_group_size": 3,
+    "lns_group_trans_sigma": 0.05,
+    "lns_group_rot_sigma": 20.0,
+    "lns_t_start": 0.0,
+    "lns_t_end": 0.0,
     "refine_nmin": 200,
     "refine_steps": 5000,
     "refine_batch": 128,

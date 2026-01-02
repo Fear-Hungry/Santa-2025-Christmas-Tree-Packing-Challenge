@@ -28,6 +28,9 @@
 # Kaggle submissions (usually generated)
 /submission*.csv
 
+# PDFs / docs (large assets)
+/Desafio Kaggle Santa 2025.pdf
+
 # Python
 __pycache__/
 *.pyc
