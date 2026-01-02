@@ -17,6 +17,7 @@ from geom_np import packing_bbox, packing_score, polygon_radius, shift_poses_to_
 from lattice import lattice_poses  # noqa: E402
 from scoring import polygons_intersect  # noqa: E402
 from tree_data import TREE_POINTS  # noqa: E402
+import lattice as lattice_mod  # noqa: E402
 
 
 def _format_val(value: float) -> str:
@@ -113,6 +114,387 @@ def _run_sa(
     best_idx = int(jnp.argmin(best_scores))
     poses = np.array(best_poses[best_idx])
     return shift_poses_to_origin(points, poses)
+
+
+def _build_blocks(n: int, block_size: int) -> tuple[np.ndarray, np.ndarray]:
+    if block_size <= 0:
+        raise ValueError("block_size must be >= 1")
+    n_blocks = (n + block_size - 1) // block_size
+    blocks = np.zeros((n_blocks, block_size), dtype=np.int32)
+    mask = np.zeros((n_blocks, block_size), dtype=bool)
+    idx = 0
+    for b in range(n_blocks):
+        for t in range(block_size):
+            if idx < n:
+                blocks[b, t] = idx
+                mask[b, t] = True
+                idx += 1
+            else:
+                blocks[b, t] = 0
+                mask[b, t] = False
+    return blocks, mask
+
+
+def _blocks_from_lists(blocks_list: list[list[int]], block_size: int) -> tuple[np.ndarray, np.ndarray]:
+    blocks = np.zeros((len(blocks_list), block_size), dtype=np.int32)
+    mask = np.zeros((len(blocks_list), block_size), dtype=bool)
+    for b, items in enumerate(blocks_list):
+        for t, idx in enumerate(items[:block_size]):
+            blocks[b, t] = int(idx)
+            mask[b, t] = True
+    return blocks, mask
+
+
+def _cluster_blocks(poses: np.ndarray, block_size: int, *, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """Greedy spatial clustering into blocks of size 2..4 (by XY proximity)."""
+    poses = np.array(poses, dtype=float)
+    n = int(poses.shape[0])
+    if n <= 0:
+        return np.zeros((0, block_size), dtype=np.int32), np.zeros((0, block_size), dtype=bool)
+    if block_size <= 1:
+        blocks = [[i] for i in range(n)]
+        return _blocks_from_lists(blocks, block_size=1)
+
+    rng = np.random.default_rng(int(seed))
+    remaining = list(range(n))
+    rng.shuffle(remaining)
+    remaining_set = set(remaining)
+    xy = poses[:, 0:2]
+
+    blocks_list: list[list[int]] = []
+    while remaining_set:
+        # Pick an arbitrary remaining index (shuffled order gives deterministic randomness).
+        i = None
+        while remaining and i is None:
+            cand = remaining.pop()
+            if cand in remaining_set:
+                i = cand
+        if i is None:
+            break
+        remaining_set.remove(i)
+        block = [i]
+
+        for _ in range(block_size - 1):
+            if not remaining_set:
+                break
+            center = np.mean(xy[block], axis=0)
+            idxs = np.fromiter(remaining_set, dtype=np.int32)
+            d2 = np.sum((xy[idxs] - center[None, :]) ** 2, axis=1)
+            j = int(idxs[int(np.argmin(d2))])
+            remaining_set.remove(j)
+            block.append(j)
+
+        blocks_list.append(block)
+
+    # Stable ordering (helps reproducibility when seed fixed).
+    blocks_list.sort(key=lambda b: min(b))
+    return _blocks_from_lists(blocks_list, block_size=block_size)
+
+
+def _rotate_xy(xy: np.ndarray, deg: float) -> np.ndarray:
+    rad = np.deg2rad(float(deg))
+    c = float(np.cos(rad))
+    s = float(np.sin(rad))
+    x = xy[:, 0]
+    y = xy[:, 1]
+    return np.stack([x * c - y * s, x * s + y * c], axis=1)
+
+
+def _convex_hull(points: np.ndarray) -> np.ndarray:
+    """Return convex hull (CCW) for 2D points as (H,2)."""
+    pts = np.array(points, dtype=float)
+    if pts.shape[0] <= 1:
+        return pts
+
+    # Sort by (x, y).
+    order = np.lexsort((pts[:, 1], pts[:, 0]))
+    pts = pts[order]
+
+    def cross(o, a, b) -> float:
+        return float((a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]))
+
+    lower: list[np.ndarray] = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0.0:
+            lower.pop()
+        lower.append(p)
+
+    upper: list[np.ndarray] = []
+    for p in pts[::-1]:
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0.0:
+            upper.pop()
+        upper.append(p)
+
+    hull = lower[:-1] + upper[:-1]
+    if not hull:
+        return pts[:1]
+    return np.stack(hull, axis=0)
+
+
+def _block_centers_lattice(
+    n_blocks: int,
+    *,
+    super_poly: np.ndarray,
+    pattern: str,
+    margin: float,
+    rotate_deg: float,
+) -> np.ndarray:
+    if n_blocks <= 0:
+        return np.zeros((0, 3), dtype=float)
+
+    step, row_height = lattice_mod._compute_spacing(super_poly, pattern=pattern, rotate_deg=rotate_deg, margin=margin)
+    cols = int(math.ceil(math.sqrt(n_blocks)))
+    poses = np.zeros((n_blocks, 3), dtype=float)
+    if pattern == "hex":
+        for i in range(n_blocks):
+            row = i // cols
+            col = i % cols
+            x = col * step + (step / 2.0 if row % 2 == 1 else 0.0)
+            y = row * row_height
+            poses[i] = (x, y, rotate_deg)
+    else:
+        for i in range(n_blocks):
+            row = i // cols
+            col = i % cols
+            x = col * step
+            y = row * row_height
+            poses[i] = (x, y, rotate_deg)
+    # Keep translation-only, the block SA owns rotations.
+    poses[:, 2] = 0.0
+    return poses
+
+
+def _block_template_initial_poses(
+    points: np.ndarray,
+    n: int,
+    *,
+    seed: int,
+    block_size: int,
+    template_pattern: str,
+    template_margin: float,
+    template_rotate_deg: float,
+    centers_spacing_scale: float = 1.0,
+    random_block_rotations: bool = False,
+) -> np.ndarray:
+    if n <= 0:
+        return np.zeros((0, 3), dtype=float)
+    if block_size <= 1:
+        radius = polygon_radius(points)
+        spacing = 2.0 * radius * 1.2
+        return shift_poses_to_origin(points, _grid_initial_poses(n, spacing))
+
+    template = lattice_poses(
+        block_size,
+        pattern=str(template_pattern),
+        margin=float(template_margin),
+        rotate_deg=float(template_rotate_deg),
+    )
+    template = np.array(template, dtype=float)
+
+    n_blocks = (n + block_size - 1) // block_size
+    super_pts = np.vstack([transform_polygon(points, pose) for pose in template])
+    super_poly = _convex_hull(super_pts)
+    centers_pose = _block_centers_lattice(
+        n_blocks,
+        super_poly=super_poly,
+        pattern=str(template_pattern),
+        margin=0.02,
+        rotate_deg=0.0,
+    )
+    centers = centers_pose[:, 0:2] * float(centers_spacing_scale)
+
+    rng = np.random.default_rng(int(seed))
+    block_rots = rng.uniform(0.0, 360.0, size=(n_blocks,)) if random_block_rotations else np.zeros((n_blocks,))
+
+    poses = np.zeros((n, 3), dtype=float)
+    idx = 0
+    for b in range(n_blocks):
+        rot = float(block_rots[b])
+        xy_rot = _rotate_xy(template[:, 0:2], rot)
+        theta = np.mod(template[:, 2] + rot, 360.0)
+        for t in range(block_size):
+            if idx >= n:
+                break
+            poses[idx, 0:2] = centers[b] + xy_rot[t]
+            poses[idx, 2] = float(theta[t])
+            idx += 1
+
+    return shift_poses_to_origin(points, poses)
+
+
+def _run_sa_blocks_from_initial(
+    n: int,
+    *,
+    seed: int,
+    initial_poses: np.ndarray,
+    blocks_np: np.ndarray,
+    mask_np: np.ndarray,
+    batch_size: int,
+    n_steps: int,
+    trans_sigma: float,
+    rot_sigma: float,
+    rot_prob: float,
+    rot_prob_end: float,
+    cooling: str,
+    cooling_power: float,
+    trans_sigma_nexp: float,
+    rot_sigma_nexp: float,
+    sigma_nref: float,
+    overlap_lambda: float,
+    allow_collisions: bool,
+    objective: str,
+) -> np.ndarray | None:
+    global _JAX_AVAILABLE
+    if _JAX_AVAILABLE is False:
+        return None
+    try:
+        import jax
+        import jax.numpy as jnp
+
+        _JAX_AVAILABLE = True
+    except Exception:
+        _JAX_AVAILABLE = False
+        return None
+
+    from optimizer import run_sa_blocks_batch  # noqa: E402
+
+    points = np.array(TREE_POINTS, dtype=float)
+    initial = np.array(initial_poses, dtype=float)
+
+    blocks = jnp.array(blocks_np, dtype=jnp.int32)
+    mask = jnp.array(mask_np, dtype=bool)
+    initial_batch = jnp.tile(jnp.array(initial)[None, :, :], (int(batch_size), 1, 1))
+
+    key = jax.random.PRNGKey(int(seed))
+    best_poses, best_scores = run_sa_blocks_batch(
+        key,
+        int(n_steps),
+        int(n),
+        initial_batch,
+        blocks,
+        mask,
+        trans_sigma=float(trans_sigma),
+        rot_sigma=float(rot_sigma),
+        rot_prob=float(rot_prob),
+        rot_prob_end=float(rot_prob_end),
+        cooling=str(cooling),
+        cooling_power=float(cooling_power),
+        trans_sigma_nexp=float(trans_sigma_nexp),
+        rot_sigma_nexp=float(rot_sigma_nexp),
+        sigma_nref=float(sigma_nref),
+        overlap_lambda=float(overlap_lambda),
+        allow_collisions=bool(allow_collisions),
+        objective=str(objective),
+    )
+    best_scores.block_until_ready()
+    best_idx = int(jnp.argmin(best_scores))
+    poses = np.array(best_poses[best_idx])
+    return shift_poses_to_origin(points, poses)
+
+
+def _run_sa_blocks_cluster(
+    n: int,
+    *,
+    seed: int,
+    initial_poses: np.ndarray,
+    block_size: int,
+    batch_size: int,
+    n_steps: int,
+    trans_sigma: float,
+    rot_sigma: float,
+    rot_prob: float,
+    rot_prob_end: float,
+    cooling: str,
+    cooling_power: float,
+    trans_sigma_nexp: float,
+    rot_sigma_nexp: float,
+    sigma_nref: float,
+    overlap_lambda: float,
+    allow_collisions: bool,
+    objective: str,
+) -> np.ndarray | None:
+    blocks_np, mask_np = _cluster_blocks(initial_poses, block_size, seed=seed)
+    if blocks_np.shape[0] == 0:
+        return np.array(initial_poses, dtype=float)
+    return _run_sa_blocks_from_initial(
+        n,
+        seed=seed,
+        initial_poses=initial_poses,
+        blocks_np=blocks_np,
+        mask_np=mask_np,
+        batch_size=batch_size,
+        n_steps=n_steps,
+        trans_sigma=trans_sigma,
+        rot_sigma=rot_sigma,
+        rot_prob=rot_prob,
+        rot_prob_end=rot_prob_end,
+        cooling=cooling,
+        cooling_power=cooling_power,
+        trans_sigma_nexp=trans_sigma_nexp,
+        rot_sigma_nexp=rot_sigma_nexp,
+        sigma_nref=sigma_nref,
+        overlap_lambda=overlap_lambda,
+        allow_collisions=allow_collisions,
+        objective=objective,
+    )
+
+
+def _run_sa_blocks_template(
+    n: int,
+    *,
+    seed: int,
+    block_size: int,
+    batch_size: int,
+    n_steps: int,
+    trans_sigma: float,
+    rot_sigma: float,
+    rot_prob: float,
+    rot_prob_end: float,
+    cooling: str,
+    cooling_power: float,
+    trans_sigma_nexp: float,
+    rot_sigma_nexp: float,
+    sigma_nref: float,
+    overlap_lambda: float,
+    allow_collisions: bool,
+    objective: str,
+    template_pattern: str,
+    template_margin: float,
+    template_rotate_deg: float,
+) -> np.ndarray | None:
+    points = np.array(TREE_POINTS, dtype=float)
+    initial = _block_template_initial_poses(
+        points,
+        n,
+        seed=seed,
+        block_size=block_size,
+        template_pattern=template_pattern,
+        template_margin=template_margin,
+        template_rotate_deg=template_rotate_deg,
+    )
+
+    blocks_np, mask_np = _build_blocks(n, block_size)
+    return _run_sa_blocks_from_initial(
+        n,
+        seed=seed,
+        initial_poses=initial,
+        blocks_np=blocks_np,
+        mask_np=mask_np,
+        batch_size=batch_size,
+        n_steps=n_steps,
+        trans_sigma=trans_sigma,
+        rot_sigma=rot_sigma,
+        rot_prob=rot_prob,
+        rot_prob_end=rot_prob_end,
+        cooling=cooling,
+        cooling_power=cooling_power,
+        trans_sigma_nexp=trans_sigma_nexp,
+        rot_sigma_nexp=rot_sigma_nexp,
+        sigma_nref=sigma_nref,
+        overlap_lambda=overlap_lambda,
+        allow_collisions=allow_collisions,
+        objective=objective,
+    )
 
 
 def _run_sa_guided(
@@ -472,6 +854,26 @@ def solve_n(
     guided_pmax: float,
     guided_prob_end: float,
     guided_pmax_end: float,
+    block_nmax: int,
+    block_size: int,
+    block_batch_size: int,
+    block_steps: int,
+    block_trans_sigma: float,
+    block_rot_sigma: float,
+    block_rot_prob: float,
+    block_rot_prob_end: float,
+    block_cooling: str,
+    block_cooling_power: float,
+    block_trans_sigma_nexp: float,
+    block_rot_sigma_nexp: float,
+    block_sigma_nref: float,
+    block_overlap_lambda: float,
+    block_allow_collisions: bool,
+    block_objective: str,
+    block_init: str,
+    block_template_pattern: str,
+    block_template_margin: float,
+    block_template_rotate: float,
 ) -> np.ndarray:
     base: np.ndarray | None = None
 
@@ -523,29 +925,93 @@ def solve_n(
         if poses is not None:
             base = poses
 
-    if base is None and n <= sa_nmax:
-        init_override = None
+    init_override = None
+    if base is None and n <= sa_nmax and meta_init_model is not None:
+        try:
+            import jax
+            import jax.numpy as jnp
+        except Exception:
+            meta_init_model = None
         if meta_init_model is not None:
-            try:
-                import jax
-                import jax.numpy as jnp
-            except Exception:
-                meta_init_model = None
-            if meta_init_model is not None:
-                from meta_init import MetaInitConfig, apply_meta_init, load_meta_params  # noqa: E402
-                points = np.array(TREE_POINTS, dtype=float)
-                radius = polygon_radius(points)
-                spacing = 2.0 * radius * 1.2
-                grid_base = _grid_initial_poses(n, spacing)
-                params, meta = load_meta_params(meta_init_model)
-                config = MetaInitConfig(
-                    hidden_size=int(meta.get("hidden", 32)) if hasattr(meta.get("hidden", 32), "__int__") else 32,
-                    delta_xy=float(meta.get("delta_xy", 0.2)),
-                    delta_theta=float(meta.get("delta_theta", 10.0)),
-                )
-                init_override = np.array(apply_meta_init(params, jnp.array(grid_base), config))
-                if _has_overlaps(points, init_override):
-                    init_override = grid_base
+            from meta_init import MetaInitConfig, apply_meta_init, load_meta_params  # noqa: E402
+
+            points = np.array(TREE_POINTS, dtype=float)
+            radius = polygon_radius(points)
+            spacing = 2.0 * radius * 1.2
+            grid_base = _grid_initial_poses(n, spacing)
+            params, meta = load_meta_params(meta_init_model)
+            config = MetaInitConfig(
+                hidden_size=int(meta.get("hidden", 32)) if hasattr(meta.get("hidden", 32), "__int__") else 32,
+                delta_xy=float(meta.get("delta_xy", 0.2)),
+                delta_theta=float(meta.get("delta_theta", 10.0)),
+            )
+            init_override = np.array(apply_meta_init(params, jnp.array(grid_base), config))
+            if _has_overlaps(points, init_override):
+                init_override = grid_base
+
+    # --- Meta-model blocks: optimize rigid groups before refining individual trees.
+    if base is None and block_steps > 0 and block_nmax > 0 and n <= block_nmax and 2 <= block_size <= 4:
+        block_initial = init_override
+        if block_initial is None:
+            block_initial = _best_lattice_poses(
+                n,
+                pattern=lattice_pattern,
+                margin=lattice_margin,
+                rotate_deg=lattice_rotate_deg,
+                rotate_degs=lattice_rotate_degs,
+            )
+
+        if block_init == "template":
+            block_poses = _run_sa_blocks_template(
+                n,
+                seed=seed,
+                block_size=block_size,
+                batch_size=block_batch_size,
+                n_steps=block_steps,
+                trans_sigma=block_trans_sigma,
+                rot_sigma=block_rot_sigma,
+                rot_prob=block_rot_prob,
+                rot_prob_end=block_rot_prob_end,
+                cooling=block_cooling,
+                cooling_power=block_cooling_power,
+                trans_sigma_nexp=block_trans_sigma_nexp,
+                rot_sigma_nexp=block_rot_sigma_nexp,
+                sigma_nref=block_sigma_nref,
+                overlap_lambda=block_overlap_lambda,
+                allow_collisions=block_allow_collisions,
+                objective=block_objective,
+                template_pattern=block_template_pattern,
+                template_margin=block_template_margin,
+                template_rotate_deg=block_template_rotate,
+            )
+        else:
+            block_poses = _run_sa_blocks_cluster(
+                n,
+                seed=seed,
+                initial_poses=block_initial,
+                block_size=block_size,
+                batch_size=block_batch_size,
+                n_steps=block_steps,
+                trans_sigma=block_trans_sigma,
+                rot_sigma=block_rot_sigma,
+                rot_prob=block_rot_prob,
+                rot_prob_end=block_rot_prob_end,
+                cooling=block_cooling,
+                cooling_power=block_cooling_power,
+                trans_sigma_nexp=block_trans_sigma_nexp,
+                rot_sigma_nexp=block_rot_sigma_nexp,
+                sigma_nref=block_sigma_nref,
+                overlap_lambda=block_overlap_lambda,
+                allow_collisions=block_allow_collisions,
+                objective=block_objective,
+            )
+        if block_poses is not None:
+            if n <= sa_nmax:
+                init_override = block_poses
+            else:
+                base = block_poses
+
+    if base is None and n <= sa_nmax:
         if guided_model is not None:
             poses = _run_sa_guided(
                 n,
@@ -824,6 +1290,38 @@ def main() -> int:
         help="Final policy confidence threshold (linear schedule; -1 keeps constant).",
     )
 
+    ap.add_argument("--block-nmax", type=int, default=0, help="Apply block SA for n <= this threshold (0=disabled).")
+    ap.add_argument("--block-size", type=int, default=2, help="Block size (trees per block). Typical: 2..4.")
+    ap.add_argument("--block-batch", type=int, default=32, help="Block SA batch size.")
+    ap.add_argument("--block-steps", type=int, default=0, help="Block SA steps per puzzle (0=disabled).")
+    ap.add_argument("--block-trans-sigma", type=float, default=0.2, help="Block SA translation step scale.")
+    ap.add_argument("--block-rot-sigma", type=float, default=15.0, help="Block SA rotation step scale (deg).")
+    ap.add_argument("--block-rot-prob", type=float, default=0.25, help="Block SA rotation move probability.")
+    ap.add_argument(
+        "--block-rot-prob-end",
+        type=float,
+        default=-1.0,
+        help="Final block rotation move probability (linear schedule; -1 keeps constant).",
+    )
+    ap.add_argument("--block-cooling", type=str, default="geom", choices=["geom", "linear", "log"])
+    ap.add_argument("--block-cooling-power", type=float, default=1.0)
+    ap.add_argument("--block-trans-nexp", type=float, default=0.0)
+    ap.add_argument("--block-rot-nexp", type=float, default=0.0)
+    ap.add_argument("--block-sigma-nref", type=float, default=50.0)
+    ap.add_argument("--block-overlap-lambda", type=float, default=0.0)
+    ap.add_argument("--block-allow-collisions", action="store_true")
+    ap.add_argument("--block-objective", type=str, default="packing", choices=["packing", "prefix"])
+    ap.add_argument(
+        "--block-init",
+        type=str,
+        default="cluster",
+        choices=["cluster", "template"],
+        help="Block init mode: cluster blocks from an existing packing, or generate from a template.",
+    )
+    ap.add_argument("--block-template-pattern", type=str, default="hex", choices=["hex", "square"])
+    ap.add_argument("--block-template-margin", type=float, default=0.02)
+    ap.add_argument("--block-template-rotate", type=float, default=0.0)
+
     ap.add_argument("--hc-nmax", type=int, default=0, help="Apply deterministic hill-climb for n <= this threshold (0=disabled).")
     ap.add_argument("--hc-passes", type=int, default=2, help="Hill-climb passes over trees.")
     ap.add_argument("--hc-step-xy", type=float, default=0.01, help="Hill-climb translation step.")
@@ -935,6 +1433,26 @@ def main() -> int:
                 guided_pmax=args.guided_pmax,
                 guided_prob_end=args.guided_prob_end,
                 guided_pmax_end=args.guided_pmax_end,
+                block_nmax=args.block_nmax,
+                block_size=args.block_size,
+                block_batch_size=args.block_batch,
+                block_steps=args.block_steps,
+                block_trans_sigma=args.block_trans_sigma,
+                block_rot_sigma=args.block_rot_sigma,
+                block_rot_prob=args.block_rot_prob,
+                block_rot_prob_end=args.block_rot_prob_end,
+                block_cooling=args.block_cooling,
+                block_cooling_power=args.block_cooling_power,
+                block_trans_sigma_nexp=args.block_trans_nexp,
+                block_rot_sigma_nexp=args.block_rot_nexp,
+                block_sigma_nref=args.block_sigma_nref,
+                block_overlap_lambda=args.block_overlap_lambda,
+                block_allow_collisions=args.block_allow_collisions,
+                block_objective=args.block_objective,
+                block_init=args.block_init,
+                block_template_pattern=args.block_template_pattern,
+                block_template_margin=args.block_template_margin,
+                block_template_rotate=args.block_template_rotate,
             )
 
             mother = np.array(mother, dtype=float)
@@ -1030,6 +1548,26 @@ def main() -> int:
                     guided_pmax=args.guided_pmax,
                     guided_prob_end=args.guided_prob_end,
                     guided_pmax_end=args.guided_pmax_end,
+                    block_nmax=args.block_nmax,
+                    block_size=args.block_size,
+                    block_batch_size=args.block_batch,
+                    block_steps=args.block_steps,
+                    block_trans_sigma=args.block_trans_sigma,
+                    block_rot_sigma=args.block_rot_sigma,
+                    block_rot_prob=args.block_rot_prob,
+                    block_rot_prob_end=args.block_rot_prob_end,
+                    block_cooling=args.block_cooling,
+                    block_cooling_power=args.block_cooling_power,
+                    block_trans_sigma_nexp=args.block_trans_nexp,
+                    block_rot_sigma_nexp=args.block_rot_nexp,
+                    block_sigma_nref=args.block_sigma_nref,
+                    block_overlap_lambda=args.block_overlap_lambda,
+                    block_allow_collisions=args.block_allow_collisions,
+                    block_objective=args.block_objective,
+                    block_init=args.block_init,
+                    block_template_pattern=args.block_template_pattern,
+                    block_template_margin=args.block_template_margin,
+                    block_template_rotate=args.block_template_rotate,
                 )
 
                 poses = np.array(poses, dtype=float)

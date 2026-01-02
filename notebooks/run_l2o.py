@@ -455,7 +455,7 @@ L2O_SWEEP_ROLLOUT_STEPS = ROLLOUT_STEPS
 L2O_SWEEP_EVAL_N_LIST = VAL_N_LIST
 L2O_SWEEP_EVAL_SEEDS = VAL_EVAL_SEEDS
 L2O_SWEEP_EVAL_STEPS = EVAL_STEPS
-L2O_SWEEP_MAX_EXPERIMENTS = 64  # None = roda tudo (pode explodir)
+L2O_SWEEP_MAX_EXPERIMENTS = None  # None = roda tudo (pode explodir)
 L2O_SWEEP_TOPK_PER_POLICY = 5  # exporta top-K p/ usar no generate_submission (opcional)
 L2O_SWEEP_RETRAIN_FINAL = True
 L2O_FINAL_TRAIN_STEPS = TRAIN_STEPS
@@ -1657,6 +1657,18 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
         "guided_model": None,
         "guided_prob": 1.0,
         "guided_pmax": 0.05,
+        "block_nmax": 0,
+        "block_size": 2,
+        "block_batch": 32,
+        "block_steps": 0,
+        "block_trans_sigma": 0.2,
+        "block_rot_sigma": 15.0,
+        "block_rot_prob": 0.25,
+        "block_objective": "packing",
+        "block_init": "cluster",
+        "block_template_pattern": "hex",
+        "block_template_margin": 0.02,
+        "block_template_rotate": 0.0,
     }
 
     # ===== Experiment grids (ajuste aqui) =====
@@ -1701,6 +1713,43 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
             "refine_trans_sigma": 0.2,
             "refine_rot_sigma": 15.0,
             "refine_rot_prob": 0.3,
+        },
+    }
+
+    # Meta-model blocks (2..4): cluster trees into rigid groups and optimize blocks before per-tree refinement.
+    block_presets: Dict[str, Dict[str, object]] = {
+        "blk200_b2": {
+            "block_nmax": 200,
+            "block_size": 2,
+            "block_batch": 32,
+            "block_steps": 250,
+            "block_trans_sigma": 0.2,
+            "block_rot_sigma": 20.0,
+            "block_rot_prob": 0.25,
+            "block_objective": "packing",
+            "block_init": "cluster",
+        },
+        "blk200_b3": {
+            "block_nmax": 200,
+            "block_size": 3,
+            "block_batch": 32,
+            "block_steps": 250,
+            "block_trans_sigma": 0.2,
+            "block_rot_sigma": 20.0,
+            "block_rot_prob": 0.25,
+            "block_objective": "packing",
+            "block_init": "cluster",
+        },
+        "blk200_b4": {
+            "block_nmax": 200,
+            "block_size": 4,
+            "block_batch": 32,
+            "block_steps": 250,
+            "block_trans_sigma": 0.2,
+            "block_rot_sigma": 20.0,
+            "block_rot_prob": 0.25,
+            "block_objective": "packing",
+            "block_init": "cluster",
         },
     }
 
@@ -1769,6 +1818,31 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
                         meta_extra={"lattice": lat, "sa": sa_name, "refine": ref_name, "meta_init": True},
                     )
 
+    # ---- Block meta-model variants ----
+    for lat in lattice_variants:
+        for blk_name, blk_cfg in block_presets.items():
+            for ref_name, ref_cfg in refine_presets.items():
+                add_recipe("block_refine", {**lat, **blk_cfg, **ref_cfg}, meta_extra={"lattice": lat, "block": blk_name, "refine": ref_name})
+                if META_INIT_MODEL is not None:
+                    add_recipe(
+                        "block_refine_meta",
+                        {**lat, **blk_cfg, **ref_cfg, "meta_init_model": META_INIT_MODEL},
+                        meta_extra={"lattice": lat, "block": blk_name, "refine": ref_name, "meta_init": True},
+                    )
+            for sa_name, sa_cfg in sa_presets.items():
+                for ref_name, ref_cfg in refine_presets.items():
+                    add_recipe(
+                        "block_sa_refine",
+                        {**lat, **blk_cfg, **sa_cfg, **ref_cfg},
+                        meta_extra={"lattice": lat, "block": blk_name, "sa": sa_name, "refine": ref_name},
+                    )
+                    if META_INIT_MODEL is not None:
+                        add_recipe(
+                            "block_sa_refine_meta",
+                            {**lat, **blk_cfg, **sa_cfg, **ref_cfg, "meta_init_model": META_INIT_MODEL},
+                            meta_extra={"lattice": lat, "block": blk_name, "sa": sa_name, "refine": ref_name, "meta_init": True},
+                        )
+
     # ---- Guided SA (em cima do melhor preset base) ----
     guided_lattice = lattice_variants[:2] if lattice_variants else [{"lattice_pattern": "hex", "lattice_margin": 0.02, "lattice_rotate": 0.0}]
     guided_sa = sa_presets.get("sa50", next(iter(sa_presets.values())))
@@ -1787,6 +1861,19 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
                         {**lat, **guided_sa, **guided_ref, **g_cfg, "guided_model": str(model_path), "meta_init_model": META_INIT_MODEL},
                         meta_extra={"guided_model": model_name, "guided": g_name, "lattice": lat, "meta_init": True},
                     )
+
+                for blk_name, blk_cfg in block_presets.items():
+                    add_recipe(
+                        "guided_block_refine",
+                        {**lat, **blk_cfg, **guided_sa, **guided_ref, **g_cfg, "guided_model": str(model_path)},
+                        meta_extra={"guided_model": model_name, "guided": g_name, "block": blk_name, "lattice": lat},
+                    )
+                    if META_INIT_MODEL is not None:
+                        add_recipe(
+                            "guided_block_refine_meta",
+                            {**lat, **blk_cfg, **guided_sa, **guided_ref, **g_cfg, "guided_model": str(model_path), "meta_init_model": META_INIT_MODEL},
+                            meta_extra={"guided_model": model_name, "guided": g_name, "block": blk_name, "lattice": lat, "meta_init": True},
+                        )
 
     # ---- L2O (n pequeno) + SA/refine ----
     l2o_lattice = lattice_variants[:2] if lattice_variants else [{"lattice_pattern": "hex", "lattice_margin": 0.02, "lattice_rotate": 0.0}]
@@ -1852,6 +1939,7 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
         "lattice_variants_used": len(lattice_variants),
         "sa_presets": sorted(sa_presets.keys()),
         "refine_presets": sorted(refine_presets.keys()),
+        "block_presets": sorted(block_presets.keys()),
         "guided_presets": sorted(guided_presets.keys()),
         "l2o_presets": sorted(l2o_presets.keys()),
         "heatmap_presets": sorted(heatmap_presets.keys()),
@@ -2148,6 +2236,12 @@ else:
     # Rodada unica (use nmax=200 + overlap_check=True para score final)
     def _pick_single_recipe() -> str:
         preferred_families = [
+            "guided_block_refine_meta",
+            "guided_block_refine",
+            "block_sa_refine_meta",
+            "block_sa_refine",
+            "block_refine_meta",
+            "block_refine",
             "guided_refine_meta",
             "guided_refine",
             "l2o_refine_meta",
@@ -2188,6 +2282,12 @@ DEFAULT_MAX_SEED_SWEEP_RECIPE: Dict[str, object] = {
     "sa_nmax": 0,
     "lattice_pattern": "hex",
     "lattice_margin": 0.005,
+    "block_nmax": 200,
+    "block_size": 2,
+    "block_steps": 200,
+    "block_batch": 32,
+    "block_objective": "prefix",
+    "block_init": "cluster",
     "refine_nmin": 200,
     "refine_steps": 5000,
     "refine_batch": 128,
