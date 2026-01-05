@@ -1418,7 +1418,13 @@ def main() -> int:
     ap.add_argument("--sa-trans-nexp", type=float, default=0.0, help="Scale trans_sigma by (n/nref)^nexp.")
     ap.add_argument("--sa-rot-nexp", type=float, default=0.0, help="Scale rot_sigma by (n/nref)^nexp.")
     ap.add_argument("--sa-sigma-nref", type=float, default=50.0, help="Reference n for sigma scaling.")
-    ap.add_argument("--sa-objective", type=str, default="packing", choices=["packing", "prefix"])
+    ap.add_argument(
+        "--sa-objective",
+        type=str,
+        default=None,
+        choices=["packing", "prefix"],
+        help="Objective used by SA. Default: packing (independent) or prefix (when --mother-prefix).",
+    )
     ap.add_argument(
         "--sa-proposal",
         type=str,
@@ -1495,7 +1501,13 @@ def main() -> int:
     ap.add_argument("--refine-trans-nexp", type=float, default=0.0)
     ap.add_argument("--refine-rot-nexp", type=float, default=0.0)
     ap.add_argument("--refine-sigma-nref", type=float, default=50.0)
-    ap.add_argument("--refine-objective", type=str, default="packing", choices=["packing", "prefix"])
+    ap.add_argument(
+        "--refine-objective",
+        type=str,
+        default=None,
+        choices=["packing", "prefix"],
+        help="Objective used by refine-SA. Default: matches --sa-objective (after auto selection).",
+    )
     ap.add_argument(
         "--refine-proposal",
         type=str,
@@ -1546,7 +1558,13 @@ def main() -> int:
     ap.add_argument("--block-sigma-nref", type=float, default=50.0)
     ap.add_argument("--block-overlap-lambda", type=float, default=0.0)
     ap.add_argument("--block-allow-collisions", action="store_true")
-    ap.add_argument("--block-objective", type=str, default="packing", choices=["packing", "prefix"])
+    ap.add_argument(
+        "--block-objective",
+        type=str,
+        default=None,
+        choices=["packing", "prefix"],
+        help="Objective used by block-SA. Default: matches --sa-objective (after auto selection).",
+    )
     ap.add_argument(
         "--block-init",
         type=str,
@@ -1594,6 +1612,12 @@ def main() -> int:
     ap.add_argument("--ga-hc-step-deg", type=float, default=2.0)
     args = ap.parse_args()
     lattice_rotate_degs = _parse_float_list(args.lattice_rotations)
+    if args.sa_objective is None:
+        args.sa_objective = "prefix" if args.mother_prefix else "packing"
+    if args.refine_objective is None:
+        args.refine_objective = args.sa_objective
+    if args.block_objective is None:
+        args.block_objective = args.sa_objective
 
     points = np.array(TREE_POINTS, dtype=float)
     puzzles: dict[int, np.ndarray] = {}
