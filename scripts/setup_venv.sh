@@ -30,5 +30,5 @@ python -m pip install -U setuptools wheel
 echo "+ python -m pip install -U -r requirements.txt"
 python -m pip install -U -r requirements.txt
 
-echo "+ python scripts/build_fastcollide.py (optional)"
-python scripts/build_fastcollide.py || true
+echo "+ python scripts/build/build_fastcollide.py (optional)"
+python scripts/build/build_fastcollide.py || true

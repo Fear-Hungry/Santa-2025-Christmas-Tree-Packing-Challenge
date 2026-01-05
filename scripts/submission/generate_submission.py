@@ -10,18 +10,130 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 
-from geom_np import packing_bbox, packing_score, polygon_radius, shift_poses_to_origin, transform_polygon  # noqa: E402
-from lattice import lattice_poses  # noqa: E402
-from scoring import polygons_intersect  # noqa: E402
-from tree_data import TREE_POINTS  # noqa: E402
-import lattice as lattice_mod  # noqa: E402
+from santa_packing.constants import EPS, SUBMISSION_DECIMALS, SUBMISSION_PREFIX, XY_LIMIT  # noqa: E402
+from santa_packing.geom_np import (  # noqa: E402
+    packing_bbox,
+    packing_score,
+    polygon_radius,
+    shift_poses_to_origin,
+    transform_polygon,
+)
+from santa_packing.lattice import lattice_poses  # noqa: E402
+from santa_packing.postopt_np import repair_overlaps  # noqa: E402
+from santa_packing.scoring import first_overlap_pair, polygons_intersect  # noqa: E402
+from santa_packing.tree_data import TREE_POINTS  # noqa: E402
+import santa_packing.lattice as lattice_mod  # noqa: E402
 
 
 def _format_val(value: float) -> str:
-    return f"s{value:.17f}"
+    v = float(value)
+    if abs(v) < EPS:
+        v = 0.0
+    return f"{SUBMISSION_PREFIX}{v:.{SUBMISSION_DECIMALS}f}"
+
+
+def _fit_xy_in_bounds(poses: np.ndarray) -> np.ndarray:
+    poses = np.array(poses, dtype=float, copy=True)
+    if poses.shape[0] == 0:
+        return poses
+
+    min_x = float(np.min(poses[:, 0]))
+    max_x = float(np.max(poses[:, 0]))
+    min_y = float(np.min(poses[:, 1]))
+    max_y = float(np.max(poses[:, 1]))
+
+    # Compute a translation range that keeps all coordinates inside [-limit, +limit].
+    lo_x = (-XY_LIMIT + EPS) - min_x
+    hi_x = (XY_LIMIT - EPS) - max_x
+    lo_y = (-XY_LIMIT + EPS) - min_y
+    hi_y = (XY_LIMIT - EPS) - max_y
+    if lo_x > hi_x or lo_y > hi_y:
+        raise ValueError(
+            f"Packing does not fit in bounds: x=[{min_x:.6g},{max_x:.6g}] y=[{min_y:.6g},{max_y:.6g}]"
+        )
+
+    shift_x = 0.5 * (lo_x + hi_x)
+    shift_y = 0.5 * (lo_y + hi_y)
+    poses[:, 0] += shift_x
+    poses[:, 1] += shift_y
+    return poses
+
+
+def _quantize_for_submission(poses: np.ndarray) -> np.ndarray:
+    poses = np.array(poses, dtype=float, copy=True)
+    if poses.shape[0] == 0:
+        return poses
+
+    poses[:, 0:2] = np.round(poses[:, 0:2], SUBMISSION_DECIMALS)
+    poses[:, 2] = np.round(poses[:, 2], SUBMISSION_DECIMALS)
+
+    # Clamp to limits (robust to tiny fp drift) and normalize -0.0.
+    poses[:, 0] = np.clip(poses[:, 0], -XY_LIMIT + EPS, XY_LIMIT - EPS)
+    poses[:, 1] = np.clip(poses[:, 1], -XY_LIMIT + EPS, XY_LIMIT - EPS)
+    poses[np.abs(poses) < EPS] = 0.0
+    poses[:, 2] = np.mod(poses[:, 2], 360.0)
+    poses[np.abs(poses) < EPS] = 0.0
+    return poses
+
+
+def _safe_fallback_layout(points: np.ndarray, n: int) -> np.ndarray:
+    radius = float(polygon_radius(points))
+    spacing = 2.0 * radius * 1.05
+    poses = _grid_initial_poses(n, spacing)
+    poses = shift_poses_to_origin(points, poses)
+    poses[:, 2] = 0.0
+    return poses
+
+
+def _finalize_puzzle(points: np.ndarray, poses: np.ndarray, *, seed: int, puzzle_n: int) -> np.ndarray:
+    poses = np.array(poses, dtype=float, copy=True)
+    if poses.shape[0] != puzzle_n:
+        raise ValueError(f"Puzzle {puzzle_n}: expected {puzzle_n} poses, got {poses.shape[0]}")
+
+    poses[:, 2] = np.mod(poses[:, 2], 360.0)
+    if not np.isfinite(poses).all():
+        poses = _safe_fallback_layout(points, puzzle_n)
+
+    try:
+        poses = _fit_xy_in_bounds(poses)
+        poses = _quantize_for_submission(poses)
+    except Exception:
+        poses = _safe_fallback_layout(points, puzzle_n)
+        poses = _fit_xy_in_bounds(poses)
+        poses = _quantize_for_submission(poses)
+
+    pair = first_overlap_pair(points, poses, eps=EPS)
+    if pair is None:
+        return poses
+
+    # Try a small repair first (keeps score essentially unchanged).
+    repaired = repair_overlaps(
+        points,
+        poses,
+        seed=seed,
+        max_iters=2000,
+        step_xy=max(1e-4, 10.0 * EPS),
+        step_deg=0.0,
+    )
+    if repaired is not None:
+        try:
+            repaired = _fit_xy_in_bounds(repaired)
+            repaired = _quantize_for_submission(repaired)
+        except Exception:
+            repaired = None
+        if repaired is not None and first_overlap_pair(points, repaired, eps=EPS) is None:
+            return repaired
+
+    # Hard fallback: guaranteed-feasible grid.
+    fallback = _safe_fallback_layout(points, puzzle_n)
+    fallback = _fit_xy_in_bounds(fallback)
+    fallback = _quantize_for_submission(fallback)
+    if first_overlap_pair(points, fallback, eps=EPS) is not None:
+        raise RuntimeError(f"Puzzle {puzzle_n}: failed to produce a feasible (non-overlapping) solution")
+    return fallback
 
 
 def _grid_initial_poses(n: int, spacing: float) -> np.ndarray:
@@ -75,8 +187,7 @@ def _run_sa(
         _JAX_AVAILABLE = False
         return None
 
-    from optimizer import run_sa_batch  # noqa: E402
-    from geom_np import polygon_radius  # noqa: E402
+    from santa_packing.optimizer import run_sa_batch  # noqa: E402
 
     points = np.array(TREE_POINTS, dtype=float)
     radius = polygon_radius(points)
@@ -360,7 +471,7 @@ def _run_sa_blocks_from_initial(
         _JAX_AVAILABLE = False
         return None
 
-    from optimizer import run_sa_blocks_batch  # noqa: E402
+    from santa_packing.optimizer import run_sa_blocks_batch  # noqa: E402
 
     points = np.array(TREE_POINTS, dtype=float)
     initial = np.array(initial_poses, dtype=float)
@@ -539,9 +650,9 @@ def _run_sa_guided(
     except Exception:
         return None
 
-    from optimizer import run_sa_batch_guided  # noqa: E402
-    from l2o import L2OConfig, load_params_npz  # noqa: E402
-    from geom_np import polygon_radius  # noqa: E402
+    from santa_packing.geom_np import polygon_radius  # noqa: E402
+    from santa_packing.l2o import L2OConfig, load_params_npz  # noqa: E402
+    from santa_packing.optimizer import run_sa_batch_guided  # noqa: E402
 
     points = np.array(TREE_POINTS, dtype=float)
     radius = polygon_radius(points)
@@ -649,8 +760,8 @@ def _run_l2o(
     except Exception:
         return None
 
-    from l2o import L2OConfig, load_params_npz, optimize_with_l2o  # noqa: E402
-    from geom_np import polygon_radius  # noqa: E402
+    from santa_packing.geom_np import polygon_radius  # noqa: E402
+    from santa_packing.l2o import L2OConfig, load_params_npz, optimize_with_l2o  # noqa: E402
 
     points = np.array(TREE_POINTS, dtype=float)
     radius = polygon_radius(points)
@@ -748,16 +859,28 @@ def _best_lattice_poses(
     pattern: str,
     margin: float,
     rotate_deg: float,
+    rotate_mode: str,
     rotate_degs: list[float] | None,
 ) -> np.ndarray:
+    if rotate_mode != "constant":
+        seq = rotate_degs if rotate_degs else [rotate_deg]
+        return lattice_poses(
+            n,
+            pattern=pattern,
+            margin=margin,
+            rotate_deg=rotate_deg,
+            rotate_mode=str(rotate_mode),
+            rotate_degs=seq,
+        )
+
     if not rotate_degs:
-        return lattice_poses(n, pattern=pattern, margin=margin, rotate_deg=rotate_deg)
+        return lattice_poses(n, pattern=pattern, margin=margin, rotate_deg=rotate_deg, rotate_mode="constant")
 
     points = np.array(TREE_POINTS, dtype=float)
     best_score = float("inf")
     best_poses: np.ndarray | None = None
     for deg in rotate_degs:
-        poses = lattice_poses(n, pattern=pattern, margin=margin, rotate_deg=deg)
+        poses = lattice_poses(n, pattern=pattern, margin=margin, rotate_deg=deg, rotate_mode="constant")
         s = packing_score(points, poses)
         if s < best_score:
             best_score = s
@@ -787,7 +910,12 @@ def solve_n(
     lattice_pattern: str,
     lattice_margin: float,
     lattice_rotate_deg: float,
+    lattice_rotate_mode: str,
     lattice_rotate_degs: list[float] | None,
+    lattice_post_nmax: int,
+    lattice_post_steps: int,
+    lattice_post_step_xy: float,
+    lattice_post_step_deg: float,
     sa_nmax: int,
     sa_batch_size: int,
     sa_steps: int,
@@ -905,7 +1033,7 @@ def solve_n(
 
     if heatmap_model is not None and n <= heatmap_nmax:
         try:
-            from heatmap_meta import HeatmapConfig, heatmap_search, load_params  # noqa: E402
+            from santa_packing.heatmap_meta import HeatmapConfig, heatmap_search, load_params  # noqa: E402
         except Exception:
             heatmap_model = None
         if heatmap_model is not None:
@@ -936,6 +1064,7 @@ def solve_n(
                 pattern=lattice_pattern,
                 margin=lattice_margin,
                 rotate_deg=lattice_rotate_deg,
+                rotate_mode=lattice_rotate_mode,
                 rotate_degs=lattice_rotate_degs,
             )
         poses = _run_l2o(
@@ -959,7 +1088,7 @@ def solve_n(
         except Exception:
             meta_init_model = None
         if meta_init_model is not None:
-            from meta_init import MetaInitConfig, apply_meta_init, load_meta_params  # noqa: E402
+            from santa_packing.meta_init import MetaInitConfig, apply_meta_init, load_meta_params  # noqa: E402
 
             points = np.array(TREE_POINTS, dtype=float)
             radius = polygon_radius(points)
@@ -984,6 +1113,7 @@ def solve_n(
                 pattern=lattice_pattern,
                 margin=lattice_margin,
                 rotate_deg=lattice_rotate_deg,
+                rotate_mode=lattice_rotate_mode,
                 rotate_degs=lattice_rotate_degs,
             )
 
@@ -1106,8 +1236,21 @@ def solve_n(
             pattern=lattice_pattern,
             margin=lattice_margin,
             rotate_deg=lattice_rotate_deg,
+            rotate_mode=lattice_rotate_mode,
             rotate_degs=lattice_rotate_degs,
         )
+        if lattice_post_nmax > 0 and lattice_post_steps > 0 and n <= lattice_post_nmax:
+            from santa_packing.postopt_np import hill_climb_boundary  # noqa: E402
+
+            points = np.array(TREE_POINTS, dtype=float)
+            base = hill_climb_boundary(
+                points,
+                base,
+                steps=lattice_post_steps,
+                step_xy=lattice_post_step_xy,
+                step_deg=lattice_post_step_deg,
+                seed=seed,
+            )
 
     if refine_steps > 0 and n >= refine_nmin:
         if guided_model is not None:
@@ -1175,7 +1318,7 @@ def solve_n(
     points = np.array(TREE_POINTS, dtype=float)
 
     if lns_passes > 0 and lns_nmax > 0 and n <= lns_nmax:
-        from postopt_np import large_neighborhood_search  # noqa: E402
+        from santa_packing.postopt_np import large_neighborhood_search  # noqa: E402
 
         base = large_neighborhood_search(
             points,
@@ -1197,7 +1340,7 @@ def solve_n(
         )
 
     if ga_gens > 0 and ga_nmax > 0 and n <= ga_nmax:
-        from postopt_np import genetic_optimize  # noqa: E402
+        from santa_packing.postopt_np import genetic_optimize  # noqa: E402
 
         base = genetic_optimize(
             points,
@@ -1219,7 +1362,7 @@ def solve_n(
         )
 
     if hc_passes > 0 and hc_nmax > 0 and n <= hc_nmax:
-        from postopt_np import hill_climb  # noqa: E402
+        from santa_packing.postopt_np import hill_climb  # noqa: E402
 
         base = hill_climb(
             points,
@@ -1306,11 +1449,27 @@ def main() -> int:
     ap.add_argument("--lattice-margin", type=float, default=0.02, help="Relative spacing margin")
     ap.add_argument("--lattice-rotate", type=float, default=0.0, help="Constant rotation (deg)")
     ap.add_argument(
+        "--lattice-rotate-mode",
+        type=str,
+        default="constant",
+        choices=["constant", "row", "checker", "ring"],
+        help="Rotation pattern for lattice. If not constant, uses --lattice-rotations as a repeating sequence.",
+    )
+    ap.add_argument(
         "--lattice-rotations",
         type=str,
         default="0,15,30",
-        help="Comma-separated rotations to try (deg). If set, pick the best lattice per n.",
+        help="Comma-separated rotations (deg). In constant mode: try each value and pick best per n; otherwise: repeating sequence.",
     )
+    ap.add_argument(
+        "--lattice-post-nmax",
+        type=int,
+        default=0,
+        help="Apply a short boundary hill-climb right after lattice for n <= this threshold (0=disabled).",
+    )
+    ap.add_argument("--lattice-post-steps", type=int, default=50, help="Post-lattice boundary steps.")
+    ap.add_argument("--lattice-post-step-xy", type=float, default=0.01, help="Post-lattice translation step.")
+    ap.add_argument("--lattice-post-step-deg", type=float, default=0.0, help="Post-lattice rotation step (deg).")
 
     ap.add_argument("--refine-nmin", type=int, default=0, help="Refine lattice with SA for n >= this threshold (0=disabled)")
     ap.add_argument("--refine-batch", type=int, default=16, help="Refine SA batch size")
@@ -1436,21 +1595,22 @@ def main() -> int:
     args = ap.parse_args()
     lattice_rotate_degs = _parse_float_list(args.lattice_rotations)
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    with args.out.open("w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["id", "x", "y", "deg"])
+    points = np.array(TREE_POINTS, dtype=float)
+    puzzles: dict[int, np.ndarray] = {}
 
-        points = np.array(TREE_POINTS, dtype=float)
-
-        if args.mother_prefix:
-            mother = solve_n(
+    if args.mother_prefix:
+        mother = solve_n(
                 args.nmax,
                 seed=args.seed + args.nmax,
                 lattice_pattern=args.lattice_pattern,
                 lattice_margin=args.lattice_margin,
                 lattice_rotate_deg=args.lattice_rotate,
+                lattice_rotate_mode=args.lattice_rotate_mode,
                 lattice_rotate_degs=lattice_rotate_degs,
+                lattice_post_nmax=args.lattice_post_nmax,
+                lattice_post_steps=args.lattice_post_steps,
+                lattice_post_step_xy=args.lattice_post_step_xy,
+                lattice_post_step_deg=args.lattice_post_step_deg,
                 sa_nmax=args.sa_nmax,
                 sa_batch_size=args.sa_batch,
                 sa_steps=args.sa_steps,
@@ -1563,28 +1723,30 @@ def main() -> int:
                 block_template_pattern=args.block_template_pattern,
                 block_template_margin=args.block_template_margin,
                 block_template_rotate=args.block_template_rotate,
-            )
+        )
 
-            mother = np.array(mother, dtype=float)
-            mother[:, 2] = np.mod(mother[:, 2], 360.0)
-            if args.mother_reorder == "radial":
-                mother = _radial_reorder(points, mother)
+        mother = np.array(mother, dtype=float)
+        mother[:, 2] = np.mod(mother[:, 2], 360.0)
+        if args.mother_reorder == "radial":
+            mother = _radial_reorder(points, mother)
 
-            for n in range(1, args.nmax + 1):
-                poses = shift_poses_to_origin(points, mother[:n])
-                poses = np.array(poses, dtype=float)
-                poses[:, 2] = np.mod(poses[:, 2], 360.0)
-                for i, (x, y, deg) in enumerate(poses):
-                    writer.writerow([f"{n:03d}_{i}", _format_val(x), _format_val(y), _format_val(deg)])
-        else:
-            for n in range(1, args.nmax + 1):
-                poses = solve_n(
+        for n in range(1, args.nmax + 1):
+            poses = shift_poses_to_origin(points, mother[:n])
+            puzzles[n] = _finalize_puzzle(points, poses, seed=args.seed + n, puzzle_n=n)
+    else:
+        for n in range(1, args.nmax + 1):
+            poses = solve_n(
                     n,
                     seed=args.seed + n,
                     lattice_pattern=args.lattice_pattern,
                     lattice_margin=args.lattice_margin,
                     lattice_rotate_deg=args.lattice_rotate,
+                    lattice_rotate_mode=args.lattice_rotate_mode,
                     lattice_rotate_degs=lattice_rotate_degs,
+                    lattice_post_nmax=args.lattice_post_nmax,
+                    lattice_post_steps=args.lattice_post_steps,
+                    lattice_post_step_xy=args.lattice_post_step_xy,
+                    lattice_post_step_deg=args.lattice_post_step_deg,
                     sa_nmax=args.sa_nmax,
                     sa_batch_size=args.sa_batch,
                     sa_steps=args.sa_steps,
@@ -1697,13 +1859,24 @@ def main() -> int:
                     block_template_pattern=args.block_template_pattern,
                     block_template_margin=args.block_template_margin,
                     block_template_rotate=args.block_template_rotate,
-                )
+            )
 
-                poses = np.array(poses, dtype=float)
-                poses[:, 2] = np.mod(poses[:, 2], 360.0)
+            puzzles[n] = _finalize_puzzle(points, poses, seed=args.seed + n, puzzle_n=n)
 
-                for i, (x, y, deg) in enumerate(poses):
-                    writer.writerow([f"{n:03d}_{i}", _format_val(x), _format_val(y), _format_val(deg)])
+    # Write CSV (after strict validation/repair).
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    with args.out.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["id", "x", "y", "deg"])
+        for n in range(1, args.nmax + 1):
+            poses = puzzles[n]
+            for i, (x, y, deg) in enumerate(poses):
+                writer.writerow([f"{n:03d}_{i}", _format_val(x), _format_val(y), _format_val(deg)])
+
+    # Rule of the pipeline: always run strict validation after generating.
+    from santa_packing.scoring import score_submission  # noqa: E402
+
+    _ = score_submission(args.out, nmax=args.nmax, check_overlap=True, require_complete=True)
 
     return 0
 

@@ -28,7 +28,7 @@ def _eprint(*args: object) -> None:
 
 
 def _repo_root_from_script() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return Path(__file__).resolve().parents[2]
 
 
 def _safe_name(text: str) -> str:
@@ -188,7 +188,7 @@ def _prefix_total(s: np.ndarray, *, nmax: int) -> float:
 
 
 def _compute_s(points: np.ndarray, puzzles: dict[int, np.ndarray], *, nmax: int) -> np.ndarray:
-    from geom_np import packing_score  # noqa: E402
+    from santa_packing.geom_np import packing_score  # noqa: E402
 
     s = np.full((nmax + 1,), np.nan, dtype=float)
     s[0] = 0.0
@@ -210,8 +210,8 @@ def _write_per_n_csv(path: Path, candidate: Candidate, *, nmax: int) -> None:
 
 
 def _write_submission(path: Path, puzzles: dict[int, np.ndarray], *, nmax: int) -> None:
-    from geom_np import shift_poses_to_origin  # noqa: E402
-    from tree_data import TREE_POINTS  # noqa: E402
+    from santa_packing.geom_np import shift_poses_to_origin  # noqa: E402
+    from santa_packing.tree_data import TREE_POINTS  # noqa: E402
 
     points = np.array(TREE_POINTS, dtype=float)
 
@@ -237,7 +237,7 @@ def main() -> int:
             "This is the Python/JAX replacement for old C++ portfolio merge."
         )
     )
-    ap.add_argument("--repo", type=Path, default=_repo_root_from_script(), help="Repo root (default: script parent)")
+    ap.add_argument("--repo", type=Path, default=_repo_root_from_script(), help="Repo root (default: auto-detected)")
     ap.add_argument("--runs-dir", type=Path, default=None, help="Runs directory (default: <repo>/runs)")
     ap.add_argument("--tag", type=str, default="sweep_ensemble", help="Run tag (runs/<tag>_<ts>/)")
     ap.add_argument("--nmax", type=int, default=200, help="Max puzzle n (default: 200)")
@@ -275,7 +275,7 @@ def main() -> int:
     run_dir = runs_dir / f"{_safe_name(ns.tag)}_{stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    generate_py = root / "scripts" / "generate_submission.py"
+    generate_py = root / "scripts" / "submission" / "generate_submission.py"
     if not generate_py.is_file():
         raise SystemExit(f"Missing generator script: {generate_py}")
 
@@ -292,10 +292,10 @@ def main() -> int:
     }
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
-    sys.path.insert(0, str(root / "src"))
-    from scoring import load_submission  # noqa: E402
-    from tree_data import TREE_POINTS  # noqa: E402
-    from postopt_np import has_overlaps  # noqa: E402
+    sys.path.insert(0, str(root))
+    from santa_packing.postopt_np import has_overlaps  # noqa: E402
+    from santa_packing.scoring import load_submission  # noqa: E402
+    from santa_packing.tree_data import TREE_POINTS  # noqa: E402
 
     points = np.array(TREE_POINTS, dtype=float)
 
@@ -458,13 +458,13 @@ def main() -> int:
     code_audit = (
         "# Code audit: sweep + per-n ensemble\n\n"
         "## What this script does\n"
-        "- Runs multiple calls to `scripts/generate_submission.py` (multi-start) for different recipes/seeds.\n"
+        "- Runs multiple calls to `scripts/submission/generate_submission.py` (multi-start) for different recipes/seeds.\n"
         "- Computes `s_n` for every candidate and every puzzle `n`.\n"
         "- Builds an ensemble submission by picking, **for each n**, the candidate with the smallest `s_n` (optionally requiring no-overlap).\n\n"
         "## Key files\n"
-        "- `scripts/sweep_ensemble.py`: orchestration + ensemble selection.\n"
-        "- `scripts/generate_submission.py`: single-run generator (all knobs/recipes flow through it).\n"
-        "- `src/postopt_np.py:has_overlaps`: overlap checker used for selecting feasible puzzles.\n\n"
+        "- `scripts/submission/sweep_ensemble.py`: orchestration + ensemble selection.\n"
+        "- `scripts/submission/generate_submission.py`: single-run generator (all knobs/recipes flow through it).\n"
+        "- `santa_packing/postopt_np.py:has_overlaps`: overlap checker used for selecting feasible puzzles.\n\n"
         "## Safety / correctness\n"
         "- `--overlap-check selected` verifies feasibility puzzle-by-puzzle while selecting the ensemble.\n"
         "- If you use `--overlap-check none`, the ensemble may be invalid.\n\n"

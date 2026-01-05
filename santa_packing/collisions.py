@@ -3,9 +3,9 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from geometry import transform_polygon
-from physics import polygons_intersect
-from tree_bounds import TREE_RADIUS2, aabb_for_poses
+from .geometry import transform_polygon
+from .physics import polygons_intersect
+from .tree_bounds import TREE_RADIUS2, aabb_for_poses
 
 
 def check_any_collisions(poses: jax.Array, base_poly: jax.Array) -> jax.Array:

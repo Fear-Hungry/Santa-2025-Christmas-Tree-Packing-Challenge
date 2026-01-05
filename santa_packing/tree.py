@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 
-from tree_data import TREE_POINTS
+from .tree_data import TREE_POINTS
 
 def get_tree_polygon() -> jnp.ndarray:
     """

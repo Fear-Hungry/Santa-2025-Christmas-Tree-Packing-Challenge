@@ -11,12 +11,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 import sys
 
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
-from l2o import (  # noqa: E402
+from santa_packing.l2o import (  # noqa: E402
     L2OConfig,
     behavior_cloning_loss,
     behavior_cloning_loss_weighted,

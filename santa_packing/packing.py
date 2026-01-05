@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from tree_bounds import aabb_for_poses
+from .tree_bounds import aabb_for_poses
 
 
 def compute_packing_bbox(poses):
@@ -22,6 +22,23 @@ def compute_packing_bbox(poses):
     max_y = jnp.max(bboxes[:, 3])
 
     return jnp.array([min_x, min_y, max_x, max_y])
+
+
+def compute_packing_bbox_from_bboxes(bboxes: jax.Array) -> jax.Array:
+    """Compute global packing bbox from per-tree bboxes (N,4)."""
+    min_x = jnp.min(bboxes[:, 0])
+    min_y = jnp.min(bboxes[:, 1])
+    max_x = jnp.max(bboxes[:, 2])
+    max_y = jnp.max(bboxes[:, 3])
+    return jnp.array([min_x, min_y, max_x, max_y], dtype=bboxes.dtype)
+
+
+def packing_score_from_bboxes(bboxes: jax.Array) -> jax.Array:
+    """Packing score from per-tree bboxes (N,4)."""
+    bbox = compute_packing_bbox_from_bboxes(bboxes)
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    return jnp.maximum(width, height)
 
 
 def packing_score(poses):
@@ -50,6 +67,11 @@ def prefix_packing_score(poses):
     sum_{n=1..N} s_n^2 / n where s_n is the bbox max side for prefix [0..n).
     """
     bboxes = aabb_for_poses(poses, padded=False)
+    return prefix_packing_score_from_bboxes(bboxes)
+
+
+def prefix_packing_score_from_bboxes(bboxes: jax.Array) -> jax.Array:
+    """Prefix-style objective over a single ordered packing from per-tree bboxes (N,4)."""
 
     def scan_fn(carry, bbox):
         min_x, min_y, max_x, max_y = carry

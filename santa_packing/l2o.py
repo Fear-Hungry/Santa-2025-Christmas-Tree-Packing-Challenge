@@ -7,10 +7,10 @@ from typing import Dict, Tuple
 import jax
 import jax.numpy as jnp
 
-from collisions import check_any_collisions
-from packing import packing_score, prefix_packing_score
-from tree import get_tree_polygon
-from tree_bounds import TREE_RADIUS2
+from .collisions import check_any_collisions
+from .packing import packing_score, prefix_packing_score
+from .tree import get_tree_polygon
+from .tree_bounds import TREE_RADIUS2
 
 
 @dataclass(frozen=True)

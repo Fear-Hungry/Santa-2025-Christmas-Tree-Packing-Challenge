@@ -3,7 +3,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from tree import get_tree_polygon
+from .tree import get_tree_polygon
 
 
 def polygon_radius2(poly: jax.Array) -> jax.Array:
@@ -78,4 +78,3 @@ def aabb_for_poses(poses: jax.Array, *, padded: bool = False) -> jax.Array:
 def aabb_overlap(a: jax.Array, b: jax.Array) -> jax.Array:
     """Return True if two AABBs [minx,miny,maxx,maxy] overlap."""
     return (a[2] >= b[0]) & (b[2] >= a[0]) & (a[3] >= b[1]) & (b[3] >= a[1])
-

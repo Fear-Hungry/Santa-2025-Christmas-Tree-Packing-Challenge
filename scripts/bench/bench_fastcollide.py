@@ -8,26 +8,26 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 import sys
 
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
-from geom_np import transform_polygon  # noqa: E402
-from scoring import _polygons_intersect  # noqa: E402
-from tree_data import TREE_POINTS  # noqa: E402
+from santa_packing.geom_np import transform_polygon  # noqa: E402
+from santa_packing.scoring import _polygons_intersect_strict as _polygons_intersect  # noqa: E402
+from santa_packing.tree_data import TREE_POINTS  # noqa: E402
 
 
 def _try_import_fast():
     try:
-        import fastcollide  # type: ignore
+        import santa_packing.fastcollide as fastcollide  # type: ignore
     except Exception:
         return None
     return fastcollide
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Benchmark C++ fastcollide vs Python scoring._polygons_intersect")
+    ap = argparse.ArgumentParser(description="Benchmark C++ fastcollide vs Python scoring._polygons_intersect_strict")
     ap.add_argument("--n-polys", type=int, default=256, help="Number of transformed polygons")
     ap.add_argument("--pairs", type=int, default=20000, help="Number of random pairs to test")
     ap.add_argument("--seed", type=int, default=0)
@@ -52,13 +52,13 @@ def main() -> int:
     if fast is None and args.build:
         import subprocess
 
-        cmd = [sys.executable, str(ROOT / "scripts" / "build_fastcollide.py")]
+        cmd = [sys.executable, str(ROOT / "scripts" / "build" / "build_fastcollide.py")]
         print("+", " ".join(cmd))
         subprocess.check_call(cmd, cwd=str(ROOT))
         fast = _try_import_fast()
 
     if fast is None:
-        raise SystemExit("fastcollide not importable. Run: python3 scripts/build_fastcollide.py")
+        raise SystemExit("fastcollide not importable. Run: python3 scripts/build/build_fastcollide.py")
 
     # Parity check + timing (python)
     t0 = time.perf_counter()
@@ -94,4 +94,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

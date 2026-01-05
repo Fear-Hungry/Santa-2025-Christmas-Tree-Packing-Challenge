@@ -12,15 +12,15 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 import sys
 
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
-from l2o import L2OConfig, init_params, loss_fn, loss_with_baseline, save_params_npz  # noqa: E402
-from geom_np import polygon_radius, shift_poses_to_origin  # noqa: E402
-from lattice import lattice_poses  # noqa: E402
-from tree_data import TREE_POINTS  # noqa: E402
+from santa_packing.geom_np import polygon_radius, shift_poses_to_origin  # noqa: E402
+from santa_packing.l2o import L2OConfig, init_params, loss_fn, loss_with_baseline, save_params_npz  # noqa: E402
+from santa_packing.lattice import lattice_poses  # noqa: E402
+from santa_packing.tree_data import TREE_POINTS  # noqa: E402
 
 
 def _grid_initial(n: int, spacing: float) -> np.ndarray:

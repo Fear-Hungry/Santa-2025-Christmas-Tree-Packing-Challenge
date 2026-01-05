@@ -23,7 +23,7 @@ def _eprint(*args: object) -> None:
 
 
 def _repo_root_from_script() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return Path(__file__).resolve().parents[2]
 
 
 def _run(
@@ -352,4 +352,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

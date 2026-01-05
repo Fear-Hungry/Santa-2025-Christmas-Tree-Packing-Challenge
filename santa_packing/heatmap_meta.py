@@ -6,9 +6,9 @@ from typing import Dict, Tuple
 
 import numpy as np
 
-from geom_np import packing_score, polygon_bbox, shift_poses_to_origin, transform_polygon
-from scoring import polygons_intersect
-from tree_data import TREE_POINTS
+from .geom_np import packing_score, polygon_bbox, shift_poses_to_origin, transform_polygon
+from .scoring import polygons_intersect
+from .tree_data import TREE_POINTS
 
 
 Params = Dict[str, np.ndarray]

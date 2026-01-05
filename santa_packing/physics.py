@@ -2,6 +2,8 @@ import jax
 import jax.numpy as jnp
 from functools import partial
 
+from .constants import EPS
+
 @jax.jit
 def cross_product(o, a, b):
     """(a - o) x (b - o) z-component."""
@@ -20,7 +22,7 @@ def segments_intersect(p1, p2, p3, p4):
     d4 = cross_product(p1, p2, p4)
 
     # Check signs
-    intersect_strict = ((d1 > 1e-9) != (d2 > 1e-9)) & ((d3 > 1e-9) != (d4 > 1e-9))
+    intersect_strict = ((d1 > EPS) != (d2 > EPS)) & ((d3 > EPS) != (d4 > EPS))
     
     # Consider collinearity/touching if needed, but for strict overlap we usually want > 0
     # For now, strict intersection
@@ -55,9 +57,9 @@ def point_in_polygon(point, poly):
         # We want x_int > x
         
         # Avoid division by zero: if p1[1] == p2[1], cond1 is false anyway
-        x_int = (p2[0] - p1[0]) * (y - p1[1]) / (p2[1] - p1[1] + 1e-10) + p1[0]
+        x_int = (p2[0] - p1[0]) * (y - p1[1]) / (p2[1] - p1[1] + EPS) + p1[0]
         
-        cond2 = x + 1e-9 < x_int
+        cond2 = x + EPS < x_int
         
         intersect = cond1 & cond2
         return carry ^ intersect, None

@@ -10,16 +10,15 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 import sys
 
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
-from geom_np import packing_score, polygon_radius, shift_poses_to_origin, transform_polygon  # noqa: E402
-from geom_np import prefix_score  # noqa: E402
-from lattice import lattice_poses  # noqa: E402
-from scoring import polygons_intersect  # noqa: E402
-from tree_data import TREE_POINTS  # noqa: E402
+from santa_packing.geom_np import packing_score, polygon_radius, prefix_score, shift_poses_to_origin, transform_polygon  # noqa: E402
+from santa_packing.lattice import lattice_poses  # noqa: E402
+from santa_packing.scoring import polygons_intersect  # noqa: E402
+from santa_packing.tree_data import TREE_POINTS  # noqa: E402
 
 
 def _grid_initial(n: int, spacing: float) -> np.ndarray:

@@ -8,17 +8,16 @@ from pathlib import Path
 
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[1]
-    setup = root / "src" / "setup_fastcollide.py"
+    root = Path(__file__).resolve().parents[2]
+    setup = root / "scripts" / "build" / "setup_fastcollide.py"
     if not setup.is_file():
         raise SystemExit(f"Missing setup script: {setup}")
 
     cmd = [sys.executable, str(setup), "build_ext", "--inplace"]
     print("+", " ".join(cmd))
-    subprocess.check_call(cmd, cwd=str(setup.parent))
+    subprocess.check_call(cmd, cwd=str(root))
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -8,17 +8,20 @@ from setuptools import Extension, setup
 def main() -> None:
     import numpy as np
 
-    here = Path(__file__).resolve().parent
+    root = Path(__file__).resolve().parents[2]
+    source = root / "santa_packing" / "fastcollide.cpp"
+    if not source.is_file():
+        raise FileNotFoundError(f"Missing source file: {source}")
     ext = Extension(
-        name="fastcollide",
-        sources=[str(here / "fastcollide.cpp")],
+        name="santa_packing.fastcollide",
+        sources=[str(source)],
         include_dirs=[np.get_include()],
         language="c++",
         extra_compile_args=["-O3", "-std=c++17"],
     )
 
     setup(
-        name="fastcollide",
+        name="santa_packing_fastcollide",
         version="0.0.0",
         ext_modules=[ext],
     )
@@ -26,4 +29,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

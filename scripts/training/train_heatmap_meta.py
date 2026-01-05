@@ -11,14 +11,14 @@ from typing import Dict
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 import sys
 
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
-from geom_np import polygon_radius  # noqa: E402
-from heatmap_meta import HeatmapConfig, heatmap_search, init_params, save_params  # noqa: E402
-from tree_data import TREE_POINTS  # noqa: E402
+from santa_packing.geom_np import polygon_radius  # noqa: E402
+from santa_packing.heatmap_meta import HeatmapConfig, heatmap_search, init_params, save_params  # noqa: E402
+from santa_packing.tree_data import TREE_POINTS  # noqa: E402
 
 
 def _grid_initial(n: int, spacing: float) -> np.ndarray:

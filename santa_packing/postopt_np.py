@@ -7,8 +7,8 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
-from geom_np import polygon_bbox, polygon_radius, shift_poses_to_origin, transform_polygon
-from scoring import polygons_intersect
+from .geom_np import polygon_bbox, polygon_radius, shift_poses_to_origin, transform_polygon
+from .scoring import polygons_intersect
 
 
 def _packing_score_from_bboxes(bboxes: np.ndarray) -> float:
@@ -44,6 +44,31 @@ def _has_overlaps(points: np.ndarray, poses: np.ndarray) -> bool:
 def has_overlaps(points: np.ndarray, poses: np.ndarray) -> bool:
     """Public overlap checker used by sweep/ensemble scripts."""
     return _has_overlaps(points, poses)
+
+
+def repair_overlaps(
+    points: np.ndarray,
+    poses: np.ndarray,
+    *,
+    seed: int = 1,
+    max_iters: int = 2000,
+    step_xy: float = 0.01,
+    step_deg: float = 0.0,
+) -> np.ndarray | None:
+    """Best-effort repair for colliding packings (translation nudges).
+
+    Returns:
+        Repaired poses (shifted to origin) if feasible, otherwise None.
+    """
+    rng = np.random.default_rng(int(seed))
+    return _repair_overlaps(
+        points,
+        poses,
+        rng=rng,
+        max_iters=int(max_iters),
+        step_xy=float(step_xy),
+        step_deg=float(step_deg),
+    )
 
 
 @dataclass
@@ -170,6 +195,106 @@ def hill_climb(
 
         if not improved_pass:
             break
+
+    return shift_poses_to_origin(points, state.poses)
+
+
+def hill_climb_boundary(
+    points: np.ndarray,
+    poses: np.ndarray,
+    *,
+    steps: int = 50,
+    step_xy: float = 0.01,
+    step_deg: float = 0.0,
+    seed: int = 1,
+    candidates: int = 8,
+    tol: float = 1e-12,
+) -> np.ndarray:
+    """Short boundary-focused hill-climb to reduce the packing bounding square.
+
+    Unlike `hill_climb` (which scans every tree), this runs a small fixed budget of
+    steps and targets trees near the current AABB boundary.
+    """
+
+    state = _build_state(points, poses)
+    n = state.poses.shape[0]
+    if n <= 1 or steps <= 0:
+        return shift_poses_to_origin(points, state.poses)
+
+    rng = np.random.default_rng(int(seed))
+
+    for _ in range(int(steps)):
+        min_x = float(np.min(state.bboxes[:, 0]))
+        min_y = float(np.min(state.bboxes[:, 1]))
+        max_x = float(np.max(state.bboxes[:, 2]))
+        max_y = float(np.max(state.bboxes[:, 3]))
+        center = np.array([(min_x + max_x) * 0.5, (min_y + max_y) * 0.5], dtype=float)
+
+        idxs = np.arange(n, dtype=np.int32)
+        if candidates > 0 and n > candidates:
+            # Sample a few near-boundary trees (weighted); keeps runtime stable for larger n.
+            chosen: list[int] = []
+            for _ in range(int(candidates)):
+                idx, _axis, _center = _pick_boundary_tree(state.bboxes, rng=rng, k=8)
+                chosen.append(int(idx))
+            idxs = np.array(sorted(set(chosen)), dtype=np.int32)
+
+        best_score = state.score
+        best_idx: int | None = None
+        best_pose: np.ndarray | None = None
+        best_poly: np.ndarray | None = None
+        best_bbox: np.ndarray | None = None
+
+        for idx in idxs:
+            base_pose = state.poses[int(idx)].copy()
+            dir_xy = center - base_pose[:2]
+            sx = 0.0 if abs(float(dir_xy[0])) < 1e-12 else float(math.copysign(step_xy, float(dir_xy[0])))
+            sy = 0.0 if abs(float(dir_xy[1])) < 1e-12 else float(math.copysign(step_xy, float(dir_xy[1])))
+
+            moves: list[tuple[float, float, float]] = [
+                (sx, 0.0, 0.0),
+                (0.0, sy, 0.0),
+                (sx, sy, 0.0),
+            ]
+            if step_deg != 0.0:
+                moves.append((0.0, 0.0, float(step_deg)))
+                moves.append((0.0, 0.0, float(-step_deg)))
+
+            for dx, dy, ddeg in moves:
+                if dx == 0.0 and dy == 0.0 and ddeg == 0.0:
+                    continue
+                cand_pose = base_pose.copy()
+                cand_pose[0] += dx
+                cand_pose[1] += dy
+                if ddeg != 0.0:
+                    cand_pose[2] = float(math.fmod(cand_pose[2] + ddeg, 360.0))
+                    if cand_pose[2] < 0.0:
+                        cand_pose[2] += 360.0
+
+                cand_poly = transform_polygon(points, cand_pose)
+                cand_center = cand_pose[:2]
+                if _collides_one_vs_all(state, int(idx), cand_center, cand_poly):
+                    continue
+
+                cand_bbox = polygon_bbox(cand_poly)
+                tmp = state.bboxes.copy()
+                tmp[int(idx)] = cand_bbox
+                cand_score = _packing_score_from_bboxes(tmp)
+                if cand_score + tol < best_score:
+                    best_score = cand_score
+                    best_idx = int(idx)
+                    best_pose = cand_pose
+                    best_poly = cand_poly
+                    best_bbox = cand_bbox
+
+        if best_idx is None:
+            break
+
+        state.poses[best_idx] = best_pose  # type: ignore[assignment]
+        state.centers[best_idx] = best_pose[:2]  # type: ignore[index]
+        state.polys[best_idx] = best_poly  # type: ignore[assignment]
+        state.bboxes[best_idx] = best_bbox  # type: ignore[assignment]
+        state.score = best_score
 
     return shift_poses_to_origin(points, state.poses)
 

@@ -13,17 +13,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 import sys
 
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
-from geom_np import polygon_radius, shift_poses_to_origin  # noqa: E402
-from collisions import check_any_collisions  # noqa: E402
-from meta_init import MetaInitConfig, apply_meta_init, init_meta_params, save_meta_params  # noqa: E402
-from optimizer import run_sa_batch  # noqa: E402
-from tree import get_tree_polygon  # noqa: E402
-from tree_data import TREE_POINTS  # noqa: E402
+from santa_packing.collisions import check_any_collisions  # noqa: E402
+from santa_packing.geom_np import polygon_radius, shift_poses_to_origin  # noqa: E402
+from santa_packing.meta_init import MetaInitConfig, apply_meta_init, init_meta_params, save_meta_params  # noqa: E402
+from santa_packing.optimizer import run_sa_batch  # noqa: E402
+from santa_packing.tree import get_tree_polygon  # noqa: E402
+from santa_packing.tree_data import TREE_POINTS  # noqa: E402
 
 
 def _grid_initial(n: int, spacing: float) -> np.ndarray:

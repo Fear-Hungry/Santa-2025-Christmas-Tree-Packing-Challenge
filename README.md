@@ -20,11 +20,11 @@
 
 ## Status atual do projeto (laboratorio)
 
-* **Score local atual (fonte: `scripts/score_submission.py`):** `86.8115042186`
+* **Score local atual (fonte: `scripts/evaluation/score_submission.py`):** `86.8115042186`
   * **Arquivo:** `submission.csv` (baseline atual).
-  * Observacao: score calculado com o scorer Python em modo rapido (`--no-overlap`). Para validacao final, rode sem `--no-overlap`.
-* **Pipeline atual:** versao Python/JAX com geracao via `scripts/generate_submission.py` e registro de experimentos em `runs/`.
-  * **Multi-start/ensemble:** `scripts/sweep_ensemble.py` (selecao por instancia/`n`).
+  * Observacao: score acima foi calculado em modo rapido (`--no-overlap`). Para evitar perder submission por overlap, trate como regra: **gerou submission → valida strict (com overlap check)**.
+* **Pipeline atual:** versao Python/JAX com geracao via `scripts/submission/generate_submission.py` e registro de experimentos em `runs/`.
+  * **Multi-start/ensemble:** `scripts/submission/sweep_ensemble.py` (selecao por instancia/`n`).
 
 ## O que “da score alto” aqui (na pratica)
 
@@ -175,7 +175,7 @@ python -m pip install -U pip
 python -m pip install -U -r requirements.txt
 
 # Opcional (acelera `polygons_intersect` no score local):
-python scripts/build_fastcollide.py
+python scripts/build/build_fastcollide.py
 ```
 
 Se voce tiver GPU/CUDA, instale o pacote JAX adequado ao seu ambiente.
@@ -186,50 +186,58 @@ Depois do setup, selecione o interpretador/kernel da `.venv` (assim o `ipykernel
 
 ### Estrutura de codigo
 
-* `src/main.py`: runner do SA batch (gera `best_packing.png`).
-* `src/optimizer.py`: SA vetorizado com perturbacoes de translacao e rotacao.
-* `src/lattice.py`: gerador de lattice (hex/square) com busca de espacamento sem overlap.
-* `src/scoring.py`: scorer local (prefix score) com opcao de checar overlap.
-* `src/tree_data.py` / `src/tree.py`: poligono da arvore (15 vertices).
-* `scripts/generate_submission.py`: gera submission hibrido (SA para n pequeno, lattice para n grande).
-* `scripts/score_submission.py`: score em JSON para um `submission.csv`.
-* `scripts/train_l2o.py`: treino de uma politica L2O simples (REINFORCE) para propor movimentos.
+* `santa_packing/`: pacote principal (geometria, colisao, SA/L2O, scorer, etc.).
+  * `santa_packing/main.py`: runner do SA batch (gera `best_packing.png`; exemplo em `assets/best_packing.png`).
+* `scripts/build/`: build/compilacao (ex.: `scripts/build/build_fastcollide.py`).
+* `scripts/submission/`: geracao de submission + sweep/ensemble.
+* `scripts/evaluation/`: avaliacao/scorer (ex.: `scripts/evaluation/score_submission.py`).
+* `scripts/training/`: treino (L2O, meta-init, heatmap).
+* `scripts/data/`: geracao de datasets (behavior cloning).
+* `scripts/bench/`: benchmarks.
+* `assets/`: recursos estaticos (ex.: `assets/best_packing.png`).
 
 ### Comandos rapidos
 
 Rodar SA isolado (uma instancia):
 
 ```bash
-python3 src/main.py --n_trees 25 --batch_size 128 --n_steps 1000 --rot_prob 0.3 --objective packing
+python3 -m santa_packing.main --n_trees 25 --batch_size 128 --n_steps 1000 --rot_prob 0.3 --objective packing
 ```
+
+Notas (qualidade sem custo grande):
+* O SA usa por padrao: **push-to-center** (move deterministico leve), **adaptacao de sigma** (alvo de aceitacao) e **reheating** (se estagnar). Veja flags em `santa_packing/main.py` (ex.: `--no-adapt-sigma`, `--push_prob`, `--reheat_patience`).
 
 Gerar submission (hibrido SA + lattice):
 
 ```bash
-python3 scripts/generate_submission.py --out submission.csv --nmax 200 --sa-nmax 30 --sa-steps 400 --sa-batch 64 --sa-objective packing
+python3 scripts/submission/generate_submission.py --out submission.csv --nmax 200 --sa-nmax 30 --sa-steps 400 --sa-batch 64 --sa-objective packing
 ```
 
 Sweep + ensemble por instancia (multi-start; escolhe o melhor `s_n` por `n` entre varias tentativas):
 
 ```bash
-python3 scripts/sweep_ensemble.py --nmax 200 --seeds 1,2,3 \\
+python3 scripts/submission/sweep_ensemble.py --nmax 200 --seeds 1,2,3 \\
   --recipe hex:"--lattice-pattern hex --lattice-rotations 0,15,30" \\
   --recipe square:"--lattice-pattern square --lattice-rotations 0,15,30" \\
   --out submission_ensemble.csv
 ```
 
+Notas (lattice):
+* `--lattice-rotate-mode` suporta `constant`, `row`, `checker`, `ring`. Em modo `constant`, `--lattice-rotations` tenta varias rotacoes; nos outros modos, vira uma sequencia repetida.
+* Para um ajuste rapido apos o lattice (sem SA), use `--lattice-post-nmax 200 --lattice-post-steps 30` (hill-climb curto focado na borda do bbox).
+
 Gerar submission usando L2O para n pequeno (exige policy treinada):
 
 ```bash
-python3 scripts/train_l2o.py --n 10 --train-steps 200 --out runs/l2o_policy.npz
-python3 scripts/generate_submission.py --out submission.csv --nmax 200 --l2o-model runs/l2o_policy.npz --l2o-nmax 10
+python3 scripts/training/train_l2o.py --n 10 --train-steps 200 --out runs/l2o_policy.npz
+python3 scripts/submission/generate_submission.py --out submission.csv --nmax 200 --l2o-model runs/l2o_policy.npz --l2o-nmax 10
 ```
 
 Treinar L2O com GNN (kNN simples):
 
 ```bash
-python3 scripts/train_l2o.py --n 10 --train-steps 200 --policy gnn --knn-k 4 --out runs/l2o_gnn_policy.npz
-python3 scripts/generate_submission.py --out submission.csv --nmax 200 --l2o-model runs/l2o_gnn_policy.npz --l2o-nmax 10
+python3 scripts/training/train_l2o.py --n 10 --train-steps 200 --policy gnn --knn-k 4 --out runs/l2o_gnn_policy.npz
+python3 scripts/submission/generate_submission.py --out submission.csv --nmax 200 --l2o-model runs/l2o_gnn_policy.npz --l2o-nmax 10
 ```
 
 Para alinhar o reward ao score da competicao, use `--reward prefix` no L2O e `--sa-objective prefix` no SA. Opcionalmente, experimente `--feature-mode rich`, `--gnn-attention`, `--gnn-steps` maior e `--overlap-lambda` pequeno (penalidade suave por overlap via circulos).
@@ -237,7 +245,7 @@ Para alinhar o reward ao score da competicao, use `--reward prefix` no L2O e `--
 Treinamento com dataset multi-N (ex.: N=25,50,100) e diferentes inicializacoes:
 
 ```bash
-python3 scripts/train_l2o.py --n-list 25,50,100 --train-steps 200 \\
+python3 scripts/training/train_l2o.py --n-list 25,50,100 --train-steps 200 \\
   --init mix --dataset-size 128 --dataset-out runs/l2o_dataset.npz \\
   --policy gnn --knn-k 4 --out runs/l2o_gnn_policy.npz
 ```
@@ -247,64 +255,66 @@ Treinamento supervisado (imitacao de SA / behavior cloning):
 1) Colete um dataset de SA (guarda estados + deslocamentos aceitos):
 
 ```bash
-python3 scripts/collect_sa_dataset.py --n-list 25,50,100 --runs-per-n 5 --steps 400 \\
+python3 scripts/data/collect_sa_dataset.py --n-list 25,50,100 --runs-per-n 5 --steps 400 \\
   --init mix --best-only --out runs/sa_bc_dataset.npz
 ```
 
 2) Treine o modelo para imitar os deslocamentos aceitos:
 
 ```bash
-python3 scripts/train_l2o_bc.py --dataset runs/sa_bc_dataset.npz --policy gnn --knn-k 4 --train-steps 500 \\
+python3 scripts/training/train_l2o_bc.py --dataset runs/sa_bc_dataset.npz --policy gnn --knn-k 4 --train-steps 500 \\
   --out runs/l2o_bc_policy.npz
 ```
 
 Treinamento baseado em mapas de calor (inspiracao MoCo, meta-otimizador + ES):
 
 ```bash
-python3 scripts/train_heatmap_meta.py --n-list 25,50,100 --train-steps 50 --es-pop 6 \\
+python3 scripts/training/train_heatmap_meta.py --n-list 25,50,100 --train-steps 50 --es-pop 6 \\
   --heatmap-steps 200 --policy gnn --knn-k 4 --out runs/heatmap_meta.npz
 ```
 
 Meta-inicializacao (gera um bom start para o SA; requer JAX):
 
 ```bash
-python3 scripts/train_meta_init.py --n-list 25,50,100 --train-steps 50 --es-pop 6 \\
+python3 scripts/training/train_meta_init.py --n-list 25,50,100 --train-steps 50 --es-pop 6 \\
   --sa-steps 100 --sa-batch 16 --objective packing --out runs/meta_init.npz
 
-python3 scripts/generate_submission.py --out submission.csv --nmax 200 \\
+python3 scripts/submission/generate_submission.py --out submission.csv --nmax 200 \\
   --sa-nmax 50 --sa-steps 400 --meta-init-model runs/meta_init.npz
 ```
 
 Heatmap meta (prioriza quais arvores mover; nao requer JAX):
 
 ```bash
-python3 scripts/train_heatmap_meta.py --n-list 10,20,30 --train-steps 50 --es-pop 6 \\
+python3 scripts/training/train_heatmap_meta.py --n-list 10,20,30 --train-steps 50 --es-pop 6 \\
   --heatmap-steps 200 --out runs/heatmap_meta.npz
 
-python3 scripts/generate_submission.py --out submission.csv --nmax 200 \\
+python3 scripts/submission/generate_submission.py --out submission.csv --nmax 200 \\
   --heatmap-model runs/heatmap_meta.npz --heatmap-nmax 20 --heatmap-steps 400
 ```
 
 Uso no gerador (heatmap para n pequeno):
 
 ```bash
-python3 scripts/generate_submission.py --out submission.csv --nmax 200 \\
+python3 scripts/submission/generate_submission.py --out submission.csv --nmax 200 \\
   --heatmap-model runs/heatmap_meta.npz --heatmap-nmax 10 --heatmap-steps 200
 ```
 
 Scorar um submission:
 
 ```bash
-python3 scripts/score_submission.py submission.csv --pretty
+python3 scripts/evaluation/score_submission.py submission.csv --pretty
 ```
 
 Para acelerar (sem checar overlap):
 
 ```bash
-python3 scripts/score_submission.py submission.csv --no-overlap
+python3 scripts/evaluation/score_submission.py submission.csv --no-overlap
 ```
 
-Observacao: a forma da arvore esta em `src/tree_data.py` (poligono oficial de 15 vertices). Se a geometria mudar no Kaggle, ajuste ali.
+Obs: `--no-overlap` e so para estimativa rapida; o gerador (`scripts/submission/generate_submission.py`) roda validacao strict automaticamente ao final.
+
+Observacao: a forma da arvore esta em `santa_packing/tree_data.py` (poligono oficial de 15 vertices). Se a geometria mudar no Kaggle, ajuste ali.
 
 --- 
 
@@ -324,7 +334,7 @@ Observacao: a forma da arvore esta em `src/tree_data.py` (poligono oficial de 15
 
 **Objetivo (recompensa/perda):** minimizar `packing_score` e penalizar colisoes (ex.: `reward = -packing_score - lambda * overlap`).
 
-Este repo ja possui um esqueleto L2O MLP em `src/l2o.py` (REINFORCE). Para trocar por GNN/Transformer, a ideia e manter a mesma API: `policy_apply(params, poses) -> (logits, mean)`.
+Este repo ja possui um esqueleto L2O MLP em `santa_packing/l2o.py` (REINFORCE). Para trocar por GNN/Transformer, a ideia e manter a mesma API: `policy_apply(params, poses) -> (logits, mean)`.
 
 ---
 
@@ -332,8 +342,8 @@ Este repo ja possui um esqueleto L2O MLP em `src/l2o.py` (REINFORCE). Para troca
 
 A versao anterior em C++ tinha pipelines de **sweep**, **ensemble por instancia** e **repair**. Nesta versao Python, isso foi portado como scripts simples e reprodutiveis:
 
-* **Sweep + ensemble por instancia:** `scripts/sweep_ensemble.py` roda varios `scripts/generate_submission.py` (seeds/receitas) e monta um submission final escolhendo o menor `s_n` por `n`.
-* **Repair / refinamento local:** `scripts/generate_submission.py` ja inclui hill-climb e GA com reparo simples de overlaps para `n` pequenos (`--hc-*`, `--ga-*`).
+* **Sweep + ensemble por instancia:** `scripts/submission/sweep_ensemble.py` roda varios `scripts/submission/generate_submission.py` (seeds/receitas) e monta um submission final escolhendo o menor `s_n` por `n`.
+* **Repair / refinamento local:** `scripts/submission/generate_submission.py` ja inclui hill-climb e GA com reparo simples de overlaps para `n` pequenos (`--hc-*`, `--ga-*`).
 
 ---
 
@@ -344,14 +354,14 @@ Para melhorar a generalizacao a diferentes `N`, um regime de meta-aprendizagem t
 Pipeline sugerido:
 
 ```bash
-python3 scripts/train_meta_init.py --n-list 25,50,100 --train-steps 50 --sa-steps 100 --es-pop 6 \\
+python3 scripts/training/train_meta_init.py --n-list 25,50,100 --train-steps 50 --sa-steps 100 --es-pop 6 \\
   --delta-xy 0.2 --delta-theta 10.0 --out runs/meta_init.npz
 ```
 
 Uso na geracao de submissions (aplica meta-init antes do SA):
 
 ```bash
-python3 scripts/generate_submission.py --out submission.csv --nmax 200 \\
+python3 scripts/submission/generate_submission.py --out submission.csv --nmax 200 \\
   --sa-nmax 30 --sa-steps 400 --sa-batch 64 --meta-init-model runs/meta_init.npz
 ```
 

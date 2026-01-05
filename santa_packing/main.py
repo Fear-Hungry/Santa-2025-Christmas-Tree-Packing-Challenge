@@ -5,9 +5,9 @@ import time
 import argparse
 import matplotlib.pyplot as plt
 
-from optimizer import run_sa_batch
-from geometry import transform_polygon
-from tree import get_tree_polygon
+from .optimizer import run_sa_batch
+from .geometry import transform_polygon
+from .tree import get_tree_polygon
 
 def plot_packing(poses, score, filename="packing.png"):
     poly = get_tree_polygon()
@@ -53,7 +53,19 @@ def main():
     parser.add_argument("--smart_beta", type=float, default=8.0, help="Edge focus strength (higher=more boundary-biased).")
     parser.add_argument("--smart_drift", type=float, default=1.0, help="Inward drift multiplier (translation moves).")
     parser.add_argument("--smart_noise", type=float, default=0.25, help="Noise multiplier for smart inward moves.")
+    parser.add_argument("--push_prob", type=float, default=0.1, help="Deterministic push-to-center move probability (translation-only).")
+    parser.add_argument("--push_scale", type=float, default=1.0, help="Push step magnitude multiplier.")
+    parser.add_argument("--push_square_prob", type=float, default=0.5, help="Fraction of push moves that act on the max(|x|,|y|) axis.")
     parser.add_argument("--overlap_lambda", type=float, default=0.0, help="Energy penalty weight for circle overlap (0 disables).")
+    parser.add_argument("--no-adapt-sigma", dest="adapt_sigma", action="store_false", help="Disable adaptive step-size (acceptance-rate targeting).")
+    parser.set_defaults(adapt_sigma=True)
+    parser.add_argument("--accept_target", type=float, default=0.35, help="Target acceptance rate for sigma adaptation.")
+    parser.add_argument("--adapt_alpha", type=float, default=0.05, help="EMA smoothing for acceptance-rate adaptation.")
+    parser.add_argument("--adapt_rate", type=float, default=0.1, help="Update rate for sigma adaptation (log-space).")
+    parser.add_argument("--adapt_rot_prob", action="store_true", help="Enable adaptive rotation-move probability.")
+    parser.add_argument("--reheat_patience", type=int, default=200, help="Reheat if no best improvement for this many steps (0 disables).")
+    parser.add_argument("--reheat_factor", type=float, default=1.0, help="Temperature multiplier added as (1+factor) during reheating.")
+    parser.add_argument("--reheat_decay", type=float, default=0.99, help="Exponential decay for the reheating boost per step.")
     parser.add_argument("--allow_collisions", action="store_true", help="Allow accepting colliding states (best kept feasible).")
     args = parser.parse_args()
     
@@ -107,7 +119,18 @@ def main():
         smart_beta=args.smart_beta,
         smart_drift=args.smart_drift,
         smart_noise=args.smart_noise,
+        push_prob=args.push_prob,
+        push_scale=args.push_scale,
+        push_square_prob=args.push_square_prob,
         overlap_lambda=args.overlap_lambda,
+        adapt_sigma=args.adapt_sigma,
+        accept_target=args.accept_target,
+        adapt_alpha=args.adapt_alpha,
+        adapt_rate=args.adapt_rate,
+        adapt_rot_prob=args.adapt_rot_prob,
+        reheat_patience=args.reheat_patience,
+        reheat_factor=args.reheat_factor,
+        reheat_decay=args.reheat_decay,
         allow_collisions=args.allow_collisions,
         objective=args.objective,
     )
