@@ -231,11 +231,23 @@ Gerar submission (hibrido SA + lattice):
 python3 scripts/submission/generate_submission.py --out submission.csv --nmax 200 --sa-nmax 30 --sa-steps 400 --sa-batch 64 --sa-objective packing
 ```
 
+Atalho equivalente (paths curtos):
+
+```bash
+python3 scripts/generate_submission.py --out submission.csv --nmax 200 --sa-nmax 30 --sa-steps 400 --sa-batch 64 --sa-objective packing
+```
+
 Gerar + validar strict + arquivar (make submit; recomendado):
 
 ```bash
 python3 scripts/submission/make_submit.py --config configs/submit.json --name baseline
 # -> submissions/<timestamp>_<sha>.../{submission.csv,score.json,meta.json,*.log}
+```
+
+Atalho equivalente (paths curtos):
+
+```bash
+python3 scripts/make_submit.py --config configs/submit.json --name baseline
 ```
 
 Config central (JSON) para evitar flags longas:
@@ -346,6 +358,12 @@ Scorar um submission:
 
 ```bash
 python3 scripts/evaluation/score_submission.py submission.csv --pretty
+```
+
+Atalho equivalente (paths curtos):
+
+```bash
+python3 scripts/score_submission.py submission.csv --pretty
 ```
 
 Para acelerar (sem checar overlap):
