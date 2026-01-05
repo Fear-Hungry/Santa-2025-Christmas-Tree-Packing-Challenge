@@ -27,8 +27,11 @@ python -m pip install -U pip
 echo "+ python -m pip install -U setuptools wheel"
 python -m pip install -U setuptools wheel
 
-echo "+ python -m pip install -U -r requirements.txt"
-python -m pip install -U -r requirements.txt
+echo "+ python -m pip install -U -e \".[train,notebooks]\""
+python -m pip install -U -e ".[train,notebooks]"
+
+echo "+ (optional) python -m pip install -U -e \".[dev]\""
+python -m pip install -U -e ".[dev]" || true
 
 echo "+ python scripts/build/build_fastcollide.py (optional)"
 python scripts/build/build_fastcollide.py || true

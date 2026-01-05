@@ -174,7 +174,7 @@ Requer **Python 3.12+** (este repo fixa `3.12.3` em `.python-version`). Se prefe
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
-python -m pip install -U -r requirements.txt
+python -m pip install -U -e ".[train,notebooks]"
 
 # Opcional (acelera `polygons_intersect` no score local):
 python scripts/build/build_fastcollide.py
