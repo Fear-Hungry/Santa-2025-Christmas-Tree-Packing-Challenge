@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "santa-packing"
+version = "0.0.0"
+description = "Santa 2025 Christmas Tree Packing Challenge solver"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+train = ["jax[cpu]", "matplotlib"]
+notebooks = ["ipykernel"]
+dev = ["ruff", "pre-commit"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["santa_packing*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+

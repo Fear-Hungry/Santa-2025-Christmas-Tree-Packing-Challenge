@@ -198,6 +198,12 @@ Depois do setup, selecione o interpretador/kernel da `.venv` (assim o `ipykernel
 
 ### Comandos rapidos
 
+Instalar em modo desenvolvimento (opcional, mas recomendado para imports limpos):
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
 Rodar SA isolado (uma instancia):
 
 ```bash
