@@ -1,3 +1,5 @@
+[![CI](https://github.com/Fear-Hungry/Santa-2025-Christmas-Tree-Packing-Challenge/actions/workflows/ci.yml/badge.svg)](https://github.com/Fear-Hungry/Santa-2025-Christmas-Tree-Packing-Challenge/actions/workflows/ci.yml)
+
 ## MODO ESTRATEGIA DE COMPETICAO — Santa 2025 (Christmas Tree Packing)
 
 ### [Resumo da competicao]
