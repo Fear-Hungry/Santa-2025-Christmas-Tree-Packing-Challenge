@@ -213,6 +213,19 @@ Gerar submission (hibrido SA + lattice):
 python3 scripts/submission/generate_submission.py --out submission.csv --nmax 200 --sa-nmax 30 --sa-steps 400 --sa-batch 64 --sa-objective packing
 ```
 
+Gerar + validar strict + arquivar (make submit; recomendado):
+
+```bash
+python3 scripts/submission/make_submit.py --config configs/submit.json --name baseline
+# -> submissions/<timestamp>_<sha>.../{submission.csv,score.json,meta.json,*.log}
+```
+
+Config central (JSON) para evitar flags longas:
+
+```bash
+python3 scripts/submission/generate_submission.py --config configs/submit.json --out submission.csv --nmax 200
+```
+
 Sweep + ensemble por instancia (multi-start; escolhe o melhor `s_n` por `n` entre varias tentativas):
 
 ```bash
@@ -326,6 +339,12 @@ python3 scripts/evaluation/score_submission.py submission.csv --no-overlap
 Obs: `--no-overlap` e so para estimativa rapida; o gerador (`scripts/submission/generate_submission.py`) roda validacao strict automaticamente ao final.
 
 Observacao: a forma da arvore esta em `santa_packing/tree_data.py` (poligono oficial de 15 vertices). Se a geometria mudar no Kaggle, ajuste ali.
+
+Testes rapidos:
+
+```bash
+python -m unittest discover -s tests
+```
 
 --- 
 

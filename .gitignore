@@ -27,6 +27,7 @@
 
 # Kaggle submissions (usually generated)
 /submission*.csv
+/submissions/
 
 # PDFs / docs (large assets)
 /Desafio Kaggle Santa 2025.pdf
