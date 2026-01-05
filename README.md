@@ -222,6 +222,14 @@ python3 scripts/submission/sweep_ensemble.py --nmax 200 --seeds 1,2,3 \\
   --out submission_ensemble.csv
 ```
 
+Ensemble “inteligente” (mistura o melhor por `n` entre varios candidatos: lattice/SA/GA/hill-climb, etc.):
+
+```bash
+python3 scripts/submission/sweep_ensemble.py --nmax 200 --seeds 1..3 --jobs 3 \\
+  --recipes-json scripts/submission/portfolios/mixed.json \\
+  --out submission_ensemble.csv
+```
+
 Notas (lattice):
 * `--lattice-rotate-mode` suporta `constant`, `row`, `checker`, `ring`. Em modo `constant`, `--lattice-rotations` tenta varias rotacoes; nos outros modos, vira uma sequencia repetida.
 * Para um ajuste rapido apos o lattice (sem SA), use `--lattice-post-nmax 200 --lattice-post-steps 30` (hill-climb curto focado na borda do bbox).
