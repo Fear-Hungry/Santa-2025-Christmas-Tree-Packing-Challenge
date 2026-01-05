@@ -204,6 +204,13 @@ Instalar em modo desenvolvimento (opcional, mas recomendado para imports limpos)
 python -m pip install -e ".[dev]"
 ```
 
+Atalhos (Makefile):
+
+```bash
+make test
+make submit NAME=baseline
+```
+
 Rodar SA isolado (uma instancia):
 
 ```bash
