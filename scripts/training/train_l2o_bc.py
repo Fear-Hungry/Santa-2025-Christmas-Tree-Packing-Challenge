@@ -57,7 +57,20 @@ def main() -> int:
         choices=["raw", "bbox_norm", "rich"],
         help="Input feature representation",
     )
-    ap.add_argument("--reward", type=str, default="packing", choices=["packing", "prefix"], help="Reward type")
+    ap.add_argument(
+        "--preset",
+        type=str,
+        default="default",
+        choices=["default", "submission"],
+        help="Preset for defaults. 'submission' aligns reward/objective with the official prefix score.",
+    )
+    ap.add_argument(
+        "--reward",
+        type=str,
+        default=None,
+        choices=["packing", "prefix"],
+        help="Reward type. Default: packing (preset=default) or prefix (preset=submission).",
+    )
     ap.add_argument("--trans-sigma", type=float, default=0.2, help="BC translation sigma")
     ap.add_argument("--rot-sigma", type=float, default=10.0, help="BC rotation sigma")
     ap.add_argument("--curriculum", action="store_true", help="Enable curriculum over N (start small, grow)")
@@ -66,6 +79,8 @@ def main() -> int:
     ap.add_argument("--curriculum-steps", type=int, default=None, help="Steps to ramp curriculum (default: train_steps)")
     ap.add_argument("--out", type=Path, default=None, help="Output policy path (.npz)")
     args = ap.parse_args()
+    if args.reward is None:
+        args.reward = "prefix" if args.preset == "submission" else "packing"
 
     data = np.load(args.dataset)
     if args.n_list.strip():

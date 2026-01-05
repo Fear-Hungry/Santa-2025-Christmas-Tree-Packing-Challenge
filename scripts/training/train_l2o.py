@@ -275,7 +275,20 @@ def main() -> int:
         choices=["raw", "bbox_norm", "rich"],
         help="Input feature representation",
     )
-    ap.add_argument("--reward", type=str, default="packing", choices=["packing", "prefix"], help="Reward type")
+    ap.add_argument(
+        "--preset",
+        type=str,
+        default="default",
+        choices=["default", "submission"],
+        help="Preset for defaults. 'submission' aligns reward/objective with the official prefix score.",
+    )
+    ap.add_argument(
+        "--reward",
+        type=str,
+        default=None,
+        choices=["packing", "prefix"],
+        help="Reward type. Default: packing (preset=default) or prefix (preset=submission).",
+    )
     ap.add_argument("--action-scale", type=float, default=1.0, help="Scale applied to policy mean actions")
     ap.add_argument(
         "--overlap-penalty",
@@ -305,6 +318,8 @@ def main() -> int:
     ap.add_argument("--dataset-in", type=Path, default=None, help="Optional dataset input (.npz)")
     ap.add_argument("--out", type=Path, default=None, help="Output policy path (.npz)")
     args = ap.parse_args()
+    if args.reward is None:
+        args.reward = "prefix" if args.preset == "submission" else "packing"
 
     points = np.array(TREE_POINTS, dtype=float)
     radius = polygon_radius(points)
