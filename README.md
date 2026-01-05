@@ -248,7 +248,10 @@ python3 scripts/training/train_l2o.py --n 10 --train-steps 200 --policy gnn --kn
 python3 scripts/submission/generate_submission.py --out submission.csv --nmax 200 --l2o-model runs/l2o_gnn_policy.npz --l2o-nmax 10
 ```
 
-Para alinhar o reward ao score da competicao, use `--reward prefix` no L2O e `--sa-objective prefix` no SA. Opcionalmente, experimente `--feature-mode rich`, `--gnn-attention`, `--gnn-steps` maior e `--overlap-lambda` pequeno (penalidade suave por overlap via circulos).
+Para alinhar o reward/objetivo ao score oficial (prefixo), use:
+* L2O: `--preset submission` (ou `--reward prefix`).
+* SA: `--sa-objective prefix` (no `--mother-prefix`, isso vira o default automaticamente; `--refine-objective/--block-objective` seguem o mesmo default).
+Opcionalmente, experimente `--feature-mode rich`, `--gnn-attention`, `--gnn-steps` maior e `--overlap-lambda` pequeno (penalidade suave por overlap via circulos).
 
 Treinamento com dataset multi-N (ex.: N=25,50,100) e diferentes inicializacoes:
 
