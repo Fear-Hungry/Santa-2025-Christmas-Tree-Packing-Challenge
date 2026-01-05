@@ -2,47 +2,23 @@
 
 from __future__ import annotations
 
-import argparse
-import json
+import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
 
-from santa_packing.scoring import score_submission  # noqa: E402
+def _repo_root() -> Path:
+    here = Path(__file__).resolve()
+    for cand in (here.parent, *here.parents):
+        if (cand / "pyproject.toml").is_file():
+            return cand
+    return here.parent
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Score a Santa 2025 submission.csv")
-    ap.add_argument("submission", type=Path, help="Path to submission.csv")
-    ap.add_argument("--nmax", type=int, default=None, help="Max puzzle n to score")
-    ap.add_argument(
-        "--no-overlap",
-        action="store_true",
-        help="Skip overlap checks (faster, but unsafe)",
-    )
-    ap.add_argument(
-        "--no-require-complete",
-        action="store_true",
-        help="Do not fail if puzzles 1..nmax are missing",
-    )
-    ap.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
-    args = ap.parse_args()
-
-    result = score_submission(
-        args.submission,
-        nmax=args.nmax,
-        check_overlap=not args.no_overlap,
-        require_complete=not args.no_require_complete,
-    )
-
-    data = result.to_json()
-    if args.pretty:
-        print(json.dumps(data, indent=2))
-    else:
-        print(json.dumps(data))
-    return 0
+    root = _repo_root()
+    cmd = [sys.executable, "-m", "santa_packing.cli.score_submission", *sys.argv[1:]]
+    return int(subprocess.call(cmd, cwd=str(root)))
 
 
 if __name__ == "__main__":

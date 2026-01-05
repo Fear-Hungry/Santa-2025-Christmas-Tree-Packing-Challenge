@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
-import runpy
+import subprocess
+import sys
 from pathlib import Path
 
 
-def main() -> None:
-    target = Path(__file__).resolve().parent / "submission" / "generate_submission.py"
-    runpy.run_path(str(target), run_name="__main__")
+def _repo_root() -> Path:
+    here = Path(__file__).resolve()
+    for cand in (here.parent, *here.parents):
+        if (cand / "pyproject.toml").is_file():
+            return cand
+    return here.parent
+
+
+def main() -> int:
+    root = _repo_root()
+    cmd = [sys.executable, "-m", "santa_packing.cli.generate_submission", *sys.argv[1:]]
+    return int(subprocess.call(cmd, cwd=str(root)))
 
 
 if __name__ == "__main__":
-    main()
-
+    raise SystemExit(main())
