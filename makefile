@@ -37,7 +37,7 @@ build-fastcollide:
 	$(PY) scripts/build/build_fastcollide.py
 
 submit:
-	$(PY) scripts/submission/make_submit.py --config $(CONFIG) --nmax $(NMAX) --name $(NAME) --submissions-dir $(SUBMISSIONS_DIR) -- $(GEN_ARGS)
+	$(PY) -m santa_packing.cli.make_submit --config $(CONFIG) --nmax $(NMAX) --name $(NAME) --submissions-dir $(SUBMISSIONS_DIR) -- $(GEN_ARGS)
 
 score:
-	$(PY) scripts/evaluation/score_submission.py $(SUB) --pretty
+	$(PY) -m santa_packing.cli.score_submission $(SUB) --pretty
