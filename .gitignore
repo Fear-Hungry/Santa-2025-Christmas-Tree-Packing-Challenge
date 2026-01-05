@@ -1,6 +1,8 @@
 # Build artifacts
 /build/
 /bin/
+/build_manual/
+/src/
 /.cache/
 /CMakeFiles/
 /CMakeCache.txt
