@@ -13,7 +13,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from santa_packing.constants import EPS, SUBMISSION_DECIMALS, SUBMISSION_PREFIX, XY_LIMIT  # noqa: E402
+from santa_packing.constants import EPS  # noqa: E402
 from santa_packing.geom_np import (  # noqa: E402
     packing_bbox,
     packing_score,
@@ -24,60 +24,13 @@ from santa_packing.geom_np import (  # noqa: E402
 from santa_packing.lattice import lattice_poses  # noqa: E402
 from santa_packing.postopt_np import repair_overlaps  # noqa: E402
 from santa_packing.scoring import first_overlap_pair, polygons_intersect  # noqa: E402
+from santa_packing.submission_format import (  # noqa: E402
+    fit_xy_in_bounds,
+    format_submission_value,
+    quantize_for_submission,
+)
 from santa_packing.tree_data import TREE_POINTS  # noqa: E402
 import santa_packing.lattice as lattice_mod  # noqa: E402
-
-
-def _format_val(value: float) -> str:
-    v = float(value)
-    if abs(v) < EPS:
-        v = 0.0
-    return f"{SUBMISSION_PREFIX}{v:.{SUBMISSION_DECIMALS}f}"
-
-
-def _fit_xy_in_bounds(poses: np.ndarray) -> np.ndarray:
-    poses = np.array(poses, dtype=float, copy=True)
-    if poses.shape[0] == 0:
-        return poses
-
-    min_x = float(np.min(poses[:, 0]))
-    max_x = float(np.max(poses[:, 0]))
-    min_y = float(np.min(poses[:, 1]))
-    max_y = float(np.max(poses[:, 1]))
-
-    # Compute a translation range that keeps all coordinates inside [-limit, +limit].
-    lo_x = (-XY_LIMIT + EPS) - min_x
-    hi_x = (XY_LIMIT - EPS) - max_x
-    lo_y = (-XY_LIMIT + EPS) - min_y
-    hi_y = (XY_LIMIT - EPS) - max_y
-    if lo_x > hi_x or lo_y > hi_y:
-        raise ValueError(
-            f"Packing does not fit in bounds: x=[{min_x:.6g},{max_x:.6g}] y=[{min_y:.6g},{max_y:.6g}]"
-        )
-
-    shift_x = 0.5 * (lo_x + hi_x)
-    shift_y = 0.5 * (lo_y + hi_y)
-    poses[:, 0] += shift_x
-    poses[:, 1] += shift_y
-    return poses
-
-
-def _quantize_for_submission(poses: np.ndarray) -> np.ndarray:
-    poses = np.array(poses, dtype=float, copy=True)
-    if poses.shape[0] == 0:
-        return poses
-
-    poses[:, 0:2] = np.round(poses[:, 0:2], SUBMISSION_DECIMALS)
-    poses[:, 2] = np.round(poses[:, 2], SUBMISSION_DECIMALS)
-
-    # Clamp to limits (robust to tiny fp drift) and normalize -0.0.
-    poses[:, 0] = np.clip(poses[:, 0], -XY_LIMIT + EPS, XY_LIMIT - EPS)
-    poses[:, 1] = np.clip(poses[:, 1], -XY_LIMIT + EPS, XY_LIMIT - EPS)
-    poses[np.abs(poses) < EPS] = 0.0
-    poses[:, 2] = np.mod(poses[:, 2], 360.0)
-    poses[np.abs(poses) < EPS] = 0.0
-    return poses
-
 
 def _safe_fallback_layout(points: np.ndarray, n: int) -> np.ndarray:
     radius = float(polygon_radius(points))
@@ -98,12 +51,12 @@ def _finalize_puzzle(points: np.ndarray, poses: np.ndarray, *, seed: int, puzzle
         poses = _safe_fallback_layout(points, puzzle_n)
 
     try:
-        poses = _fit_xy_in_bounds(poses)
-        poses = _quantize_for_submission(poses)
+        poses = fit_xy_in_bounds(poses)
+        poses = quantize_for_submission(poses)
     except Exception:
         poses = _safe_fallback_layout(points, puzzle_n)
-        poses = _fit_xy_in_bounds(poses)
-        poses = _quantize_for_submission(poses)
+        poses = fit_xy_in_bounds(poses)
+        poses = quantize_for_submission(poses)
 
     pair = first_overlap_pair(points, poses, eps=EPS)
     if pair is None:
@@ -120,8 +73,8 @@ def _finalize_puzzle(points: np.ndarray, poses: np.ndarray, *, seed: int, puzzle
     )
     if repaired is not None:
         try:
-            repaired = _fit_xy_in_bounds(repaired)
-            repaired = _quantize_for_submission(repaired)
+            repaired = fit_xy_in_bounds(repaired)
+            repaired = quantize_for_submission(repaired)
         except Exception:
             repaired = None
         if repaired is not None and first_overlap_pair(points, repaired, eps=EPS) is None:
@@ -129,8 +82,8 @@ def _finalize_puzzle(points: np.ndarray, poses: np.ndarray, *, seed: int, puzzle
 
     # Hard fallback: guaranteed-feasible grid.
     fallback = _safe_fallback_layout(points, puzzle_n)
-    fallback = _fit_xy_in_bounds(fallback)
-    fallback = _quantize_for_submission(fallback)
+    fallback = fit_xy_in_bounds(fallback)
+    fallback = quantize_for_submission(fallback)
     if first_overlap_pair(points, fallback, eps=EPS) is not None:
         raise RuntimeError(f"Puzzle {puzzle_n}: failed to produce a feasible (non-overlapping) solution")
     return fallback
@@ -1895,7 +1848,9 @@ def main() -> int:
         for n in range(1, args.nmax + 1):
             poses = puzzles[n]
             for i, (x, y, deg) in enumerate(poses):
-                writer.writerow([f"{n:03d}_{i}", _format_val(x), _format_val(y), _format_val(deg)])
+                writer.writerow(
+                    [f"{n:03d}_{i}", format_submission_value(x), format_submission_value(y), format_submission_value(deg)]
+                )
 
     # Rule of the pipeline: always run strict validation after generating.
     from santa_packing.scoring import score_submission  # noqa: E402

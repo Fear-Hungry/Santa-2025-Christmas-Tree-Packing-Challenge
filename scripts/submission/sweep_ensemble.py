@@ -13,7 +13,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -176,64 +175,6 @@ class Candidate:
     puzzles: dict[int, np.ndarray]  # n -> (n,3)
 
 
-@lru_cache(maxsize=1)
-def _constants() -> tuple[float, int, str, float]:
-    from santa_packing.constants import EPS, SUBMISSION_DECIMALS, SUBMISSION_PREFIX, XY_LIMIT  # noqa: E402
-
-    return float(EPS), int(SUBMISSION_DECIMALS), str(SUBMISSION_PREFIX), float(XY_LIMIT)
-
-
-def _format_val(value: float) -> str:
-    eps, decimals, prefix, _xy_limit = _constants()
-    v = float(value)
-    if abs(v) < eps:
-        v = 0.0
-    return f"{prefix}{v:.{decimals}f}"
-
-
-def _fit_xy_in_bounds(poses: np.ndarray) -> np.ndarray:
-    eps, _decimals, _prefix, xy_limit = _constants()
-    poses = np.array(poses, dtype=float, copy=True)
-    if poses.shape[0] == 0:
-        return poses
-
-    min_x = float(np.min(poses[:, 0]))
-    max_x = float(np.max(poses[:, 0]))
-    min_y = float(np.min(poses[:, 1]))
-    max_y = float(np.max(poses[:, 1]))
-
-    lo_x = (-xy_limit + eps) - min_x
-    hi_x = (xy_limit - eps) - max_x
-    lo_y = (-xy_limit + eps) - min_y
-    hi_y = (xy_limit - eps) - max_y
-    if lo_x > hi_x or lo_y > hi_y:
-        raise ValueError(
-            f"Packing does not fit in bounds: x=[{min_x:.6g},{max_x:.6g}] y=[{min_y:.6g},{max_y:.6g}]"
-        )
-
-    poses[:, 0] += 0.5 * (lo_x + hi_x)
-    poses[:, 1] += 0.5 * (lo_y + hi_y)
-    return poses
-
-
-def _quantize_for_submission(poses: np.ndarray) -> np.ndarray:
-    eps, decimals, _prefix, xy_limit = _constants()
-    poses = np.array(poses, dtype=float, copy=True)
-    if poses.shape[0] == 0:
-        return poses
-
-    poses[:, 0:2] = np.round(poses[:, 0:2], decimals)
-    poses[:, 2] = np.round(poses[:, 2], decimals)
-
-    poses[:, 0] = np.clip(poses[:, 0], -xy_limit + eps, xy_limit - eps)
-    poses[:, 1] = np.clip(poses[:, 1], -xy_limit + eps, xy_limit - eps)
-    poses[np.abs(poses) < eps] = 0.0
-
-    poses[:, 2] = np.mod(poses[:, 2], 360.0)
-    poses[np.abs(poses) < eps] = 0.0
-    return poses
-
-
 def _prefix_total(s: np.ndarray, *, nmax: int) -> float:
     total = 0.0
     for n in range(1, nmax + 1):
@@ -265,6 +206,8 @@ def _write_per_n_csv(path: Path, candidate: Candidate, *, nmax: int) -> None:
 
 
 def _write_submission(path: Path, puzzles: dict[int, np.ndarray], *, nmax: int) -> None:
+    from santa_packing.submission_format import fit_xy_in_bounds, format_submission_value, quantize_for_submission  # noqa: E402
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as f:
         w = csv.writer(f)
@@ -275,10 +218,17 @@ def _write_submission(path: Path, puzzles: dict[int, np.ndarray], *, nmax: int) 
                 raise ValueError(f"Missing puzzle {n}")
             poses = np.array(poses, dtype=float, copy=True)
             poses[:, 2] = np.mod(poses[:, 2], 360.0)
-            poses = _fit_xy_in_bounds(poses)
-            poses = _quantize_for_submission(poses)
+            poses = fit_xy_in_bounds(poses)
+            poses = quantize_for_submission(poses)
             for i, (x, y, deg) in enumerate(poses):
-                w.writerow([f"{n:03d}_{i}", _format_val(float(x)), _format_val(float(y)), _format_val(float(deg))])
+                w.writerow(
+                    [
+                        f"{n:03d}_{i}",
+                        format_submission_value(float(x)),
+                        format_submission_value(float(y)),
+                        format_submission_value(float(deg)),
+                    ]
+                )
 
 
 def main() -> int:
