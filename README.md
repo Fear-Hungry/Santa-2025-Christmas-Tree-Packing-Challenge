@@ -186,6 +186,9 @@ Se voce tiver GPU/CUDA, instale o pacote JAX adequado ao seu ambiente.
 
 Depois do setup, selecione o interpretador/kernel da `.venv` (assim o `ipykernel` instalado em `requirements.txt` sera usado).
 
+Notebook recomendado (1 clique: gerar + score + log):
+* `notebooks/01_generate_and_score.ipynb`
+
 ### Estrutura de codigo
 
 * `santa_packing/`: pacote principal (geometria, colisao, SA/L2O, scorer, etc.).
