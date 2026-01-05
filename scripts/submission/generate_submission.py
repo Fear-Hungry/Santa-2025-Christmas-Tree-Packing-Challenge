@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import sys
 from pathlib import Path
@@ -806,6 +807,66 @@ def _parse_float_list(text: str | None) -> list[float]:
     return out
 
 
+def _config_to_argv(config_path: Path) -> list[str]:
+    """Convert a JSON config into argv-like tokens.
+
+    Supported formats:
+      - {"args": ["--sa-nmax", "50", ...]}
+      - {"generate": {"sa_nmax": 50, "mother_prefix": true, ...}}
+      - {"sa_nmax": 50, ...}  (fallback: treat as generate-mapping)
+    """
+    raw = config_path.read_text(encoding="utf-8")
+    data = json.loads(raw)
+
+    if isinstance(data, dict) and "args" in data:
+        args = data["args"]
+        if not isinstance(args, list):
+            raise TypeError(f"{config_path}: expected 'args' to be a list, got {type(args).__name__}")
+        argv = [str(x) for x in args]
+        if any(tok == "--config" or tok.startswith("--config=") for tok in argv):
+            raise ValueError(f"{config_path}: 'args' must not include --config (avoid recursion)")
+        return argv
+
+    mapping: dict[str, object] | None = None
+    if isinstance(data, dict):
+        for key in ("generate", "generate_submission"):
+            section = data.get(key)
+            if isinstance(section, dict):
+                mapping = section
+                break
+        if mapping is None:
+            mapping = data
+    else:
+        raise TypeError(f"{config_path}: expected a JSON object at top-level, got {type(data).__name__}")
+
+    argv: list[str] = []
+    for key, value in mapping.items():
+        if key in {"config", "args"}:
+            continue
+
+        flag = str(key).strip()
+        if not flag:
+            continue
+        if not flag.startswith("--"):
+            flag = "--" + flag.replace("_", "-")
+
+        if value is None:
+            continue
+        if isinstance(value, (bool, np.bool_)):
+            if bool(value):
+                argv.append(flag)
+            continue
+        if isinstance(value, (list, tuple)):
+            argv.append(flag)
+            argv.append(",".join(str(x) for x in value))
+            continue
+
+        argv.append(flag)
+        argv.append(str(value))
+
+    return argv
+
+
 def _best_lattice_poses(
     n: int,
     *,
@@ -1329,7 +1390,13 @@ def solve_n(
 
 
 def main() -> int:
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=Path, default=None, help="JSON config path (optional)")
+    pre_args, _ = pre.parse_known_args()
+    config_args = _config_to_argv(pre_args.config) if pre_args.config is not None else []
+
     ap = argparse.ArgumentParser(description="Generate submission.csv (hybrid SA + lattice)")
+    ap.add_argument("--config", type=Path, default=None, help="JSON config file with defaults for this script")
     ap.add_argument("--out", type=Path, default=ROOT / "submission.csv", help="Output CSV path")
     ap.add_argument("--nmax", type=int, default=200, help="Max puzzle n (default: 200)")
     ap.add_argument("--seed", type=int, default=1, help="Base seed for SA")
@@ -1563,7 +1630,7 @@ def main() -> int:
     ap.add_argument("--ga-hc-passes", type=int, default=0, help="Optional hill-climb passes applied inside GA (0=disabled).")
     ap.add_argument("--ga-hc-step-xy", type=float, default=0.01)
     ap.add_argument("--ga-hc-step-deg", type=float, default=2.0)
-    args = ap.parse_args()
+    args = ap.parse_args(config_args + sys.argv[1:])
     lattice_rotate_degs = _parse_float_list(args.lattice_rotations)
     if args.sa_objective is None:
         args.sa_objective = "prefix" if args.mother_prefix else "packing"
