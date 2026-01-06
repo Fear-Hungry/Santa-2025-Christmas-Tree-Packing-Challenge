@@ -22,4 +22,3 @@ class TestGeomNP(unittest.TestCase):
         pts = np.array([[1.0, 0.0]], dtype=float)
         out = transform_polygon(pts, np.array([0.0, 0.0, 90.0], dtype=float))
         np.testing.assert_allclose(out, np.array([[0.0, 1.0]]), atol=1e-12, rtol=0.0)
-

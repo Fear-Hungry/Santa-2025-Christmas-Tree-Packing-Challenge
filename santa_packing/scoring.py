@@ -1,3 +1,14 @@
+"""Local scoring and validation for `submission.csv`.
+
+This module implements:
+- CSV parsing (including the `s`-prefixed numeric format)
+- packing score computation (`s_n` per puzzle and the official prefix objective)
+- robust overlap detection modes (strict / conservative / kaggle-like)
+
+The scoring code is intentionally NumPy-based to match typical Kaggle
+implementations and to keep CLI tools lightweight.
+"""
+
 from __future__ import annotations
 
 import csv
@@ -5,7 +16,7 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Literal
+from typing import Iterable, Literal
 
 import numpy as np
 
@@ -21,13 +32,16 @@ except Exception:
 
 OverlapMode = Literal["strict", "conservative", "kaggle"]
 
-# Kaggle evaluation appears to reject "touching" as overlap. The full conservative predicate
-# (inclusive segment intersection) is robust but slow; for submission generation we can enforce
-# a tiny clearance by checking strict intersections on a slightly inflated tree polygon.
+# Kaggle evaluation appears to reject "touching" as overlap, so we treat it as conservative
+# collision detection (touching counts as collision).
+#
+# NOTE: Some public approaches inflate polygons; scaling a concave polygon about an interior
+# point is not guaranteed to be a superset, so we keep the robust predicate instead.
 KAGGLE_CLEARANCE_SCALE: float = 1.0005
 
 
 def _parse_val(value: str) -> float:
+    """Parse a competition-formatted scalar (optional `s` prefix) into a float."""
     value = value.strip()
     if value.startswith("s") or value.startswith("S"):
         value = value[1:]
@@ -35,6 +49,15 @@ def _parse_val(value: str) -> float:
 
 
 def load_submission(csv_path: Path, *, nmax: int | None = None) -> dict[int, np.ndarray]:
+    """Load a `submission.csv` into a mapping `{n -> poses}`.
+
+    Args:
+        csv_path: Path to the CSV file.
+        nmax: Optional maximum puzzle id `n` to load.
+
+    Returns:
+        A dict mapping puzzle size `n` to a `(n, 3)` float array of `[x, y, deg]`.
+    """
     puzzles: dict[int, list[list[float]]] = defaultdict(list)
     with csv_path.open() as f:
         reader = csv.DictReader(f)
@@ -208,6 +231,18 @@ def _polygons_intersect_conservative(poly1: np.ndarray, poly2: np.ndarray, eps: 
 
 
 def polygons_intersect_strict(poly1: np.ndarray, poly2: np.ndarray) -> bool:
+    """Fast polygon intersection check (strict).
+
+    This predicate excludes boundary-touching/collinearity and is used as a fast
+    path (including an optional C++ accelerator).
+
+    Args:
+        poly1: Vertices `(V1, 2)`.
+        poly2: Vertices `(V2, 2)`.
+
+    Returns:
+        True if the polygons strictly intersect.
+    """
     if _polygons_intersect_fast is not None:
         return bool(_polygons_intersect_fast(poly1, poly2))
     return _polygons_intersect_strict(poly1, poly2, EPS)
@@ -276,8 +311,6 @@ def first_overlap_pair(
 
     points = np.array(points, dtype=float, copy=False)
     points_check = points
-    if mode == "kaggle":
-        points_check = points * float(KAGGLE_CLEARANCE_SCALE)
 
     centers = poses[:, :2]
     rad = float(polygon_radius(points_check))
@@ -296,7 +329,7 @@ def first_overlap_pair(
     elif mode == "conservative":
         intersects = polygons_intersect
     elif mode == "kaggle":
-        intersects = polygons_intersect_strict
+        intersects = polygons_intersect
     else:
         raise ValueError(f"Unknown overlap mode: {mode!r}")
 
@@ -318,6 +351,8 @@ def _check_overlaps(points: np.ndarray, poses: np.ndarray, *, mode: OverlapMode)
 
 @dataclass
 class ScoreResult:
+    """Aggregate score information returned by `score_submission`."""
+
     nmax: int
     score: float
     s_max: float
@@ -327,6 +362,7 @@ class ScoreResult:
     per_n: list[dict]
 
     def to_json(self) -> dict:
+        """Convert the result to a JSON-serializable dict."""
         return {
             "nmax": self.nmax,
             "score": self.score,
@@ -346,6 +382,21 @@ def score_submission(
     overlap_mode: OverlapMode = "strict",
     require_complete: bool = True,
 ) -> ScoreResult:
+    """Score a `submission.csv` using the local evaluator.
+
+    Args:
+        csv_path: Path to `submission.csv`.
+        nmax: Optional max puzzle `n` to score.
+        check_overlap: If True, validate there is no overlap for each puzzle.
+        overlap_mode: Overlap predicate used when `check_overlap=True`.
+        require_complete: If True, require every puzzle `1..nmax` to be present.
+
+    Returns:
+        A `ScoreResult` with the total score and per-puzzle breakdown.
+
+    Raises:
+        ValueError: For missing puzzles, wrong row counts, or detected overlaps.
+    """
     points = np.array(TREE_POINTS, dtype=float)
     puzzles = load_submission(csv_path, nmax=nmax)
     if not puzzles:
@@ -380,4 +431,5 @@ def score_submission(
 
 
 def score_prefix(s_values: Iterable[float]) -> float:
+    """Compute the official prefix objective from a sequence of `s_n` values."""
     return prefix_score(s_values)

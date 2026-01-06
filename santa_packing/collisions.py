@@ -1,3 +1,9 @@
+"""Collision checks for JAX packings.
+
+The functions in this module combine coarse filters (bounding circle and AABB)
+with an exact polygon intersection predicate to keep SA iterations fast.
+"""
+
 from __future__ import annotations
 
 import jax

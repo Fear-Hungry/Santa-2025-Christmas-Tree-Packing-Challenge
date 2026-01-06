@@ -1,11 +1,18 @@
+"""JAX packing objectives.
+
+This module provides packing objective functions used by the JAX SA optimizer:
+- per-instance packing score (`max(width, height)` of the global AABB)
+- prefix objective for a single ordered packing ("mother-prefix" use cases)
+"""
+
 import jax
 import jax.numpy as jnp
+
 from .tree_bounds import aabb_for_poses
 
 
 def compute_packing_bbox(poses):
-    """
-    Computes the bounding box of the entire packing.
+    """Compute the global packing AABB from poses.
 
     Args:
         poses: (N, 3) array of [x, y, theta]
@@ -25,7 +32,14 @@ def compute_packing_bbox(poses):
 
 
 def compute_packing_bbox_from_bboxes(bboxes: jax.Array) -> jax.Array:
-    """Compute global packing bbox from per-tree bboxes (N,4)."""
+    """Compute global packing AABB from per-tree AABBs.
+
+    Args:
+        bboxes: Array `(N, 4)` with `[min_x, min_y, max_x, max_y]` per tree.
+
+    Returns:
+        A `(4,)` array `[min_x, min_y, max_x, max_y]`.
+    """
     min_x = jnp.min(bboxes[:, 0])
     min_y = jnp.min(bboxes[:, 1])
     max_x = jnp.max(bboxes[:, 2])
@@ -34,7 +48,14 @@ def compute_packing_bbox_from_bboxes(bboxes: jax.Array) -> jax.Array:
 
 
 def packing_score_from_bboxes(bboxes: jax.Array) -> jax.Array:
-    """Packing score from per-tree bboxes (N,4)."""
+    """Packing score from per-tree AABBs.
+
+    Args:
+        bboxes: Array `(N, 4)` with `[min_x, min_y, max_x, max_y]` per tree.
+
+    Returns:
+        Scalar `s = max(width, height)` where width/height come from the global AABB.
+    """
     bbox = compute_packing_bbox_from_bboxes(bboxes)
     width = bbox[2] - bbox[0]
     height = bbox[3] - bbox[1]
@@ -42,9 +63,13 @@ def packing_score_from_bboxes(bboxes: jax.Array) -> jax.Array:
 
 
 def packing_score(poses):
-    """
-    Objective function: Max side length of the bounding square.
-    Minimize this.
+    """Objective function for a single instance.
+
+    Args:
+        poses: Array `(N, 3)` of `[x, y, theta_deg]`.
+
+    Returns:
+        Scalar packing score `s = max(width, height)` of the global AABB.
     """
     bbox = compute_packing_bbox(poses)
     width = bbox[2] - bbox[0]
@@ -53,25 +78,44 @@ def packing_score(poses):
 
 
 def prefix_score(s_values):
-    """
-    Prefix-style score: sum_{n=1..N} s_n^2 / n.
+    """Prefix-style objective: `sum_{n=1..N} s_n^2 / n`.
+
+    Args:
+        s_values: Array-like of per-prefix packing scores.
+
+    Returns:
+        Scalar prefix objective value.
     """
     s_values = jnp.array(s_values)
     n = jnp.arange(1, s_values.shape[0] + 1)
-    return jnp.sum((s_values ** 2) / n)
+    return jnp.sum((s_values**2) / n)
 
 
 def prefix_packing_score(poses):
-    """
-    Prefix-style objective over a single ordered packing:
-    sum_{n=1..N} s_n^2 / n where s_n is the bbox max side for prefix [0..n).
+    """Prefix objective over a single ordered packing.
+
+    This computes the objective for a "solution mother" where the first `n`
+    trees define the solution for puzzle `n`.
+
+    Args:
+        poses: Array `(N, 3)` of poses ordered by inclusion.
+
+    Returns:
+        Scalar prefix objective value.
     """
     bboxes = aabb_for_poses(poses, padded=False)
     return prefix_packing_score_from_bboxes(bboxes)
 
 
 def prefix_packing_score_from_bboxes(bboxes: jax.Array) -> jax.Array:
-    """Prefix-style objective over a single ordered packing from per-tree bboxes (N,4)."""
+    """Prefix objective from per-tree AABBs.
+
+    Args:
+        bboxes: Array `(N, 4)` with `[min_x, min_y, max_x, max_y]` per tree, ordered.
+
+    Returns:
+        Scalar prefix objective value.
+    """
 
     def scan_fn(carry, bbox):
         min_x, min_y, max_x, max_y = carry

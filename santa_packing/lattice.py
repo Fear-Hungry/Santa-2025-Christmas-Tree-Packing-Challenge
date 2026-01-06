@@ -1,3 +1,11 @@
+"""Deterministic lattice-based initial layouts (NumPy).
+
+`lattice_poses` is a fast, reproducible baseline that places tree centers on a
+square or hexagonal lattice with optional rotation patterns. The resulting
+poses are shifted so the packing starts near the origin, which tends to help
+small `n` instances.
+"""
+
 from __future__ import annotations
 
 import math
@@ -7,7 +15,7 @@ from typing import Literal, Sequence
 import numpy as np
 
 from .geom_np import polygon_radius, shift_poses_to_origin, transform_polygon
-from .scoring import polygons_intersect, polygons_intersect_strict
+from .scoring import polygons_intersect_strict
 from .tree_data import TREE_POINTS
 
 Pattern = Literal["hex", "square"]
@@ -55,6 +63,19 @@ def lattice_poses(
     rotate_mode: RotateMode = "constant",
     rotate_degs: Sequence[float] | None = None,
 ) -> np.ndarray:
+    """Generate a lattice packing for `n` trees.
+
+    Args:
+        n: Number of trees.
+        pattern: `"hex"` or `"square"`.
+        margin: Extra spacing fraction used during spacing search (robustness).
+        rotate_deg: Base rotation in degrees (used when `rotate_degs` is not set).
+        rotate_mode: Rotation assignment strategy across the lattice.
+        rotate_degs: Optional sequence of rotations in degrees used by non-constant modes.
+
+    Returns:
+        Array `(n, 3)` with `[x, y, theta_deg]` poses shifted to the origin.
+    """
     points = _TREE_POINTS_NP
     if rotate_mode == "constant":
         rotate_seq = (float(rotate_deg),)

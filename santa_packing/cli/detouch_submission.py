@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+"""CLI to post-process a submission by "detouching" each puzzle.
+
+Some evaluators treat boundary touching as overlap; a small uniform expansion of
+each puzzle around its centroid can resolve contact-only collisions.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -23,8 +29,11 @@ def _scale_about_centroid(poses: np.ndarray, *, scale: float) -> np.ndarray:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Read a submission CSV, apply scaling, and write a new submission CSV."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    ap = argparse.ArgumentParser(description="Detouch a submission by uniformly scaling each puzzle about its centroid.")
+    ap = argparse.ArgumentParser(
+        description="Detouch a submission by uniformly scaling each puzzle about its centroid."
+    )
     ap.add_argument("input", type=Path, help="Input submission.csv")
     ap.add_argument("--out", type=Path, required=True, help="Output submission.csv")
     ap.add_argument("--scale", type=float, default=1.01, help="Uniform XY scale factor (>1 pushes trees apart).")
@@ -50,11 +59,17 @@ def main(argv: list[str] | None = None) -> int:
             poses = fit_xy_in_bounds(poses)
             poses = quantize_for_submission(poses)
             for i, (x, y, deg) in enumerate(poses):
-                writer.writerow([f"{n:03d}_{i}", format_submission_value(x), format_submission_value(y), format_submission_value(deg)])
+                writer.writerow(
+                    [
+                        f"{n:03d}_{i}",
+                        format_submission_value(x),
+                        format_submission_value(y),
+                        format_submission_value(deg),
+                    ]
+                )
 
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

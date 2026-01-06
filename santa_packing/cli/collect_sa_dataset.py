@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 
+"""CLI to collect SA trajectories as a behavior cloning dataset."""
+
 from __future__ import annotations
 
 import argparse
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
 
@@ -58,6 +60,16 @@ def _check_overlap_for_index(points: np.ndarray, poses: np.ndarray, idx: int) ->
 
 @dataclass
 class RunRecord:
+    """Represent a single SA rollout recorded for behavior cloning.
+
+    Attributes:
+        poses: Pose snapshots (one per accepted step), each shaped `(n, 3)` as `(x, y, deg)`.
+        idxs: Index of the tree moved at each step.
+        deltas: Applied deltas `(dx, dy, ddeg)` per step.
+        delta_scores: Objective deltas per step (`new_score - old_score`).
+        final_score: Final objective value after the rollout.
+    """
+
     poses: List[np.ndarray]
     idxs: List[int]
     deltas: List[np.ndarray]
@@ -172,6 +184,7 @@ def _run_sa_collect(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run SA rollouts, record accepted moves, and save them to a `.npz` file."""
     ap = argparse.ArgumentParser(description="Collect behavior cloning dataset from SA runs")
     ap.add_argument("--n-list", type=str, default="25,50,100", help="Comma-separated Ns")
     ap.add_argument("--runs-per-n", type=int, default=5, help="SA runs per N")
@@ -226,7 +239,9 @@ def main(argv: list[str] | None = None) -> int:
             runs = [min(runs, key=lambda r: r.final_score)]
 
         poses = np.concatenate([np.array(r.poses) for r in runs], axis=0) if runs else np.zeros((0, n, 3))
-        idxs = np.concatenate([np.array(r.idxs, dtype=int) for r in runs], axis=0) if runs else np.zeros((0,), dtype=int)
+        idxs = (
+            np.concatenate([np.array(r.idxs, dtype=int) for r in runs], axis=0) if runs else np.zeros((0,), dtype=int)
+        )
         deltas = np.concatenate([np.array(r.deltas, dtype=float) for r in runs], axis=0) if runs else np.zeros((0, 3))
         dscores = (
             np.concatenate([np.array(r.delta_scores, dtype=float) for r in runs], axis=0)

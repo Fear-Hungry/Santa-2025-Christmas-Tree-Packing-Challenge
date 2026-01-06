@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+"""CLI to train a heatmap meta-optimizer with evolution strategies (ES)."""
+
 from __future__ import annotations
 
 import argparse
@@ -47,6 +49,7 @@ def _accum_grad(accum: Dict[str, np.ndarray], noise: Dict[str, np.ndarray], weig
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Train heatmap parameters and save them to a `.npz` file."""
     ap = argparse.ArgumentParser(description="Train heatmap meta-optimizer with ES")
     ap.add_argument("--n-list", type=str, default="25,50,100", help="Comma-separated Ns")
     ap.add_argument("--train-steps", type=int, default=50, help="ES iterations")
@@ -95,7 +98,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.init == "random":
             base = _random_initial(n, spacing, args.rand_scale, rng)
         else:
-            base = _grid_initial(n, spacing) if rng.random() < 0.5 else _random_initial(n, spacing, args.rand_scale, rng)
+            base = (
+                _grid_initial(n, spacing) if rng.random() < 0.5 else _random_initial(n, spacing, args.rand_scale, rng)
+            )
         best_poses, best_score = heatmap_search(p, base, config, args.heatmap_steps, rng)
         return best_score
 

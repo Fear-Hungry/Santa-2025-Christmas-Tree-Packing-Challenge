@@ -29,4 +29,3 @@ class TestSubmissionFormat(unittest.TestCase):
         self.assertEqual(float(q[1, 0]), 0.0)
         self.assertEqual(float(q[1, 1]), 0.0)
         self.assertEqual(float(q[1, 2]), 0.0)
-

@@ -1,3 +1,9 @@
+"""Project-wide constants.
+
+These values centralize numeric tolerances, submission formatting rules, and
+competition constraints used throughout the codebase.
+"""
+
 from __future__ import annotations
 
 # Numerical tolerance used across collision/formatting/validation.
@@ -9,4 +15,3 @@ SUBMISSION_PREFIX: str = "s"
 
 # Competition constraints.
 XY_LIMIT: float = 100.0
-

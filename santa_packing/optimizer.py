@@ -1,30 +1,43 @@
+"""JAX simulated annealing optimizers for the packing problem.
+
+This module implements the core SA kernels used by:
+- `santa_packing.main` (single-instance runner)
+- `santa_packing.cli.generate_submission` (submission generation pipeline)
+
+The focus is on fast, JIT-friendly operations and broad-phase collision
+filtering (circle/AABB) with an exact polygon intersection check when needed.
+"""
+
+import math
+from functools import partial
+
 import jax
 import jax.numpy as jnp
-from functools import partial
-import math
+
+from .collisions import check_any_collisions
+from .geometry import transform_polygon
+from .l2o import policy_apply
 from .packing import (
     packing_score_from_bboxes,
     prefix_packing_score_from_bboxes,
 )
-from .tree import get_tree_polygon
-from .collisions import check_any_collisions
-from .geometry import transform_polygon
 from .physics import polygons_intersect
-from .l2o import policy_apply
+from .tree import get_tree_polygon
 from .tree_bounds import TREE_AABB_TABLE, TREE_AABB_TABLE_PADDED, TREE_RADIUS2, aabb_for_poses, theta_to_aabb_bin
 
-def check_collisions(poses, base_poly):
-    """
-    Checks if any pair of trees intersect.
-    
+
+def sa_check_collisions(poses, base_poly):
+    """Check if any pair of trees intersect (SA helper).
+
     Args:
-        poses: (N, 3)
-        base_poly: (V, 2)
-        
+        poses: Array `(n, 3)` containing `(x, y, deg)` for each tree.
+        base_poly: Base tree polygon `(v, 2)` in local coordinates.
+
     Returns:
-        True if any collision exists, False otherwise.
+        `True` if any collision exists, `False` otherwise.
     """
     return check_any_collisions(poses, base_poly)
+
 
 @partial(
     jax.jit,
@@ -88,17 +101,17 @@ def run_sa_batch(
 ):
     """
     Runs a batch of SA chains.
-    
+
     Args:
         random_key: JAX PRNGKey
         n_steps: Number of SA steps
         n_trees: Number of trees per packing
         initial_poses: (Batch, N, 3) or None to init?
-        
+
     Returns:
         Final poses (Batch, N, 3) and scores (Batch,)
     """
-    
+
     base_poly = get_tree_polygon()
     score_from_bboxes_fn = prefix_packing_score_from_bboxes if objective == "prefix" else packing_score_from_bboxes
 
@@ -169,10 +182,16 @@ def run_sa_batch(
             return jnp.any(hits)
 
         return jax.lax.cond(jnp.any(candidate), _check_candidates, lambda: jnp.array(False))
-    
-    n_ratio = jnp.asarray(float(n_trees), dtype=initial_poses.dtype) / jnp.asarray(sigma_nref, dtype=initial_poses.dtype)
-    trans_sigma_eff = jnp.asarray(trans_sigma, dtype=initial_poses.dtype) * (n_ratio ** jnp.asarray(trans_sigma_nexp, dtype=initial_poses.dtype))
-    rot_sigma_eff = jnp.asarray(rot_sigma, dtype=initial_poses.dtype) * (n_ratio ** jnp.asarray(rot_sigma_nexp, dtype=initial_poses.dtype))
+
+    n_ratio = jnp.asarray(float(n_trees), dtype=initial_poses.dtype) / jnp.asarray(
+        sigma_nref, dtype=initial_poses.dtype
+    )
+    trans_sigma_eff = jnp.asarray(trans_sigma, dtype=initial_poses.dtype) * (
+        n_ratio ** jnp.asarray(trans_sigma_nexp, dtype=initial_poses.dtype)
+    )
+    rot_sigma_eff = jnp.asarray(rot_sigma, dtype=initial_poses.dtype) * (
+        n_ratio ** jnp.asarray(rot_sigma_nexp, dtype=initial_poses.dtype)
+    )
     overlap_lambda_t = jnp.asarray(overlap_lambda, dtype=initial_poses.dtype)
 
     push_prob_t = jnp.asarray(push_prob, dtype=initial_poses.dtype)
@@ -264,7 +283,7 @@ def run_sa_batch(
             reheat_level,
             temp,
         ) = state
-        
+
         # Annealing schedule
         frac = i / n_steps
         anneal = frac ** jnp.asarray(cooling_power, dtype=initial_poses.dtype)
@@ -292,7 +311,7 @@ def run_sa_batch(
         swap_prob_final = jnp.where(swap_prob_end >= 0.0, swap_prob_end, swap_prob)
         current_swap_prob = swap_prob + (swap_prob_final - swap_prob) * anneal
         current_swap_prob = jnp.clip(current_swap_prob, 0.0, 1.0)
-        
+
         # 1. Propose Move
         (
             key,
@@ -313,7 +332,7 @@ def run_sa_batch(
             subkey_teleport_phi,
             subkey_teleport_noise,
         ) = jax.random.split(key, 17)
-        
+
         batch_size = poses.shape[0]
         batch_idx = jnp.arange(batch_size)
 
@@ -497,7 +516,9 @@ def run_sa_batch(
         )
 
         candidate_poses_teleport = poses.at[batch_idx, k_boundary].set(teleport_pose_k)
-        candidate_poses_single = jnp.where(teleport_success[:, None, None], candidate_poses_teleport, candidate_poses_single)
+        candidate_poses_single = jnp.where(
+            teleport_success[:, None, None], candidate_poses_teleport, candidate_poses_single
+        )
         k_move = jnp.where(teleport_success, k_boundary, k_move)
         rot_mask = rot_mask & (~teleport_success)
 
@@ -541,9 +562,11 @@ def run_sa_batch(
         candidate_cells_swap = candidate_cells_swap.at[batch_idx, k2].set(cell1)
 
         candidate_bboxes = jnp.where(do_swap[:, None, None], candidate_bboxes_swap, candidate_bboxes_single)
-        candidate_bboxes_padded = jnp.where(do_swap[:, None, None], candidate_bboxes_padded_swap, candidate_bboxes_padded_single)
+        candidate_bboxes_padded = jnp.where(
+            do_swap[:, None, None], candidate_bboxes_padded_swap, candidate_bboxes_padded_single
+        )
         candidate_cells = jnp.where(do_swap[:, None, None], candidate_cells_swap, candidate_cells_single)
-        
+
         # 2. Check Constraints
         # Only the moved tree can introduce a new overlap, so we check one-vs-all.
         is_colliding_single = jax.vmap(_check_collision_for_index_cached)(
@@ -553,7 +576,7 @@ def run_sa_batch(
             k_move,
         )
         is_colliding = jnp.where(do_swap, current_colliding, is_colliding_single)
-        
+
         # 3. Calculate Score (+ optional overlap penalty)
         candidate_score = jax.vmap(score_from_bboxes_fn)(candidate_bboxes)
 
@@ -565,19 +588,19 @@ def run_sa_batch(
         candidate_penalty = jax.lax.cond(overlap_lambda_t > 0.0, _update_penalty, lambda: current_penalty)
         current_energy = current_score + overlap_lambda_t * current_penalty
         candidate_energy = candidate_score + overlap_lambda_t * candidate_penalty
-        
+
         # 4. Metropolis Criterion
         delta = candidate_energy - current_energy
-        
+
         key, subkey_accept = jax.random.split(key)
         r = jax.random.uniform(subkey_accept, (batch_size,))
-        
+
         # Acceptance condition:
         # If !colliding AND (delta < 0 OR r < exp(-delta/T))
         should_accept = (delta < 0) | (r < jnp.exp(-delta / (temp_eff + 1e-12)))
         if not allow_collisions:
             should_accept = should_accept & (~is_colliding)
-        
+
         # Update state where accepted
         new_poses = jnp.where(should_accept[:, None, None], candidate_poses, poses)
         new_bboxes = jnp.where(should_accept[:, None, None], candidate_bboxes, bboxes)
@@ -586,7 +609,7 @@ def run_sa_batch(
         new_score = jnp.where(should_accept, candidate_score, current_score)
         new_penalty = jnp.where(should_accept, candidate_penalty, current_penalty)
         new_colliding = jnp.where(should_accept, is_colliding, current_colliding)
-        
+
         # Update best
         improved = (new_score < best_score) & (~new_colliding)
         new_best_poses = jnp.where(improved[:, None, None], new_poses, best_poses)
@@ -634,12 +657,14 @@ def run_sa_batch(
         rot_sigma_next = jnp.where(attempt_rot, rot_sigma_prop, rot_sigma_dyn)
         rot_sigma_next = jnp.where(adapt_sigma_t, rot_sigma_next, rot_sigma_dyn)
 
-        rot_prob_prop = rot_prob_dyn + rot_prob_pull_t * (rot_prob_base - rot_prob_dyn) + rot_prob_adapt_rate_t * (
-            acc_rot_next - acc_trans_next
+        rot_prob_prop = (
+            rot_prob_dyn
+            + rot_prob_pull_t * (rot_prob_base - rot_prob_dyn)
+            + rot_prob_adapt_rate_t * (acc_rot_next - acc_trans_next)
         )
         rot_prob_prop = jnp.clip(rot_prob_prop, rot_prob_min_t, rot_prob_max_t)
         rot_prob_next = jnp.where(adapt_rot_prob_t, rot_prob_prop, rot_prob_base)
-        
+
         return (
             key,
             new_poses,
@@ -675,12 +700,14 @@ def run_sa_batch(
     initial_colliding = jnp.zeros((batch_size,), dtype=bool)
     initial_trans_sigma = jnp.ones((batch_size,), dtype=initial_poses.dtype) * trans_sigma_eff
     initial_rot_sigma = jnp.ones((batch_size,), dtype=initial_poses.dtype) * rot_sigma_eff
-    initial_rot_prob = jnp.ones((batch_size,), dtype=initial_poses.dtype) * jnp.asarray(rot_prob, dtype=initial_poses.dtype)
+    initial_rot_prob = jnp.ones((batch_size,), dtype=initial_poses.dtype) * jnp.asarray(
+        rot_prob, dtype=initial_poses.dtype
+    )
     initial_acc_trans = jnp.ones((batch_size,), dtype=initial_poses.dtype) * accept_target_t
     initial_acc_rot = jnp.ones((batch_size,), dtype=initial_poses.dtype) * accept_target_t
     initial_stall = jnp.zeros((batch_size,), dtype=jnp.int32)
     initial_reheat = jnp.zeros((batch_size,), dtype=initial_poses.dtype)
-    
+
     init_state = (
         random_key,
         initial_poses,
@@ -701,11 +728,11 @@ def run_sa_batch(
         initial_reheat,
         t_start,
     )
-    
+
     final_state, history = jax.lax.scan(step_fn, init_state, jnp.arange(n_steps))
-    
+
     _, _, _, _, _, _, _, _, best_poses, best_score, *_ = final_state
-    
+
     return best_poses, best_score
 
 
@@ -833,9 +860,15 @@ def run_sa_blocks_batch(
 
         return jax.lax.cond(jnp.any(candidate), _check_candidates, lambda: jnp.array(False))
 
-    n_ratio = jnp.asarray(float(n_trees), dtype=initial_poses.dtype) / jnp.asarray(sigma_nref, dtype=initial_poses.dtype)
-    trans_sigma_eff = jnp.asarray(trans_sigma, dtype=initial_poses.dtype) * (n_ratio ** jnp.asarray(trans_sigma_nexp, dtype=initial_poses.dtype))
-    rot_sigma_eff = jnp.asarray(rot_sigma, dtype=initial_poses.dtype) * (n_ratio ** jnp.asarray(rot_sigma_nexp, dtype=initial_poses.dtype))
+    n_ratio = jnp.asarray(float(n_trees), dtype=initial_poses.dtype) / jnp.asarray(
+        sigma_nref, dtype=initial_poses.dtype
+    )
+    trans_sigma_eff = jnp.asarray(trans_sigma, dtype=initial_poses.dtype) * (
+        n_ratio ** jnp.asarray(trans_sigma_nexp, dtype=initial_poses.dtype)
+    )
+    rot_sigma_eff = jnp.asarray(rot_sigma, dtype=initial_poses.dtype) * (
+        n_ratio ** jnp.asarray(rot_sigma_nexp, dtype=initial_poses.dtype)
+    )
     overlap_lambda_t = jnp.asarray(overlap_lambda, dtype=initial_poses.dtype)
 
     adapt_sigma_t = jnp.asarray(adapt_sigma, dtype=bool)
@@ -1087,8 +1120,10 @@ def run_sa_blocks_batch(
         rot_sigma_next = jnp.where(attempt_rot, rot_sigma_prop, rot_sigma_dyn)
         rot_sigma_next = jnp.where(adapt_sigma_t, rot_sigma_next, rot_sigma_dyn)
 
-        rot_prob_prop = rot_prob_dyn + rot_prob_pull_t * (rot_prob_base - rot_prob_dyn) + rot_prob_adapt_rate_t * (
-            acc_rot_next - acc_trans_next
+        rot_prob_prop = (
+            rot_prob_dyn
+            + rot_prob_pull_t * (rot_prob_base - rot_prob_dyn)
+            + rot_prob_adapt_rate_t * (acc_rot_next - acc_trans_next)
         )
         rot_prob_prop = jnp.clip(rot_prob_prop, rot_prob_min_t, rot_prob_max_t)
         rot_prob_next = jnp.where(adapt_rot_prob_t, rot_prob_prop, rot_prob_base)
@@ -1127,7 +1162,9 @@ def run_sa_blocks_batch(
     initial_colliding = jnp.zeros((batch_size,), dtype=bool)
     initial_trans_sigma = jnp.ones((batch_size,), dtype=initial_poses.dtype) * trans_sigma_eff
     initial_rot_sigma = jnp.ones((batch_size,), dtype=initial_poses.dtype) * rot_sigma_eff
-    initial_rot_prob = jnp.ones((batch_size,), dtype=initial_poses.dtype) * jnp.asarray(rot_prob, dtype=initial_poses.dtype)
+    initial_rot_prob = jnp.ones((batch_size,), dtype=initial_poses.dtype) * jnp.asarray(
+        rot_prob, dtype=initial_poses.dtype
+    )
     initial_acc_trans = jnp.ones((batch_size,), dtype=initial_poses.dtype) * accept_target_t
     initial_acc_rot = jnp.ones((batch_size,), dtype=initial_poses.dtype) * accept_target_t
     initial_stall = jnp.zeros((batch_size,), dtype=jnp.int32)
@@ -1313,9 +1350,15 @@ def run_sa_batch_guided(
 
         return jax.lax.cond(jnp.any(candidate), _check_candidates, lambda: jnp.array(False))
 
-    n_ratio = jnp.asarray(float(n_trees), dtype=initial_poses.dtype) / jnp.asarray(sigma_nref, dtype=initial_poses.dtype)
-    trans_sigma_eff = jnp.asarray(trans_sigma, dtype=initial_poses.dtype) * (n_ratio ** jnp.asarray(trans_sigma_nexp, dtype=initial_poses.dtype))
-    rot_sigma_eff = jnp.asarray(rot_sigma, dtype=initial_poses.dtype) * (n_ratio ** jnp.asarray(rot_sigma_nexp, dtype=initial_poses.dtype))
+    n_ratio = jnp.asarray(float(n_trees), dtype=initial_poses.dtype) / jnp.asarray(
+        sigma_nref, dtype=initial_poses.dtype
+    )
+    trans_sigma_eff = jnp.asarray(trans_sigma, dtype=initial_poses.dtype) * (
+        n_ratio ** jnp.asarray(trans_sigma_nexp, dtype=initial_poses.dtype)
+    )
+    rot_sigma_eff = jnp.asarray(rot_sigma, dtype=initial_poses.dtype) * (
+        n_ratio ** jnp.asarray(rot_sigma_nexp, dtype=initial_poses.dtype)
+    )
     overlap_lambda_t = jnp.asarray(overlap_lambda, dtype=initial_poses.dtype)
 
     push_prob_t = jnp.asarray(push_prob, dtype=initial_poses.dtype)
@@ -1660,7 +1703,9 @@ def run_sa_batch_guided(
             operand=None,
         )
         candidate_poses_teleport = poses.at[batch_idx, k_boundary].set(teleport_pose_k)
-        candidate_poses_single = jnp.where(teleport_success[:, None, None], candidate_poses_teleport, candidate_poses_single)
+        candidate_poses_single = jnp.where(
+            teleport_success[:, None, None], candidate_poses_teleport, candidate_poses_single
+        )
         k = jnp.where(teleport_success, k_boundary, k)
         rot_mask = rot_mask & (~teleport_success)
 
@@ -1704,7 +1749,9 @@ def run_sa_batch_guided(
         candidate_cells_swap = candidate_cells_swap.at[batch_idx, k2].set(cell1)
 
         candidate_bboxes = jnp.where(do_swap[:, None, None], candidate_bboxes_swap, candidate_bboxes_single)
-        candidate_bboxes_padded = jnp.where(do_swap[:, None, None], candidate_bboxes_padded_swap, candidate_bboxes_padded_single)
+        candidate_bboxes_padded = jnp.where(
+            do_swap[:, None, None], candidate_bboxes_padded_swap, candidate_bboxes_padded_single
+        )
         candidate_cells = jnp.where(do_swap[:, None, None], candidate_cells_swap, candidate_cells_single)
 
         # --- Constraints: only moved tree can introduce overlap
@@ -1787,8 +1834,10 @@ def run_sa_batch_guided(
         rot_sigma_next = jnp.where(attempt_rot, rot_sigma_prop, rot_sigma_dyn)
         rot_sigma_next = jnp.where(adapt_sigma_t, rot_sigma_next, rot_sigma_dyn)
 
-        rot_prob_prop = rot_prob_dyn + rot_prob_pull_t * (rot_prob_base - rot_prob_dyn) + rot_prob_adapt_rate_t * (
-            acc_rot_next - acc_trans_next
+        rot_prob_prop = (
+            rot_prob_dyn
+            + rot_prob_pull_t * (rot_prob_base - rot_prob_dyn)
+            + rot_prob_adapt_rate_t * (acc_rot_next - acc_trans_next)
         )
         rot_prob_prop = jnp.clip(rot_prob_prop, rot_prob_min_t, rot_prob_max_t)
         rot_prob_next = jnp.where(adapt_rot_prob_t, rot_prob_prop, rot_prob_base)
@@ -1827,7 +1876,9 @@ def run_sa_batch_guided(
     initial_colliding = jnp.zeros((batch_size,), dtype=bool)
     initial_trans_sigma = jnp.ones((batch_size,), dtype=initial_poses.dtype) * trans_sigma_eff
     initial_rot_sigma = jnp.ones((batch_size,), dtype=initial_poses.dtype) * rot_sigma_eff
-    initial_rot_prob = jnp.ones((batch_size,), dtype=initial_poses.dtype) * jnp.asarray(rot_prob, dtype=initial_poses.dtype)
+    initial_rot_prob = jnp.ones((batch_size,), dtype=initial_poses.dtype) * jnp.asarray(
+        rot_prob, dtype=initial_poses.dtype
+    )
     initial_acc_trans = jnp.ones((batch_size,), dtype=initial_poses.dtype) * accept_target_t
     initial_acc_rot = jnp.ones((batch_size,), dtype=initial_poses.dtype) * accept_target_t
     initial_stall = jnp.zeros((batch_size,), dtype=jnp.int32)

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+"""CLI to train an L2O policy (REINFORCE) for packing refinement."""
+
 from __future__ import annotations
 
 import argparse
@@ -57,7 +59,9 @@ def _make_dataset(
             if init_mode == "grid":
                 poses = shift_poses_to_origin(np.array(TREE_POINTS, dtype=float), _grid_initial(n, spacing))
             elif init_mode == "random":
-                poses = shift_poses_to_origin(np.array(TREE_POINTS, dtype=float), _random_initial(n, spacing, rand_scale))
+                poses = shift_poses_to_origin(
+                    np.array(TREE_POINTS, dtype=float), _random_initial(n, spacing, rand_scale)
+                )
             elif init_mode == "lattice":
                 poses = _lattice_initial(n, pattern=lattice_pattern, margin=lattice_margin, rotate_deg=lattice_rotate)
             else:
@@ -81,7 +85,9 @@ def _make_dataset(
                             _random_initial(n, spacing, rand_scale),
                         )
                     else:
-                        poses = _lattice_initial(n, pattern=lattice_pattern, margin=lattice_margin, rotate_deg=lattice_rotate)
+                        poses = _lattice_initial(
+                            n, pattern=lattice_pattern, margin=lattice_margin, rotate_deg=lattice_rotate
+                        )
             samples[i] = np.array(poses, dtype=float)
         dataset[n] = samples
     return dataset
@@ -98,7 +104,7 @@ def _adam_update(params, grads, opt_state, lr=1e-3, b1=0.9, b2=0.999, eps=1e-8):
     return params, (step, m, v)
 
 
-def train_model(
+def train_l2o_model(
     *,
     seed: int = 1,
     n_list: list[int],
@@ -131,6 +137,16 @@ def train_model(
     curriculum_end_max: int | None = None,
     curriculum_steps: int | None = None,
 ):
+    """Train an L2O policy (REINFORCE) for packing refinement.
+
+    Most parameters map 1:1 to CLI flags in `main()`. The function samples
+    initial states (grid/random/lattice or from a provided dataset) and optimizes
+    a policy network to minimize the chosen reward objective.
+
+    Returns:
+        Tuple `(params, history)` where `params` is the trained model parameters
+        (a JAX pytree) and `history` is a list of loss values per training step.
+    """
     key = jax.random.PRNGKey(seed)
     params = init_params(
         key,
@@ -145,7 +161,7 @@ def train_model(
     points = np.array(TREE_POINTS, dtype=float)
     radius = polygon_radius(points)
     spacing = 2.0 * radius * 1.2
-    
+
     # Init Optimizer
     opt_state = (
         0,
@@ -203,7 +219,9 @@ def train_model(
                 elif init_mode == "random":
                     poses = shift_poses_to_origin(points, _random_initial(n, spacing, rand_scale))
                 elif init_mode == "lattice":
-                    poses = _lattice_initial(n, pattern=lattice_pattern, margin=lattice_margin, rotate_deg=lattice_rotate)
+                    poses = _lattice_initial(
+                        n, pattern=lattice_pattern, margin=lattice_margin, rotate_deg=lattice_rotate
+                    )
                 else:
                     if init_mode == "mix":
                         mode = i % 2
@@ -218,13 +236,15 @@ def train_model(
                         elif mode == 1:
                             poses = shift_poses_to_origin(points, _random_initial(n, spacing, rand_scale))
                         else:
-                            poses = _lattice_initial(n, pattern=lattice_pattern, margin=lattice_margin, rotate_deg=lattice_rotate)
+                            poses = _lattice_initial(
+                                n, pattern=lattice_pattern, margin=lattice_margin, rotate_deg=lattice_rotate
+                            )
                 samples[i] = np.array(poses, dtype=float)
         else:
             pool = dataset[n]
             idx = np.random.randint(0, pool.shape[0], size=batch)
             samples = pool[idx]
-        
+
         poses_batch = jnp.array(samples)
         key, sub = jax.random.split(key)
         if baseline_mode == "ema":
@@ -238,10 +258,10 @@ def train_model(
         else:
             loss, grads = loss_grad(params, sub, poses_batch)
         params, opt_state = _adam_update(params, grads, opt_state, lr=lr)
-        
+
         loss_val = float(loss)
         history.append(loss_val)
-        
+
         if verbose_freq > 0 and (step % verbose_freq == 0 or step == 1):
             print(f"[{step:04d}] loss={loss_val:.6f}")
 
@@ -249,6 +269,7 @@ def train_model(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Train an L2O policy and save it to `--out`."""
     ap = argparse.ArgumentParser(description="Train a minimal L2O policy (REINFORCE)")
     ap.add_argument("--n", type=int, default=10, help="Number of trees (fallback if --n-list is empty)")
     ap.add_argument("--n-list", type=str, default="", help="Comma-separated list of N values (ex: 25,50,100)")
@@ -299,7 +320,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--baseline", type=str, default="batch", choices=["batch", "ema"], help="Baseline mode")
     ap.add_argument("--baseline-decay", type=float, default=0.9, help="EMA decay for baseline")
-    ap.add_argument("--init", type=str, default="grid", choices=["grid", "random", "mix", "lattice", "all"], help="Init poses")
+    ap.add_argument(
+        "--init", type=str, default="grid", choices=["grid", "random", "mix", "lattice", "all"], help="Init poses"
+    )
     ap.add_argument("--rand-scale", type=float, default=0.3, help="Random init scale (relative)")
     ap.add_argument("--lattice-pattern", type=str, default="hex", choices=["hex", "square"], help="Lattice pattern")
     ap.add_argument("--lattice-margin", type=float, default=0.02, help="Lattice margin")
@@ -307,7 +330,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--curriculum", action="store_true", help="Enable curriculum over N (start small, grow)")
     ap.add_argument("--curriculum-start-max", type=int, default=None, help="Max N at start (default: min(n_list))")
     ap.add_argument("--curriculum-end-max", type=int, default=None, help="Max N at end (default: max(n_list))")
-    ap.add_argument("--curriculum-steps", type=int, default=None, help="Steps to ramp curriculum (default: train_steps)")
+    ap.add_argument(
+        "--curriculum-steps", type=int, default=None, help="Steps to ramp curriculum (default: train_steps)"
+    )
     ap.add_argument("--dataset-size", type=int, default=0, help="Pre-generate dataset per N (0 = on-the-fly)")
     ap.add_argument("--dataset-out", type=Path, default=None, help="Optional dataset output (.npz)")
     ap.add_argument("--dataset-in", type=Path, default=None, help="Optional dataset input (.npz)")
@@ -319,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     points = np.array(TREE_POINTS, dtype=float)
     radius = polygon_radius(points)
     spacing = 2.0 * radius * 1.2
-    
+
     if args.n_list.strip():
         ns = [int(x) for x in args.n_list.split(",") if x.strip()]
     else:
@@ -352,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
             np.savez(args.dataset_out, **payload)
             print(f"Saved dataset to {args.dataset_out}")
 
-    params, _ = train_model(
+    params, _ = train_l2o_model(
         seed=args.seed,
         n_list=ns,
         batch=args.batch,

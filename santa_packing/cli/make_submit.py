@@ -1,3 +1,9 @@
+"""CLI to generate, validate, and archive a submission run.
+
+This wraps `generate_submission` and `score_submission` to create a timestamped
+folder under `submissions/` containing the CSV, score JSON, logs and metadata.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -10,6 +16,7 @@ import sys
 import traceback
 from pathlib import Path
 
+from santa_packing.cli.config_utils import config_to_argv, default_config_path
 from santa_packing.cli.generate_submission import main as generate_main
 from santa_packing.scoring import score_submission
 
@@ -52,10 +59,27 @@ def _filter_passthrough_args(extra: list[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the end-to-end pipeline and archive artifacts under `--submissions-dir`."""
     argv = list(sys.argv[1:] if argv is None else argv)
 
+    cfg_default = default_config_path("submit.json")
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=Path, default=None)
+    pre.add_argument("--no-config", action="store_true")
+    pre_args, _ = pre.parse_known_args(argv)
+    if pre_args.no_config and pre_args.config is not None:
+        raise SystemExit("Use either --config or --no-config, not both.")
+    config_path = None if pre_args.no_config else (pre_args.config or cfg_default)
+    config_args = config_to_argv(config_path, section_keys=("make_submit", "submit")) if config_path is not None else []
+
     ap = argparse.ArgumentParser(description="Generate + strict-score a submission and archive it under submissions/…")
-    ap.add_argument("--config", type=Path, default=None, help="JSON config passed to generate_submission")
+    ap.add_argument(
+        "--config",
+        type=Path,
+        default=config_path,
+        help="JSON/YAML config passed to generate_submission (defaults to configs/submit.json when present).",
+    )
+    ap.add_argument("--no-config", action="store_true", help="Disable loading the default config (if any).")
     ap.add_argument("--nmax", type=int, default=200, help="Max puzzle n (passed to generator and scorer).")
     ap.add_argument("--seed", type=int, default=None, help="Base seed for generator (optional).")
     ap.add_argument(
@@ -67,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--name", type=str, default=None, help="Optional label appended to the run folder name.")
     ap.add_argument("--submissions-dir", type=Path, default=Path("submissions"), help="Archive root directory.")
-    args, extra = ap.parse_known_args(argv)
+    args, extra = ap.parse_known_args(config_args + argv)
 
     extra = _filter_passthrough_args(extra)
 
@@ -88,6 +112,11 @@ def main(argv: list[str] | None = None) -> int:
     submission_path = run_dir / "submission.csv"
     gen_log = run_dir / "generate.log"
     score_log = run_dir / "score.log"
+    config_copy: str | None = None
+    if args.config is not None:
+        dst = run_dir / f"config{args.config.suffix}"
+        dst.write_text(args.config.read_text(encoding="utf-8"), encoding="utf-8")
+        config_copy = str(dst)
 
     gen_argv: list[str] = []
     if args.config is not None:
@@ -131,7 +160,12 @@ def main(argv: list[str] | None = None) -> int:
         "timestamp_utc": ts,
         "git": {"sha": sha, "dirty": dirty},
         "paths": {"run_dir": str(run_dir), "submission": str(submission_path)},
-        "generator": {"argv": gen_argv, "config": str(args.config) if args.config is not None else None, "log": str(gen_log)},
+        "generator": {
+            "argv": gen_argv,
+            "config": str(args.config) if args.config is not None else None,
+            "config_copy": config_copy,
+            "log": str(gen_log),
+        },
         "scorer": {
             "nmax": int(args.nmax),
             "check_overlap": True,

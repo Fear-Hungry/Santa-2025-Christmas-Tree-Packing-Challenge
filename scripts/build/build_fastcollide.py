@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+"""Build the optional `santa_packing.fastcollide` C++ extension in-place."""
+
 from __future__ import annotations
 
 import subprocess
@@ -8,6 +10,7 @@ from pathlib import Path
 
 
 def main() -> int:
+    """Invoke setuptools build_ext --inplace for the extension."""
     root = Path(__file__).resolve().parents[2]
     setup = root / "scripts" / "build" / "setup_fastcollide.py"
     if not setup.is_file():

@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
 
+"""Run a portfolio of solvers and merge the best puzzles per `n`.
+
+This script targets the older "independent puzzles" workflow (solve each `n`
+separately) and merges multiple candidate submissions puzzle-by-puzzle.
+
+Note: for the current Python pipeline (generate + multi-start + per-n ensemble),
+prefer `python -m santa_packing.cli.sweep_ensemble` with `scripts/submission/portfolios/*.json`.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -179,6 +188,7 @@ def _default_recipes(args: argparse.Namespace) -> list[Recipe]:
 
 
 def main() -> int:
+    """Execute the portfolio merge workflow and write the merged submission."""
     ap = argparse.ArgumentParser(
         description=(
             "Generate multiple solve_all submissions with different configs and merge puzzle-by-puzzle.\n"

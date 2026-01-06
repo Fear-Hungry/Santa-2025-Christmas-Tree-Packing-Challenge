@@ -27,6 +27,16 @@
 /tmp/
 /score_output*.txt
 
+# Generated datasets / models
+*.npz
+*.npy
+*.csv
+*.tsv
+*.parquet
+*.pkl
+*.joblib
+*.log
+
 # Kaggle submissions (usually generated)
 /submission*.csv
 /submissions/

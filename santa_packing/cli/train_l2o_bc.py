@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+"""CLI to train an L2O policy via behavior cloning from an SA dataset."""
+
 from __future__ import annotations
 
 import argparse
@@ -32,6 +34,7 @@ def _adam_update(params, grads, opt_state, lr=1e-3, b1=0.9, b2=0.999, eps=1e-8):
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Train a policy from a dataset of accepted SA moves and save it to `--out`."""
     ap = argparse.ArgumentParser(description="Train L2O by behavior cloning from SA dataset")
     ap.add_argument("--dataset", type=Path, required=True, help="Dataset .npz from collect_sa_dataset.py")
     ap.add_argument("--n-list", type=str, default="", help="Comma-separated Ns (default: infer)")
@@ -71,7 +74,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--curriculum", action="store_true", help="Enable curriculum over N (start small, grow)")
     ap.add_argument("--curriculum-start-max", type=int, default=None, help="Max N at start (default: min(n_list))")
     ap.add_argument("--curriculum-end-max", type=int, default=None, help="Max N at end (default: max(n_list))")
-    ap.add_argument("--curriculum-steps", type=int, default=None, help="Steps to ramp curriculum (default: train_steps)")
+    ap.add_argument(
+        "--curriculum-steps", type=int, default=None, help="Steps to ramp curriculum (default: train_steps)"
+    )
     ap.add_argument("--out", type=Path, default=None, help="Output policy path (.npz)")
     args = ap.parse_args(argv)
     if args.reward is None:
@@ -128,7 +133,9 @@ def main(argv: list[str] | None = None) -> int:
             lambda p, poses, idxs, deltas, w: behavior_cloning_loss_weighted(p, poses, idxs, deltas, w, config)
         )
     else:
-        loss_grad = jax.value_and_grad(lambda p, poses, idxs, deltas: behavior_cloning_loss(p, poses, idxs, deltas, config))
+        loss_grad = jax.value_and_grad(
+            lambda p, poses, idxs, deltas: behavior_cloning_loss(p, poses, idxs, deltas, config)
+        )
 
     n_min = min(ns) if ns else 1
     n_max = max(ns) if ns else n_min

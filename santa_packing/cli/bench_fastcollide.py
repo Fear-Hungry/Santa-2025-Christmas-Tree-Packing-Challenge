@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+"""CLI to benchmark the optional `fastcollide` C++ extension."""
+
 from __future__ import annotations
 
 import argparse
@@ -31,6 +33,7 @@ def _try_import_fast():
 
 
 def main() -> int:
+    """Run the benchmark and print a timing/parity summary."""
     ap = argparse.ArgumentParser(description="Benchmark C++ fastcollide vs Python scoring._polygons_intersect_strict")
     ap.add_argument("--n-polys", type=int, default=256, help="Number of transformed polygons")
     ap.add_argument("--pairs", type=int, default=20000, help="Number of random pairs to test")

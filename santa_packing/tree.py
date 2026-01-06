@@ -1,14 +1,15 @@
+"""Tree shape utilities."""
+
 import jax.numpy as jnp
 
 from .tree_data import TREE_POINTS
 
+
 def get_tree_polygon() -> jnp.ndarray:
-    """
-    Returns the static 15-point polygon defining the Christmas Tree.
-    Vertices are in counter-clockwise order.
-    
+    """Return the static 15-vertex polygon defining the Christmas tree.
+
     Returns:
-        (15, 2) array of vertices.
+        A `(15, 2)` JAX array of vertices in counter-clockwise order.
     """
     # Coordinates taken from src/include/santa2025/tree_polygon.hpp
     return jnp.array(TREE_POINTS)

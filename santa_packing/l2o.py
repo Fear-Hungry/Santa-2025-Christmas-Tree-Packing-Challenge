@@ -1,3 +1,11 @@
+"""Learning-to-Optimize (L2O) policies for packing refinement (JAX).
+
+This module implements lightweight policies (MLP/GNN) that can propose
+translation/rotation updates for individual trees, plus training losses:
+- REINFORCE-style objective with optional overlap penalties
+- behavior cloning from accepted SA moves
+"""
+
 from __future__ import annotations
 
 import math
@@ -15,6 +23,8 @@ from .tree_bounds import TREE_RADIUS2
 
 @dataclass(frozen=True)
 class L2OConfig:
+    """Configuration for L2O policy inference and training."""
+
     hidden_size: int = 32
     policy: str = "mlp"  # "mlp" or "gnn"
     knn_k: int = 4
@@ -43,6 +53,20 @@ def init_params(
     gnn_attention: bool = False,
     feature_mode: str = "raw",
 ) -> Params:
+    """Initialize L2O policy parameters.
+
+    Args:
+        key: JAX PRNGKey.
+        hidden_size: Hidden layer width.
+        policy: `"mlp"` or `"gnn"`.
+        mlp_depth: Number of MLP hidden layers (for `policy="mlp"`).
+        gnn_steps: Message-passing steps (for `policy="gnn"`).
+        gnn_attention: Whether to enable a simple attention mechanism (GNN only).
+        feature_mode: Input feature set (`"raw"`, `"bbox_norm"`, `"rich"`).
+
+    Returns:
+        Parameter dict mapping names to JAX arrays.
+    """
     input_dim = _feature_dim(feature_mode)
     if policy == "gnn":
         msg_steps = max(int(gnn_steps), 1)
@@ -211,6 +235,18 @@ def _gnn_apply(
 
 
 def policy_apply(params: Params, poses: jax.Array, config: L2OConfig) -> Tuple[jax.Array, jax.Array]:
+    """Apply an L2O policy to a packing state.
+
+    Args:
+        params: Policy parameters.
+        poses: Current poses `(N, 3)` as `[x, y, theta_deg]`.
+        config: Policy configuration.
+
+    Returns:
+        Tuple `(logits, mean)`:
+        - `logits`: `(N,)` scores for selecting which tree index to move.
+        - `mean`: `(N, 3)` mean deltas for `[dx, dy, dtheta_deg]` per tree.
+    """
     if config.policy == "gnn":
         logits, mean = _gnn_apply(
             params,
@@ -228,7 +264,7 @@ def policy_apply(params: Params, poses: jax.Array, config: L2OConfig) -> Tuple[j
 
 
 def _gaussian_logprob(x: jax.Array, mean: jax.Array, scale: jax.Array) -> jax.Array:
-    var = scale ** 2
+    var = scale**2
     return -0.5 * jnp.sum(((x - mean) ** 2) / var + jnp.log(2.0 * math.pi * var))
 
 
@@ -289,6 +325,19 @@ def rollout(
     steps: int,
     config: L2OConfig,
 ) -> Tuple[jax.Array, jax.Array]:
+    """Roll out a policy for a fixed number of steps.
+
+    Args:
+        key: JAX PRNGKey.
+        params: Policy parameters.
+        poses: Initial poses `(N, 3)`.
+        steps: Number of policy steps to apply.
+        config: Policy configuration.
+
+    Returns:
+        Tuple `(final_poses, logp_total)` where `logp_total` is the sum of action
+        log-probabilities (useful for REINFORCE).
+    """
     logp_total = 0.0
     for _ in range(steps):
         logits, mean = policy_apply(params, poses, config)
@@ -314,6 +363,7 @@ def optimize_with_l2o(
     steps: int,
     config: L2OConfig,
 ) -> jax.Array:
+    """Convenience wrapper: return only the final poses from `rollout`."""
     final_poses, _ = rollout(key, params, poses, steps, config)
     return final_poses
 
@@ -325,6 +375,8 @@ def loss_fn(
     steps: int,
     config: L2OConfig,
 ) -> jax.Array:
+    """REINFORCE loss over a batch of initial states."""
+
     def one_rollout(k, p):
         final_poses, logp = rollout(k, params, p, steps, config)
         reward = _reward_fn(final_poses, config.overlap_penalty, config.overlap_lambda, config.reward)
@@ -345,6 +397,8 @@ def loss_with_baseline(
     config: L2OConfig,
     baseline: jax.Array,
 ) -> Tuple[jax.Array, jax.Array]:
+    """REINFORCE loss with an externally provided baseline (advantage)."""
+
     def one_rollout(k, p):
         final_poses, logp = rollout(k, params, p, steps, config)
         reward = _reward_fn(final_poses, config.overlap_penalty, config.overlap_lambda, config.reward)
@@ -364,6 +418,7 @@ def behavior_cloning_loss(
     delta_batch: jax.Array,
     config: L2OConfig,
 ) -> jax.Array:
+    """Negative log-likelihood loss for behavior cloning."""
     scales = jnp.array([config.trans_sigma, config.trans_sigma, config.rot_sigma])
 
     def one_sample(poses, idx, delta):
@@ -384,6 +439,7 @@ def behavior_cloning_loss_weighted(
     weights: jax.Array,
     config: L2OConfig,
 ) -> jax.Array:
+    """Weighted behavior cloning loss (non-negative weights)."""
     scales = jnp.array([config.trans_sigma, config.trans_sigma, config.rot_sigma])
 
     def one_sample(poses, idx, delta):
@@ -421,6 +477,7 @@ def _unflatten_params(flat: Dict[str, jnp.ndarray]) -> Params:
 
 
 def save_params_npz(path, params: Params, meta: Dict[str, object] | None = None) -> None:
+    """Save policy parameters to a `.npz` file."""
     import numpy as np
 
     payload = {k: np.array(v) for k, v in _flatten_params(params).items()}
@@ -431,6 +488,7 @@ def save_params_npz(path, params: Params, meta: Dict[str, object] | None = None)
 
 
 def load_params_npz(path) -> Tuple[Params, Dict[str, object]]:
+    """Load policy parameters from a `.npz` file."""
     import numpy as np
 
     data = np.load(path)

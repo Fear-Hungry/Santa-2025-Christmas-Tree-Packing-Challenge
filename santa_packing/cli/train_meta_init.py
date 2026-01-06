@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
+"""CLI to train a meta-initialization policy with ES + fixed SA steps."""
+
 from __future__ import annotations
 
 import argparse
-import math
 import random
 from datetime import datetime
 from pathlib import Path
@@ -45,9 +46,12 @@ def _accum_grad(accum: Dict[str, jnp.ndarray], noise: Dict[str, jnp.ndarray], we
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Train meta-init parameters and save them to a `.npz` file."""
     ap = argparse.ArgumentParser(description="Meta-train initialization policy with ES + fixed SA steps")
     ap.add_argument("--n-list", type=str, default="25,50,100", help="Comma-separated Ns")
-    ap.add_argument("--objective", type=str, default="packing", choices=["packing", "prefix"], help="SA objective used for training")
+    ap.add_argument(
+        "--objective", type=str, default="packing", choices=["packing", "prefix"], help="SA objective used for training"
+    )
     ap.add_argument("--train-steps", type=int, default=50, help="Outer ES iterations")
     ap.add_argument("--es-pop", type=int, default=6, help="ES population size")
     ap.add_argument("--es-sigma", type=float, default=0.05, help="ES noise std")

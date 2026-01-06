@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+"""CLI to score a `submission.csv` locally."""
+
 from __future__ import annotations
 
 import argparse
@@ -11,6 +13,7 @@ from santa_packing.scoring import score_submission
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse arguments, score the submission, and print JSON to stdout."""
     argv = list(sys.argv[1:] if argv is None else argv)
     ap = argparse.ArgumentParser(description="Score a Santa 2025 submission.csv")
     ap.add_argument("submission", type=Path, help="Path to submission.csv")

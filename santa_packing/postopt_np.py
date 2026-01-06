@@ -1,9 +1,17 @@
+"""NumPy post-optimization operators and repair utilities.
+
+These routines are used by the submission generator and sweep/ensemble tooling:
+- overlap detection/repair (best-effort)
+- deterministic hill-climb refinements
+- simple GA and LNS-style metaheuristics
+"""
+
 from __future__ import annotations
 
 import math
 from collections import deque
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Sequence
 
 import numpy as np
 
@@ -42,7 +50,15 @@ def _has_overlaps(points: np.ndarray, poses: np.ndarray) -> bool:
 
 
 def has_overlaps(points: np.ndarray, poses: np.ndarray) -> bool:
-    """Public overlap checker used by sweep/ensemble scripts."""
+    """Return True if any pair of polygons overlaps (NumPy predicate).
+
+    Args:
+        points: Local polygon vertices `(V, 2)`.
+        poses: Poses `(N, 3)` as `[x, y, theta_deg]`.
+
+    Returns:
+        True if any overlap is detected.
+    """
     return _has_overlaps(points, poses)
 
 
@@ -56,6 +72,14 @@ def repair_overlaps(
     step_deg: float = 0.0,
 ) -> np.ndarray | None:
     """Best-effort repair for colliding packings (translation nudges).
+
+    Args:
+        points: Local polygon vertices `(V, 2)`.
+        poses: Initial poses `(N, 3)`.
+        seed: RNG seed.
+        max_iters: Repair iteration budget.
+        step_xy: Translation step size.
+        step_deg: Rotation step size (0 disables rotation during repair).
 
     Returns:
         Repaired poses (shifted to origin) if feasible, otherwise None.
@@ -136,7 +160,22 @@ def hill_climb(
     max_passes: int = 2,
     tol: float = 1e-12,
 ) -> np.ndarray:
-    """Deterministic local search: for each tree, try +/-x, +/-y, +/-deg and accept improvements only."""
+    """Deterministic local search over single-tree moves.
+
+    For each tree, tries a small set of axis-aligned translation and rotation
+    deltas and accepts only strict improvements in packing score.
+
+    Args:
+        points: Local polygon vertices `(V, 2)`.
+        poses: Initial poses `(N, 3)`.
+        step_xy: Translation step size.
+        step_deg: Rotation step size.
+        max_passes: Maximum full passes over all trees.
+        tol: Improvement tolerance.
+
+    Returns:
+        Improved poses shifted to the origin.
+    """
 
     state = _build_state(points, poses)
     n = state.poses.shape[0]
@@ -214,6 +253,19 @@ def hill_climb_boundary(
 
     Unlike `hill_climb` (which scans every tree), this runs a small fixed budget of
     steps and targets trees near the current AABB boundary.
+
+    Args:
+        points: Local polygon vertices `(V, 2)`.
+        poses: Initial poses `(N, 3)`.
+        steps: Number of iterations.
+        step_xy: Translation step size.
+        step_deg: Rotation step size.
+        seed: RNG seed.
+        candidates: Approximate number of boundary candidates per step.
+        tol: Improvement tolerance.
+
+    Returns:
+        Improved poses shifted to the origin.
     """
 
     state = _build_state(points, poses)
@@ -452,6 +504,28 @@ def genetic_optimize(
     """Simple GA for 1 instance: selection + (optional) crossover + mutations (+ optional hill-climb).
 
     Keeps solutions feasible by repairing (or retrying) colliding children.
+
+    Args:
+        points: Local polygon vertices `(V, 2)`.
+        seeds: Sequence of initial candidate poses arrays `(N, 3)`.
+        seed: RNG seed.
+        pop_size: Population size.
+        generations: Number of generations.
+        elite_frac: Fraction of elites preserved each generation.
+        crossover_prob: Probability of crossover vs cloning.
+        mutation_sigma_xy: Stddev for xy mutation.
+        mutation_sigma_deg: Stddev for rotation mutation.
+        directed_mut_prob: Probability of a boundary-directed mutation vs random.
+        directed_step_xy: Step size for directed drift.
+        directed_k: Neighborhood size for directed selection.
+        repair_iters: Repair iteration budget per child.
+        hill_climb_passes: Optional hill-climb passes applied to children.
+        hill_climb_step_xy: Hill-climb xy step size.
+        hill_climb_step_deg: Hill-climb rotation step size.
+        max_child_attempts: Retry budget when generating a feasible child.
+
+    Returns:
+        Best found poses shifted to the origin.
     """
 
     if not seeds:
@@ -485,9 +559,17 @@ def genetic_optimize(
         drift = np.zeros((2,), dtype=float)
         diff = center - child[idx, :2]
         if axis == 0:
-            drift[0] = math.copysign(directed_step_xy, float(diff[0])) if abs(float(diff[0])) > 1e-12 else float(directed_step_xy)
+            drift[0] = (
+                math.copysign(directed_step_xy, float(diff[0]))
+                if abs(float(diff[0])) > 1e-12
+                else float(directed_step_xy)
+            )
         else:
-            drift[1] = math.copysign(directed_step_xy, float(diff[1])) if abs(float(diff[1])) > 1e-12 else float(directed_step_xy)
+            drift[1] = (
+                math.copysign(directed_step_xy, float(diff[1]))
+                if abs(float(diff[1])) > 1e-12
+                else float(directed_step_xy)
+            )
 
         noise = rng.normal(0.0, mutation_sigma_xy, size=(2,))
         child[idx, 0:2] = child[idx, 0:2] + drift + noise
@@ -594,7 +676,9 @@ def _collides_candidate(state: _PackingState, cand_center: np.ndarray, cand_poly
     return False
 
 
-def _collides_candidate_excluding(state: _PackingState, cand_center: np.ndarray, cand_poly: np.ndarray, exclude: np.ndarray) -> bool:
+def _collides_candidate_excluding(
+    state: _PackingState, cand_center: np.ndarray, cand_poly: np.ndarray, exclude: np.ndarray
+) -> bool:
     n = state.centers.shape[0]
     for j in range(n):
         if bool(exclude[j]):
@@ -729,6 +813,27 @@ def large_neighborhood_search(
       - `destroy_mode="alns"` adaptively samples among {"boundary","random","cluster"} based on
         recent successful moves (simple reaction-factor update).
       - `tabu_tenure>0` keeps a tabu list of recent ruin-sets (tree-index tuples) to reduce cycles.
+
+    Args:
+        points: Local polygon vertices `(V, 2)`.
+        poses: Initial poses `(N, 3)`.
+        seed: RNG seed.
+        passes: Number of destroy/recreate passes.
+        destroy_k: Number of trees to remove each pass.
+        destroy_mode: Ruin-set sampling strategy.
+        tabu_tenure: If >0, keep last `tabu_tenure` ruin-sets as tabu.
+        candidates: Candidate center samples used during reinsert.
+        angle_samples: Candidate angle samples per reinsert.
+        pad_scale: Padding factor applied to sampling bounds.
+        group_moves: Number of optional group-rotation moves per pass.
+        group_size: Group size for group moves.
+        group_trans_sigma: Translation sigma for group moves.
+        group_rot_sigma: Rotation sigma for group moves.
+        t_start: Optional SA temperature start (0 disables worse acceptance).
+        t_end: Optional SA temperature end.
+
+    Returns:
+        Best found poses shifted to the origin.
     """
 
     poses = np.array(poses, dtype=float, copy=True)
@@ -861,7 +966,9 @@ def large_neighborhood_search(
 
                 # Always include the original pose as a candidate (may fail if earlier inserts moved into it).
                 orig_pose = np.array(current[idx], dtype=float, copy=False)
-                centers = _sample_centers(rng=rng, min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y, pad=pad, n=max(0, int(candidates) - 1))
+                centers = _sample_centers(
+                    rng=rng, min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y, pad=pad, n=max(0, int(candidates) - 1)
+                )
                 centers = np.vstack([orig_pose[0:2][None, :], centers])
 
                 n_ang = max(1, int(angle_samples))
@@ -915,7 +1022,9 @@ def large_neighborhood_search(
             best_cand = cand_from_group
             best_cand_score = float(cand_group_score) if cand_group_score is not None else None
         if cand_from_ruin is not None:
-            if best_cand_score is None or (cand_ruin_score is not None and float(cand_ruin_score) < float(best_cand_score)):
+            if best_cand_score is None or (
+                cand_ruin_score is not None and float(cand_ruin_score) < float(best_cand_score)
+            ):
                 best_cand = cand_from_ruin
                 best_cand_score = float(cand_ruin_score) if cand_ruin_score is not None else None
 

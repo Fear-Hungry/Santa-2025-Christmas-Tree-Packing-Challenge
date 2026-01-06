@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+"""Wrapper script for `santa_packing.cli.train_l2o`."""
+
 from __future__ import annotations
 
 import subprocess
@@ -8,6 +10,7 @@ from pathlib import Path
 
 
 def _repo_root() -> Path:
+    """Return the repository root (directory containing `pyproject.toml`)."""
     here = Path(__file__).resolve()
     for cand in (here.parent, *here.parents):
         if (cand / "pyproject.toml").is_file():
@@ -16,6 +19,7 @@ def _repo_root() -> Path:
 
 
 def main() -> int:
+    """Execute `python -m santa_packing.cli.train_l2o` in the repo root."""
     root = _repo_root()
     cmd = [sys.executable, "-m", "santa_packing.cli.train_l2o", *sys.argv[1:]]
     return int(subprocess.call(cmd, cwd=str(root)))
@@ -23,4 +27,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

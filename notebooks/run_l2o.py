@@ -79,7 +79,7 @@ def resolve_repo_root() -> Path:
             s = 0
             if (p / "santa_packing" / "l2o.py").exists():
                 s += 2
-            if (p / "scripts" / "submission" / "generate_submission.py").exists():
+            if (p / "santa_packing" / "cli" / "generate_submission.py").exists():
                 s += 1
             if (p / "notebooks" / "run_l2o.ipynb").exists():
                 s += 1
@@ -116,7 +116,7 @@ from santa_packing.geom_np import (  # noqa: E402
 )
 import santa_packing.l2o as l2o_mod  # noqa: E402
 from santa_packing.optimizer import run_sa_batch  # noqa: E402
-import scripts.training.train_l2o as train_l2o_mod  # noqa: E402
+import santa_packing.cli.train_l2o as train_l2o_mod  # noqa: E402
 from santa_packing.tree_data import TREE_POINTS  # noqa: E402
 
 train_l2o_mod = importlib.reload(train_l2o_mod)
@@ -127,7 +127,7 @@ save_params_npz = l2o_mod.save_params_npz
 optimize_with_l2o = l2o_mod.optimize_with_l2o
 
 
-def train_model_safe(**kwargs):
+def train_l2o_model_safe(**kwargs):
     seed = kwargs.get("seed")
     if seed is not None:
         try:
@@ -138,12 +138,12 @@ def train_model_safe(**kwargs):
             np.random.seed(seed_int)
             random.seed(seed_int)
 
-    sig = inspect.signature(train_l2o_mod.train_model)
+    sig = inspect.signature(train_l2o_mod.train_l2o_model)
     allowed = {k: v for k, v in kwargs.items() if k in sig.parameters}
     missing = sorted(set(kwargs) - set(allowed))
     if missing:
-        print(f"[warn] train_model ignorou parametros nao suportados: {missing}")
-    return train_l2o_mod.train_model(**allowed)
+        print(f"[warn] train_l2o_model ignorou parametros nao suportados: {missing}")
+    return train_l2o_mod.train_l2o_model(**allowed)
 
 
 def parse_int_list(text: str) -> list[int]:
@@ -265,7 +265,8 @@ def score_csv(csv_path: Path, *, nmax: int, check_overlap: bool) -> Dict[str, ob
     except Exception:
         cmd = [
             sys.executable,
-            str(ROOT / "scripts" / "evaluation" / "score_submission.py"),
+            "-m",
+            "santa_packing.cli.score_submission",
             str(csv_path),
             "--nmax",
             str(nmax),
@@ -297,7 +298,8 @@ def generate_submission(
 ) -> None:
     cmd = [
         sys.executable,
-        str(ROOT / "scripts" / "submission" / "generate_submission.py"),
+        "-m",
+        "santa_packing.cli.generate_submission",
         "--out",
         str(out_csv),
         "--seed",
@@ -875,7 +877,7 @@ if RUN_L2O_SWEEP:
             meta = dict(saved_meta)
             loss = []
         else:
-            params, loss = train_model_safe(
+            params, loss = train_l2o_model_safe(
                 seed=int(meta["seed"]),
                 n_list=TRAIN_N_LIST,
                 batch=BATCH,
@@ -984,7 +986,7 @@ if RUN_L2O_SWEEP:
     if L2O_SWEEP_RETRAIN_FINAL and best_mlp is not None:
         meta = load_params_npz(Path(str(best_mlp["path"])))[1]
         mlp_meta = dict(meta)
-        mlp_params, mlp_loss = train_model_safe(
+        mlp_params, mlp_loss = train_l2o_model_safe(
             seed=int(mlp_meta.get("seed", 1)),
             n_list=TRAIN_N_LIST,
             batch=BATCH,
@@ -1012,7 +1014,7 @@ if RUN_L2O_SWEEP:
             verbose_freq=10,
         )
     else:
-        mlp_params, mlp_loss = train_model_safe(
+        mlp_params, mlp_loss = train_l2o_model_safe(
             seed=1,
             n_list=TRAIN_N_LIST,
             batch=BATCH,
@@ -1043,7 +1045,7 @@ if RUN_L2O_SWEEP:
     if L2O_SWEEP_RETRAIN_FINAL and best_gnn is not None:
         meta = load_params_npz(Path(str(best_gnn["path"])))[1]
         gnn_meta = dict(meta)
-        gnn_params, gnn_loss = train_model_safe(
+        gnn_params, gnn_loss = train_l2o_model_safe(
             seed=int(gnn_meta.get("seed", 2)),
             n_list=TRAIN_N_LIST,
             batch=BATCH,
@@ -1074,7 +1076,7 @@ if RUN_L2O_SWEEP:
             verbose_freq=10,
         )
     else:
-        gnn_params, gnn_loss = train_model_safe(
+        gnn_params, gnn_loss = train_l2o_model_safe(
             seed=2,
             n_list=TRAIN_N_LIST,
             batch=BATCH,
@@ -1104,7 +1106,7 @@ if RUN_L2O_SWEEP:
         )
 else:
     # Baseline (sem sweep)
-    mlp_params, mlp_loss = train_model_safe(
+    mlp_params, mlp_loss = train_l2o_model_safe(
         seed=1,
         n_list=TRAIN_N_LIST,
         batch=BATCH,
@@ -1132,7 +1134,7 @@ else:
         verbose_freq=10,
     )
 
-    gnn_params, gnn_loss = train_model_safe(
+    gnn_params, gnn_loss = train_l2o_model_safe(
         seed=2,
         n_list=TRAIN_N_LIST,
         batch=BATCH,
@@ -1742,9 +1744,9 @@ CANDIDATE_GUIDED_MODELS: Dict[str, Path] = dict(CANDIDATE_L2O_MODELS)
 # %% [markdown]
 # ## Experimentos de submission (1 célula = 1 experimento)
 #
-# Objetivo: cada célula abaixo gera um `submission.csv` (via `scripts/submission/generate_submission.py`)
+# Objetivo: cada célula abaixo gera um `submission.csv` (via `python -m santa_packing.cli.generate_submission`)
 # e já imprime o **score do desafio** (métrica do Kaggle) calculado pelo scorer local
-# (`santa_packing/scoring.py`, equivalente ao `scripts/evaluation/score_submission.py`).
+# (`santa_packing/scoring.py`, equivalente ao `python -m santa_packing.cli.score_submission`).
 #
 # Dica: deixe `REUSE=True` para não re-gerar CSVs já existentes.
 # %%
@@ -2538,7 +2540,7 @@ run_submission_experiment("mother_block_alns_tabu_refine2000_prefix", args)
 # %% [markdown]
 # ## Sweep automático de receitas (opcional)
 #
-# Gera uma pool grande de receitas (combinações de flags do `scripts/submission/generate_submission.py`),
+# Gera uma pool grande de receitas (combinações de flags do `python -m santa_packing.cli.generate_submission`),
 # filtra as que dependem de modelos inexistentes e permite:
 # - `RUN_SUBMISSION_SWEEP=True`: sweep 2-stage (rápido + final) + (opcional) ensemble por puzzle
 # - `RUN_SUBMISSION_SWEEP=False`: gera 1 `submission.csv` com uma receita forte e calcula o score
@@ -3393,7 +3395,7 @@ def _build_recipe_pool() -> tuple[Dict[str, Dict[str, object]], Dict[str, Dict[s
     return recipes, meta, settings
 
 
-# === Receitas (flags do scripts/submission/generate_submission.py) ===
+# === Receitas (flags do python -m santa_packing.cli.generate_submission) ===
 RECIPES, RECIPES_META, RECIPES_SETTINGS = _build_recipe_pool()
 RECIPES_SETTINGS.update(
     {
@@ -3730,7 +3732,7 @@ if not RUN_SUBMISSION_SWEEP:
 else:
     print("[single_submission] RUN_SUBMISSION_SWEEP=True; pule este cell.")
 
-# %% Maximo de experimentos: multi-start + ensemble por n (via scripts/submission/sweep_ensemble.py)
+# %% Maximo de experimentos: multi-start + ensemble por n (via python -m santa_packing.cli.sweep_ensemble)
 # Objetivo: rodar MUITAS seeds com uma receita forte (mother-prefix + refine no N=200) e
 # deixar o ensemble escolher o melhor s_n por puzzle.
 RUN_MAX_SEED_SWEEP = False
@@ -3802,7 +3804,8 @@ if RUN_MAX_SEED_SWEEP:
         run_cmd(
             [
                 sys.executable,
-                str(ROOT / "scripts" / "submission" / "sweep_ensemble.py"),
+                "-m",
+                "santa_packing.cli.sweep_ensemble",
                 "--repo",
                 str(ROOT),
                 "--runs-dir",

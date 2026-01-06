@@ -1,3 +1,5 @@
+"""Setuptools entrypoint to build the `santa_packing.fastcollide` extension."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,6 +8,7 @@ from setuptools import Extension, setup
 
 
 def main() -> None:
+    """Define and run setuptools `setup()` for the extension."""
     import numpy as np
 
     root = Path(__file__).resolve().parents[2]

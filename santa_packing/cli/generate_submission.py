@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 
+"""CLI to generate a competition-formatted `submission.csv`.
+
+This command builds packings for `n=1..nmax` using a configurable pipeline
+(lattice baselines, optional refinement, overlap validation, and formatting).
+"""
+
 from __future__ import annotations
 
 import argparse
 import csv
-import json
 import math
 import sys
 from pathlib import Path
 
 import numpy as np
 
+import santa_packing.lattice as lattice_mod
+from santa_packing.cli.config_utils import config_to_argv, default_config_path
 from santa_packing.constants import EPS
 from santa_packing.geom_np import (
     packing_bbox,
@@ -28,7 +35,6 @@ from santa_packing.submission_format import (
     quantize_for_submission,
 )
 from santa_packing.tree_data import TREE_POINTS
-import santa_packing.lattice as lattice_mod
 
 
 def _safe_fallback_layout(points: np.ndarray, n: int) -> np.ndarray:
@@ -104,6 +110,22 @@ def _finalize_puzzle(
         1.035,
         1.04,
         1.045,
+        # Some externally-generated packings can have small but widespread overlaps; a
+        # modest global detouch is vastly cheaper than per-tree repairs.
+        1.05,
+        1.06,
+        1.07,
+        1.08,
+        1.09,
+        1.10,
+        1.12,
+        1.14,
+        1.16,
+        1.18,
+        1.20,
+        1.22,
+        1.25,
+        1.30,
     ):
         candidate = _try_scale(scale)
         if candidate is not None:
@@ -220,6 +242,7 @@ def _run_sa(
     try:
         import jax
         import jax.numpy as jnp
+
         _JAX_AVAILABLE = True
     except Exception:
         _JAX_AVAILABLE = False
@@ -854,6 +877,7 @@ def _run_l2o(
     mlp_depth = int(meta.get("mlp_depth", 1)) if hasattr(meta.get("mlp_depth", 1), "__int__") else 1
     gnn_steps = int(meta.get("gnn_steps", 1)) if hasattr(meta.get("gnn_steps", 1), "__int__") else 1
     feature_mode = str(meta.get("feature_mode", "raw"))
+
     def _meta_bool(value, default: bool) -> bool:
         if isinstance(value, (bool, np.bool_)):
             return bool(value)
@@ -928,66 +952,6 @@ def _parse_float_list(text: str | None) -> list[float]:
             continue
         out.append(float(part))
     return out
-
-
-def _config_to_argv(config_path: Path) -> list[str]:
-    """Convert a JSON config into argv-like tokens.
-
-    Supported formats:
-      - {"args": ["--sa-nmax", "50", ...]}
-      - {"generate": {"sa_nmax": 50, "mother_prefix": true, ...}}
-      - {"sa_nmax": 50, ...}  (fallback: treat as generate-mapping)
-    """
-    raw = config_path.read_text(encoding="utf-8")
-    data = json.loads(raw)
-
-    if isinstance(data, dict) and "args" in data:
-        args = data["args"]
-        if not isinstance(args, list):
-            raise TypeError(f"{config_path}: expected 'args' to be a list, got {type(args).__name__}")
-        argv = [str(x) for x in args]
-        if any(tok == "--config" or tok.startswith("--config=") for tok in argv):
-            raise ValueError(f"{config_path}: 'args' must not include --config (avoid recursion)")
-        return argv
-
-    mapping: dict[str, object] | None = None
-    if isinstance(data, dict):
-        for key in ("generate", "generate_submission"):
-            section = data.get(key)
-            if isinstance(section, dict):
-                mapping = section
-                break
-        if mapping is None:
-            mapping = data
-    else:
-        raise TypeError(f"{config_path}: expected a JSON object at top-level, got {type(data).__name__}")
-
-    argv: list[str] = []
-    for key, value in mapping.items():
-        if key in {"config", "args"}:
-            continue
-
-        flag = str(key).strip()
-        if not flag:
-            continue
-        if not flag.startswith("--"):
-            flag = "--" + flag.replace("_", "-")
-
-        if value is None:
-            continue
-        if isinstance(value, (bool, np.bool_)):
-            if bool(value):
-                argv.append(flag)
-            continue
-        if isinstance(value, (list, tuple)):
-            argv.append(flag)
-            argv.append(",".join(str(x) for x in value))
-            continue
-
-        argv.append(flag)
-        argv.append(str(value))
-
-    return argv
 
 
 def _best_lattice_poses(
@@ -1192,6 +1156,19 @@ def solve_n(
     block_template_margin: float,
     block_template_rotate: float,
 ) -> np.ndarray:
+    """Solve a single puzzle size `n` and return poses as an `(n, 3)` array.
+
+    This is the core pipeline behind `generate_submission`: start from a baseline
+    initialization (typically `lattice_*`), optionally apply learned components
+    (`meta_init_model`, `heatmap_model`, `l2o_model`, `guided_model`), refine with
+    SA (`sa_*` / `refine_*`) and neighborhood search (`lns_*`), and finally return
+    poses ready for validation/formatting.
+
+    Parameters are grouped by prefix and match the CLI flags (see `--help`).
+
+    Returns:
+        Numpy array shaped `(n, 3)` with columns `(x, y, deg)`.
+    """
     base: np.ndarray | None = None
 
     if heatmap_model is not None and n <= heatmap_nmax:
@@ -1246,7 +1223,6 @@ def solve_n(
     init_override = None
     if base is None and n <= sa_nmax and meta_init_model is not None:
         try:
-            import jax
             import jax.numpy as jnp
         except Exception:
             meta_init_model = None
@@ -1441,6 +1417,169 @@ def solve_n(
                 seed=seed,
             )
 
+    points = np.array(TREE_POINTS, dtype=float)
+    base = _post_optimize(
+        points,
+        base,
+        n=n,
+        seed=seed,
+        refine_nmin=refine_nmin,
+        refine_batch_size=refine_batch_size,
+        refine_steps=refine_steps,
+        refine_trans_sigma=refine_trans_sigma,
+        refine_rot_sigma=refine_rot_sigma,
+        refine_rot_prob=refine_rot_prob,
+        refine_rot_prob_end=refine_rot_prob_end,
+        refine_swap_prob=refine_swap_prob,
+        refine_swap_prob_end=refine_swap_prob_end,
+        refine_push_prob=refine_push_prob,
+        refine_push_scale=refine_push_scale,
+        refine_push_square_prob=refine_push_square_prob,
+        refine_compact_prob=refine_compact_prob,
+        refine_compact_prob_end=refine_compact_prob_end,
+        refine_compact_scale=refine_compact_scale,
+        refine_compact_square_prob=refine_compact_square_prob,
+        refine_teleport_prob=refine_teleport_prob,
+        refine_teleport_prob_end=refine_teleport_prob_end,
+        refine_teleport_tries=refine_teleport_tries,
+        refine_teleport_anchor_beta=refine_teleport_anchor_beta,
+        refine_teleport_ring_mult=refine_teleport_ring_mult,
+        refine_teleport_jitter=refine_teleport_jitter,
+        refine_cooling=refine_cooling,
+        refine_cooling_power=refine_cooling_power,
+        refine_trans_sigma_nexp=refine_trans_sigma_nexp,
+        refine_rot_sigma_nexp=refine_rot_sigma_nexp,
+        refine_sigma_nref=refine_sigma_nref,
+        refine_proposal=refine_proposal,
+        refine_smart_prob=refine_smart_prob,
+        refine_smart_beta=refine_smart_beta,
+        refine_smart_drift=refine_smart_drift,
+        refine_smart_noise=refine_smart_noise,
+        refine_overlap_lambda=refine_overlap_lambda,
+        refine_allow_collisions=refine_allow_collisions,
+        refine_objective=refine_objective,
+        guided_model=guided_model,
+        guided_prob=guided_prob,
+        guided_pmax=guided_pmax,
+        guided_prob_end=guided_prob_end,
+        guided_pmax_end=guided_pmax_end,
+        lns_nmax=lns_nmax,
+        lns_passes=lns_passes,
+        lns_destroy_k=lns_destroy_k,
+        lns_destroy_mode=lns_destroy_mode,
+        lns_tabu_tenure=lns_tabu_tenure,
+        lns_candidates=lns_candidates,
+        lns_angle_samples=lns_angle_samples,
+        lns_pad_scale=lns_pad_scale,
+        lns_group_moves=lns_group_moves,
+        lns_group_size=lns_group_size,
+        lns_group_trans_sigma=lns_group_trans_sigma,
+        lns_group_rot_sigma=lns_group_rot_sigma,
+        lns_t_start=lns_t_start,
+        lns_t_end=lns_t_end,
+        hc_nmax=hc_nmax,
+        hc_passes=hc_passes,
+        hc_step_xy=hc_step_xy,
+        hc_step_deg=hc_step_deg,
+        ga_nmax=ga_nmax,
+        ga_pop=ga_pop,
+        ga_gens=ga_gens,
+        ga_elite_frac=ga_elite_frac,
+        ga_crossover_prob=ga_crossover_prob,
+        ga_mut_sigma_xy=ga_mut_sigma_xy,
+        ga_mut_sigma_deg=ga_mut_sigma_deg,
+        ga_directed_prob=ga_directed_prob,
+        ga_directed_step_xy=ga_directed_step_xy,
+        ga_directed_k=ga_directed_k,
+        ga_repair_iters=ga_repair_iters,
+        ga_hc_passes=ga_hc_passes,
+        ga_hc_step_xy=ga_hc_step_xy,
+        ga_hc_step_deg=ga_hc_step_deg,
+    )
+    return base
+
+
+def _post_optimize(
+    points: np.ndarray,
+    poses: np.ndarray,
+    *,
+    n: int,
+    seed: int,
+    refine_nmin: int,
+    refine_batch_size: int,
+    refine_steps: int,
+    refine_trans_sigma: float,
+    refine_rot_sigma: float,
+    refine_rot_prob: float,
+    refine_rot_prob_end: float,
+    refine_swap_prob: float,
+    refine_swap_prob_end: float,
+    refine_push_prob: float,
+    refine_push_scale: float,
+    refine_push_square_prob: float,
+    refine_compact_prob: float,
+    refine_compact_prob_end: float,
+    refine_compact_scale: float,
+    refine_compact_square_prob: float,
+    refine_teleport_prob: float,
+    refine_teleport_prob_end: float,
+    refine_teleport_tries: int,
+    refine_teleport_anchor_beta: float,
+    refine_teleport_ring_mult: float,
+    refine_teleport_jitter: float,
+    refine_cooling: str,
+    refine_cooling_power: float,
+    refine_trans_sigma_nexp: float,
+    refine_rot_sigma_nexp: float,
+    refine_sigma_nref: float,
+    refine_proposal: str,
+    refine_smart_prob: float,
+    refine_smart_beta: float,
+    refine_smart_drift: float,
+    refine_smart_noise: float,
+    refine_overlap_lambda: float,
+    refine_allow_collisions: bool,
+    refine_objective: str,
+    guided_model: Path | None,
+    guided_prob: float,
+    guided_pmax: float,
+    guided_prob_end: float,
+    guided_pmax_end: float,
+    lns_nmax: int,
+    lns_passes: int,
+    lns_destroy_k: int,
+    lns_destroy_mode: str,
+    lns_tabu_tenure: int,
+    lns_candidates: int,
+    lns_angle_samples: int,
+    lns_pad_scale: float,
+    lns_group_moves: int,
+    lns_group_size: int,
+    lns_group_trans_sigma: float,
+    lns_group_rot_sigma: float,
+    lns_t_start: float,
+    lns_t_end: float,
+    hc_nmax: int,
+    hc_passes: int,
+    hc_step_xy: float,
+    hc_step_deg: float,
+    ga_nmax: int,
+    ga_pop: int,
+    ga_gens: int,
+    ga_elite_frac: float,
+    ga_crossover_prob: float,
+    ga_mut_sigma_xy: float,
+    ga_mut_sigma_deg: float,
+    ga_directed_prob: float,
+    ga_directed_step_xy: float,
+    ga_directed_k: int,
+    ga_repair_iters: int,
+    ga_hc_passes: int,
+    ga_hc_step_xy: float,
+    ga_hc_step_deg: float,
+) -> np.ndarray:
+    base = np.array(poses, dtype=float, copy=True)
+
     if refine_steps > 0 and n >= refine_nmin:
         if guided_model is not None:
             refined = _run_sa_guided(
@@ -1530,8 +1669,6 @@ def solve_n(
         if refined is not None:
             base = refined
 
-    points = np.array(TREE_POINTS, dtype=float)
-
     if lns_passes > 0 and lns_nmax > 0 and n <= lns_nmax:
         from santa_packing.postopt_np import large_neighborhood_search  # noqa: E402
 
@@ -1591,14 +1728,31 @@ def solve_n(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Generate a `submission.csv` according to flags and optional JSON config."""
     argv = list(sys.argv[1:] if argv is None else argv)
+
+    cfg_default = default_config_path("submit.json")
     pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--config", type=Path, default=None, help="JSON config path (optional)")
+    pre.add_argument("--config", type=Path, default=None, help="Path to JSON/YAML config (optional)")
+    pre.add_argument("--no-config", action="store_true", help="Disable loading the default config (if any).")
     pre_args, _ = pre.parse_known_args(argv)
-    config_args = _config_to_argv(pre_args.config) if pre_args.config is not None else []
+
+    if pre_args.no_config and pre_args.config is not None:
+        raise SystemExit("Use either --config or --no-config, not both.")
+
+    config_path = None if pre_args.no_config else (pre_args.config or cfg_default)
+    config_args = (
+        config_to_argv(config_path, section_keys=("generate", "generate_submission")) if config_path is not None else []
+    )
 
     ap = argparse.ArgumentParser(description="Generate submission.csv (hybrid SA + lattice)")
-    ap.add_argument("--config", type=Path, default=None, help="JSON config file with defaults for this script")
+    ap.add_argument(
+        "--config",
+        type=Path,
+        default=config_path,
+        help="JSON/YAML config file with defaults for this script (defaults to configs/submit.json when present).",
+    )
+    ap.add_argument("--no-config", action="store_true", help="Disable loading the default config (if any).")
     ap.add_argument("--out", type=Path, default=Path("submission.csv"), help="Output CSV path")
     ap.add_argument("--nmax", type=int, default=200, help="Max puzzle n (default: 200)")
     ap.add_argument("--seed", type=int, default=1, help="Base seed for SA")
@@ -1606,7 +1760,7 @@ def main(argv: list[str] | None = None) -> int:
         "--from-submission",
         type=Path,
         default=None,
-        help="Load poses from an existing submission.csv and strictify/quantize them (skips solving).",
+        help="Load poses from an existing submission.csv and finalize them (optionally applying refine/LNS/HC/GA).",
     )
     ap.add_argument(
         "--overlap-mode",
@@ -1641,7 +1795,9 @@ def main(argv: list[str] | None = None) -> int:
         default=-1.0,
         help="Final SA rotation move probability (linear schedule; -1 keeps constant).",
     )
-    ap.add_argument("--sa-swap-prob", type=float, default=0.0, help="SA swap move probability (useful for objective=prefix).")
+    ap.add_argument(
+        "--sa-swap-prob", type=float, default=0.0, help="SA swap move probability (useful for objective=prefix)."
+    )
     ap.add_argument(
         "--sa-swap-prob-end",
         type=float,
@@ -1653,10 +1809,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Enable neighborhood moves (swap/compact/teleport) with sensible defaults (unless explicitly set).",
     )
-    ap.add_argument("--sa-push-prob", type=float, default=0.1, help="SA deterministic push-to-center move probability (translation-only).")
+    ap.add_argument(
+        "--sa-push-prob",
+        type=float,
+        default=0.1,
+        help="SA deterministic push-to-center move probability (translation-only).",
+    )
     ap.add_argument("--sa-push-scale", type=float, default=1.0, help="SA push step magnitude multiplier.")
     ap.add_argument("--sa-push-square-prob", type=float, default=0.5, help="SA push: fraction of axis-aligned pushes.")
-    ap.add_argument("--sa-compact-prob", type=float, default=0.0, help="SA compact move probability (boundary -> center).")
+    ap.add_argument(
+        "--sa-compact-prob", type=float, default=0.0, help="SA compact move probability (boundary -> center)."
+    )
     ap.add_argument(
         "--sa-compact-prob-end",
         type=float,
@@ -1664,8 +1827,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Final SA compact move probability (linear schedule; -1 keeps constant).",
     )
     ap.add_argument("--sa-compact-scale", type=float, default=1.0, help="SA compact step magnitude multiplier.")
-    ap.add_argument("--sa-compact-square-prob", type=float, default=0.75, help="SA compact: fraction of axis-aligned moves.")
-    ap.add_argument("--sa-teleport-prob", type=float, default=0.0, help="SA teleport move probability (boundary -> interior pocket).")
+    ap.add_argument(
+        "--sa-compact-square-prob", type=float, default=0.75, help="SA compact: fraction of axis-aligned moves."
+    )
+    ap.add_argument(
+        "--sa-teleport-prob",
+        type=float,
+        default=0.0,
+        help="SA teleport move probability (boundary -> interior pocket).",
+    )
     ap.add_argument(
         "--sa-teleport-prob-end",
         type=float,
@@ -1673,11 +1843,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Final SA teleport move probability (linear schedule; -1 keeps constant).",
     )
     ap.add_argument("--sa-teleport-tries", type=int, default=4, help="SA teleport: number of candidate tries per step.")
-    ap.add_argument("--sa-teleport-anchor-beta", type=float, default=6.0, help="SA teleport: bias toward center anchors (higher=more central).")
-    ap.add_argument("--sa-teleport-ring-mult", type=float, default=1.02, help="SA teleport: radius multiplier around anchor.")
-    ap.add_argument("--sa-teleport-jitter", type=float, default=0.05, help="SA teleport: random XY jitter (in radius units).")
+    ap.add_argument(
+        "--sa-teleport-anchor-beta",
+        type=float,
+        default=6.0,
+        help="SA teleport: bias toward center anchors (higher=more central).",
+    )
+    ap.add_argument(
+        "--sa-teleport-ring-mult", type=float, default=1.02, help="SA teleport: radius multiplier around anchor."
+    )
+    ap.add_argument(
+        "--sa-teleport-jitter", type=float, default=0.05, help="SA teleport: random XY jitter (in radius units)."
+    )
     ap.add_argument("--sa-cooling", type=str, default="geom", choices=["geom", "linear", "log"])
-    ap.add_argument("--sa-cooling-power", type=float, default=1.0, help="Power on anneal fraction (>=1 slows early cooling).")
+    ap.add_argument(
+        "--sa-cooling-power", type=float, default=1.0, help="Power on anneal fraction (>=1 slows early cooling)."
+    )
     ap.add_argument("--sa-trans-nexp", type=float, default=0.0, help="Scale trans_sigma by (n/nref)^nexp.")
     ap.add_argument("--sa-rot-nexp", type=float, default=0.0, help="Scale rot_sigma by (n/nref)^nexp.")
     ap.add_argument("--sa-sigma-nref", type=float, default=50.0, help="Reference n for sigma scaling.")
@@ -1696,11 +1877,17 @@ def main(argv: list[str] | None = None) -> int:
         help="SA proposal mode. 'bbox_inward/smart' targets boundary trees; 'mixed' blends with random.",
     )
     ap.add_argument("--sa-smart-prob", type=float, default=1.0, help="For proposal=mixed: probability of smart move.")
-    ap.add_argument("--sa-smart-beta", type=float, default=8.0, help="Edge focus strength (higher=more boundary-biased).")
+    ap.add_argument(
+        "--sa-smart-beta", type=float, default=8.0, help="Edge focus strength (higher=more boundary-biased)."
+    )
     ap.add_argument("--sa-smart-drift", type=float, default=1.0, help="Inward drift multiplier (translation moves).")
     ap.add_argument("--sa-smart-noise", type=float, default=0.25, help="Noise multiplier for smart inward moves.")
-    ap.add_argument("--sa-overlap-lambda", type=float, default=0.0, help="Energy penalty weight for circle overlap (0 disables).")
-    ap.add_argument("--sa-allow-collisions", action="store_true", help="Allow accepting colliding states (best kept feasible).")
+    ap.add_argument(
+        "--sa-overlap-lambda", type=float, default=0.0, help="Energy penalty weight for circle overlap (0 disables)."
+    )
+    ap.add_argument(
+        "--sa-allow-collisions", action="store_true", help="Allow accepting colliding states (best kept feasible)."
+    )
     ap.add_argument("--meta-init-model", type=Path, default=None, help="Meta-init model (.npz) for SA init")
     ap.add_argument("--heatmap-model", type=Path, default=None, help="Heatmap meta-optimizer model (.npz)")
     ap.add_argument("--heatmap-nmax", type=int, default=10, help="Use heatmap for n <= this threshold")
@@ -1740,7 +1927,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lattice-post-step-xy", type=float, default=0.01, help="Post-lattice translation step.")
     ap.add_argument("--lattice-post-step-deg", type=float, default=0.0, help="Post-lattice rotation step (deg).")
 
-    ap.add_argument("--refine-nmin", type=int, default=0, help="Refine lattice with SA for n >= this threshold (0=disabled)")
+    ap.add_argument(
+        "--refine-nmin", type=int, default=0, help="Refine lattice with SA for n >= this threshold (0=disabled)"
+    )
     ap.add_argument("--refine-batch", type=int, default=16, help="Refine SA batch size")
     ap.add_argument("--refine-steps", type=int, default=0, help="Refine SA steps per puzzle (0=disabled)")
     ap.add_argument("--refine-trans-sigma", type=float, default=0.2, help="Refine SA translation step scale")
@@ -1752,7 +1941,12 @@ def main(argv: list[str] | None = None) -> int:
         default=-1.0,
         help="Final refine rotation move probability (linear schedule; -1 keeps constant).",
     )
-    ap.add_argument("--refine-swap-prob", type=float, default=0.0, help="Refine SA swap move probability (useful for objective=prefix).")
+    ap.add_argument(
+        "--refine-swap-prob",
+        type=float,
+        default=0.0,
+        help="Refine SA swap move probability (useful for objective=prefix).",
+    )
     ap.add_argument(
         "--refine-swap-prob-end",
         type=float,
@@ -1764,34 +1958,70 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Enable neighborhood moves (swap/compact/teleport) with sensible defaults (unless explicitly set).",
     )
-    ap.add_argument("--refine-push-prob", type=float, default=0.1, help="Refine SA deterministic push-to-center move probability (translation-only).")
+    ap.add_argument(
+        "--refine-push-prob",
+        type=float,
+        default=0.1,
+        help="Refine SA deterministic push-to-center move probability (translation-only).",
+    )
     ap.add_argument("--refine-push-scale", type=float, default=1.0, help="Refine SA push step magnitude multiplier.")
-    ap.add_argument("--refine-push-square-prob", type=float, default=0.5, help="Refine SA push: fraction of axis-aligned pushes.")
-    ap.add_argument("--refine-compact-prob", type=float, default=0.0, help="Refine SA compact move probability (boundary -> center).")
+    ap.add_argument(
+        "--refine-push-square-prob", type=float, default=0.5, help="Refine SA push: fraction of axis-aligned pushes."
+    )
+    ap.add_argument(
+        "--refine-compact-prob",
+        type=float,
+        default=0.0,
+        help="Refine SA compact move probability (boundary -> center).",
+    )
     ap.add_argument(
         "--refine-compact-prob-end",
         type=float,
         default=-1.0,
         help="Final refine compact move probability (linear schedule; -1 keeps constant).",
     )
-    ap.add_argument("--refine-compact-scale", type=float, default=1.0, help="Refine SA compact step magnitude multiplier.")
-    ap.add_argument("--refine-compact-square-prob", type=float, default=0.75, help="Refine SA compact: fraction of axis-aligned moves.")
-    ap.add_argument("--refine-teleport-prob", type=float, default=0.0, help="Refine SA teleport move probability (boundary -> interior pocket).")
+    ap.add_argument(
+        "--refine-compact-scale", type=float, default=1.0, help="Refine SA compact step magnitude multiplier."
+    )
+    ap.add_argument(
+        "--refine-compact-square-prob",
+        type=float,
+        default=0.75,
+        help="Refine SA compact: fraction of axis-aligned moves.",
+    )
+    ap.add_argument(
+        "--refine-teleport-prob",
+        type=float,
+        default=0.0,
+        help="Refine SA teleport move probability (boundary -> interior pocket).",
+    )
     ap.add_argument(
         "--refine-teleport-prob-end",
         type=float,
         default=-1.0,
         help="Final refine teleport move probability (linear schedule; -1 keeps constant).",
     )
-    ap.add_argument("--refine-teleport-tries", type=int, default=4, help="Refine SA teleport: number of candidate tries per step.")
+    ap.add_argument(
+        "--refine-teleport-tries", type=int, default=4, help="Refine SA teleport: number of candidate tries per step."
+    )
     ap.add_argument(
         "--refine-teleport-anchor-beta",
         type=float,
         default=6.0,
         help="Refine SA teleport: bias toward center anchors (higher=more central).",
     )
-    ap.add_argument("--refine-teleport-ring-mult", type=float, default=1.02, help="Refine SA teleport: radius multiplier around anchor.")
-    ap.add_argument("--refine-teleport-jitter", type=float, default=0.05, help="Refine SA teleport: random XY jitter (in radius units).")
+    ap.add_argument(
+        "--refine-teleport-ring-mult",
+        type=float,
+        default=1.02,
+        help="Refine SA teleport: radius multiplier around anchor.",
+    )
+    ap.add_argument(
+        "--refine-teleport-jitter",
+        type=float,
+        default=0.05,
+        help="Refine SA teleport: random XY jitter (in radius units).",
+    )
     ap.add_argument("--refine-cooling", type=str, default="geom", choices=["geom", "linear", "log"])
     ap.add_argument("--refine-cooling-power", type=float, default=1.0)
     ap.add_argument("--refine-trans-nexp", type=float, default=0.0)
@@ -1811,16 +2041,33 @@ def main(argv: list[str] | None = None) -> int:
         choices=["random", "bbox_inward", "bbox", "inward", "smart", "mixed"],
         help="Refine SA proposal mode. 'bbox_inward/smart' targets boundary trees; 'mixed' blends with random.",
     )
-    ap.add_argument("--refine-smart-prob", type=float, default=1.0, help="For proposal=mixed: probability of smart move.")
-    ap.add_argument("--refine-smart-beta", type=float, default=8.0, help="Edge focus strength (higher=more boundary-biased).")
-    ap.add_argument("--refine-smart-drift", type=float, default=1.0, help="Inward drift multiplier (translation moves).")
+    ap.add_argument(
+        "--refine-smart-prob", type=float, default=1.0, help="For proposal=mixed: probability of smart move."
+    )
+    ap.add_argument(
+        "--refine-smart-beta", type=float, default=8.0, help="Edge focus strength (higher=more boundary-biased)."
+    )
+    ap.add_argument(
+        "--refine-smart-drift", type=float, default=1.0, help="Inward drift multiplier (translation moves)."
+    )
     ap.add_argument("--refine-smart-noise", type=float, default=0.25, help="Noise multiplier for smart inward moves.")
-    ap.add_argument("--refine-overlap-lambda", type=float, default=0.0, help="Energy penalty weight for circle overlap (0 disables).")
-    ap.add_argument("--refine-allow-collisions", action="store_true", help="Allow accepting colliding states (best kept feasible).")
+    ap.add_argument(
+        "--refine-overlap-lambda",
+        type=float,
+        default=0.0,
+        help="Energy penalty weight for circle overlap (0 disables).",
+    )
+    ap.add_argument(
+        "--refine-allow-collisions", action="store_true", help="Allow accepting colliding states (best kept feasible)."
+    )
 
     ap.add_argument("--guided-model", type=Path, default=None, help="L2O policy (.npz) used as SA proposal generator")
-    ap.add_argument("--guided-prob", type=float, default=1.0, help="Probability of using policy proposal (when confident)")
-    ap.add_argument("--guided-pmax", type=float, default=0.05, help="Min max-softmax(logits) to consider policy confident")
+    ap.add_argument(
+        "--guided-prob", type=float, default=1.0, help="Probability of using policy proposal (when confident)"
+    )
+    ap.add_argument(
+        "--guided-pmax", type=float, default=0.05, help="Min max-softmax(logits) to consider policy confident"
+    )
     ap.add_argument(
         "--guided-prob-end",
         type=float,
@@ -1872,22 +2119,39 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--block-template-margin", type=float, default=0.02)
     ap.add_argument("--block-template-rotate", type=float, default=0.0)
 
-    ap.add_argument("--lns-nmax", type=int, default=0, help="Apply LNS/ALNS post-optimization for n <= this threshold (0=disabled).")
+    ap.add_argument(
+        "--lns-nmax", type=int, default=0, help="Apply LNS/ALNS post-optimization for n <= this threshold (0=disabled)."
+    )
     ap.add_argument("--lns-passes", type=int, default=0, help="LNS passes (0=disabled).")
     ap.add_argument("--lns-destroy-k", type=int, default=8, help="Trees removed per ruin&recreate pass.")
-    ap.add_argument("--lns-destroy-mode", type=str, default="mixed", choices=["mixed", "boundary", "random", "cluster", "alns"])
-    ap.add_argument("--lns-tabu-tenure", type=int, default=0, help="Tabu tenure (passes) for recent ruin-sets (0 disables).")
+    ap.add_argument(
+        "--lns-destroy-mode", type=str, default="mixed", choices=["mixed", "boundary", "random", "cluster", "alns"]
+    )
+    ap.add_argument(
+        "--lns-tabu-tenure", type=int, default=0, help="Tabu tenure (passes) for recent ruin-sets (0 disables)."
+    )
     ap.add_argument("--lns-candidates", type=int, default=64, help="Candidate centers per reinsertion (sampling).")
     ap.add_argument("--lns-angle-samples", type=int, default=8, help="Angle samples per candidate reinsertion.")
-    ap.add_argument("--lns-pad-scale", type=float, default=2.0, help="Sampling padding around current bbox in multiples of 2*radius.")
+    ap.add_argument(
+        "--lns-pad-scale",
+        type=float,
+        default=2.0,
+        help="Sampling padding around current bbox in multiples of 2*radius.",
+    )
     ap.add_argument("--lns-group-moves", type=int, default=0, help="Group-rotation proposals per pass (0 disables).")
     ap.add_argument("--lns-group-size", type=int, default=3, help="Group size for group rotations.")
-    ap.add_argument("--lns-group-trans-sigma", type=float, default=0.05, help="Group translation sigma (same units as x/y).")
+    ap.add_argument(
+        "--lns-group-trans-sigma", type=float, default=0.05, help="Group translation sigma (same units as x/y)."
+    )
     ap.add_argument("--lns-group-rot-sigma", type=float, default=20.0, help="Group rotation sigma (deg).")
-    ap.add_argument("--lns-t-start", type=float, default=0.0, help="If >0, enable SA acceptance in LNS: start temperature.")
+    ap.add_argument(
+        "--lns-t-start", type=float, default=0.0, help="If >0, enable SA acceptance in LNS: start temperature."
+    )
     ap.add_argument("--lns-t-end", type=float, default=0.0, help="End temperature for LNS SA acceptance.")
 
-    ap.add_argument("--hc-nmax", type=int, default=0, help="Apply deterministic hill-climb for n <= this threshold (0=disabled).")
+    ap.add_argument(
+        "--hc-nmax", type=int, default=0, help="Apply deterministic hill-climb for n <= this threshold (0=disabled)."
+    )
     ap.add_argument("--hc-passes", type=int, default=2, help="Hill-climb passes over trees.")
     ap.add_argument("--hc-step-xy", type=float, default=0.01, help="Hill-climb translation step.")
     ap.add_argument("--hc-step-deg", type=float, default=2.0, help="Hill-climb rotation step (deg).")
@@ -1899,11 +2163,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ga-crossover-prob", type=float, default=0.5, help="Crossover probability.")
     ap.add_argument("--ga-mut-sigma-xy", type=float, default=0.01, help="Mutation translation sigma.")
     ap.add_argument("--ga-mut-sigma-deg", type=float, default=2.0, help="Mutation rotation sigma (deg).")
-    ap.add_argument("--ga-directed-prob", type=float, default=0.5, help="Probability of using directed (bbox-inward) mutation.")
+    ap.add_argument(
+        "--ga-directed-prob", type=float, default=0.5, help="Probability of using directed (bbox-inward) mutation."
+    )
     ap.add_argument("--ga-directed-step-xy", type=float, default=0.02, help="Directed mutation drift step.")
-    ap.add_argument("--ga-directed-k", type=int, default=8, help="Directed mutation samples from the k most boundary-ish trees.")
+    ap.add_argument(
+        "--ga-directed-k", type=int, default=8, help="Directed mutation samples from the k most boundary-ish trees."
+    )
     ap.add_argument("--ga-repair-iters", type=int, default=200, help="Max repair iterations for colliding children.")
-    ap.add_argument("--ga-hc-passes", type=int, default=0, help="Optional hill-climb passes applied inside GA (0=disabled).")
+    ap.add_argument(
+        "--ga-hc-passes", type=int, default=0, help="Optional hill-climb passes applied inside GA (0=disabled)."
+    )
     ap.add_argument("--ga-hc-step-xy", type=float, default=0.01)
     ap.add_argument("--ga-hc-step-deg", type=float, default=2.0)
     args = ap.parse_args(config_args + argv)
@@ -1942,17 +2212,288 @@ def main(argv: list[str] | None = None) -> int:
         from santa_packing.scoring import load_submission  # noqa: E402
 
         loaded = load_submission(args.from_submission, nmax=int(args.nmax))
+        postopt_enabled = bool(
+            (args.refine_steps > 0)
+            or (args.lns_passes > 0 and args.lns_nmax > 0)
+            or (args.hc_passes > 0 and args.hc_nmax > 0)
+            or (args.ga_gens > 0 and args.ga_nmax > 0)
+        )
         for n in range(1, args.nmax + 1):
             poses = loaded.get(n)
             if poses is None or poses.shape != (n, 3):
                 raise SystemExit(
                     f"--from-submission: missing puzzle {n} or wrong shape (got {None if poses is None else poses.shape})"
                 )
-            puzzles[n] = _finalize_puzzle(points, poses, seed=args.seed + n, puzzle_n=n, overlap_mode=str(args.overlap_mode))
+            if not postopt_enabled:
+                puzzles[n] = _finalize_puzzle(
+                    points,
+                    poses,
+                    seed=args.seed + n,
+                    puzzle_n=n,
+                    overlap_mode=str(args.overlap_mode),
+                )
+                continue
+
+            base = _finalize_puzzle(
+                points,
+                poses,
+                seed=args.seed + n,
+                puzzle_n=n,
+                overlap_mode=str(args.overlap_mode),
+            )
+            base = _post_optimize(
+                points,
+                base,
+                n=n,
+                seed=args.seed + n,
+                refine_nmin=args.refine_nmin,
+                refine_batch_size=args.refine_batch,
+                refine_steps=args.refine_steps,
+                refine_trans_sigma=args.refine_trans_sigma,
+                refine_rot_sigma=args.refine_rot_sigma,
+                refine_rot_prob=args.refine_rot_prob,
+                refine_rot_prob_end=args.refine_rot_prob_end,
+                refine_swap_prob=args.refine_swap_prob,
+                refine_swap_prob_end=args.refine_swap_prob_end,
+                refine_push_prob=args.refine_push_prob,
+                refine_push_scale=args.refine_push_scale,
+                refine_push_square_prob=args.refine_push_square_prob,
+                refine_compact_prob=args.refine_compact_prob,
+                refine_compact_prob_end=args.refine_compact_prob_end,
+                refine_compact_scale=args.refine_compact_scale,
+                refine_compact_square_prob=args.refine_compact_square_prob,
+                refine_teleport_prob=args.refine_teleport_prob,
+                refine_teleport_prob_end=args.refine_teleport_prob_end,
+                refine_teleport_tries=args.refine_teleport_tries,
+                refine_teleport_anchor_beta=args.refine_teleport_anchor_beta,
+                refine_teleport_ring_mult=args.refine_teleport_ring_mult,
+                refine_teleport_jitter=args.refine_teleport_jitter,
+                refine_cooling=args.refine_cooling,
+                refine_cooling_power=args.refine_cooling_power,
+                refine_trans_sigma_nexp=args.refine_trans_nexp,
+                refine_rot_sigma_nexp=args.refine_rot_nexp,
+                refine_sigma_nref=args.refine_sigma_nref,
+                refine_proposal=args.refine_proposal,
+                refine_smart_prob=args.refine_smart_prob,
+                refine_smart_beta=args.refine_smart_beta,
+                refine_smart_drift=args.refine_smart_drift,
+                refine_smart_noise=args.refine_smart_noise,
+                refine_overlap_lambda=args.refine_overlap_lambda,
+                refine_allow_collisions=args.refine_allow_collisions,
+                refine_objective=str(args.refine_objective),
+                guided_model=args.guided_model,
+                guided_prob=args.guided_prob,
+                guided_pmax=args.guided_pmax,
+                guided_prob_end=args.guided_prob_end,
+                guided_pmax_end=args.guided_pmax_end,
+                lns_nmax=args.lns_nmax,
+                lns_passes=args.lns_passes,
+                lns_destroy_k=args.lns_destroy_k,
+                lns_destroy_mode=args.lns_destroy_mode,
+                lns_tabu_tenure=args.lns_tabu_tenure,
+                lns_candidates=args.lns_candidates,
+                lns_angle_samples=args.lns_angle_samples,
+                lns_pad_scale=args.lns_pad_scale,
+                lns_group_moves=args.lns_group_moves,
+                lns_group_size=args.lns_group_size,
+                lns_group_trans_sigma=args.lns_group_trans_sigma,
+                lns_group_rot_sigma=args.lns_group_rot_sigma,
+                lns_t_start=args.lns_t_start,
+                lns_t_end=args.lns_t_end,
+                hc_nmax=args.hc_nmax,
+                hc_passes=args.hc_passes,
+                hc_step_xy=args.hc_step_xy,
+                hc_step_deg=args.hc_step_deg,
+                ga_nmax=args.ga_nmax,
+                ga_pop=args.ga_pop,
+                ga_gens=args.ga_gens,
+                ga_elite_frac=args.ga_elite_frac,
+                ga_crossover_prob=args.ga_crossover_prob,
+                ga_mut_sigma_xy=args.ga_mut_sigma_xy,
+                ga_mut_sigma_deg=args.ga_mut_sigma_deg,
+                ga_directed_prob=args.ga_directed_prob,
+                ga_directed_step_xy=args.ga_directed_step_xy,
+                ga_directed_k=args.ga_directed_k,
+                ga_repair_iters=args.ga_repair_iters,
+                ga_hc_passes=args.ga_hc_passes,
+                ga_hc_step_xy=args.ga_hc_step_xy,
+                ga_hc_step_deg=args.ga_hc_step_deg,
+            )
+            puzzles[n] = _finalize_puzzle(
+                points,
+                base,
+                seed=args.seed + n + 13_000,
+                puzzle_n=n,
+                overlap_mode=str(args.overlap_mode),
+            )
     elif args.mother_prefix:
         mother = solve_n(
-                args.nmax,
-                seed=args.seed + args.nmax,
+            args.nmax,
+            seed=args.seed + args.nmax,
+            lattice_pattern=args.lattice_pattern,
+            lattice_margin=args.lattice_margin,
+            lattice_rotate_deg=args.lattice_rotate,
+            lattice_rotate_mode=args.lattice_rotate_mode,
+            lattice_rotate_degs=lattice_rotate_degs,
+            lattice_post_nmax=args.lattice_post_nmax,
+            lattice_post_steps=args.lattice_post_steps,
+            lattice_post_step_xy=args.lattice_post_step_xy,
+            lattice_post_step_deg=args.lattice_post_step_deg,
+            sa_nmax=args.sa_nmax,
+            sa_batch_size=args.sa_batch,
+            sa_steps=args.sa_steps,
+            sa_trans_sigma=args.sa_trans_sigma,
+            sa_rot_sigma=args.sa_rot_sigma,
+            sa_rot_prob=args.sa_rot_prob,
+            sa_rot_prob_end=args.sa_rot_prob_end,
+            sa_swap_prob=args.sa_swap_prob,
+            sa_swap_prob_end=args.sa_swap_prob_end,
+            sa_push_prob=args.sa_push_prob,
+            sa_push_scale=args.sa_push_scale,
+            sa_push_square_prob=args.sa_push_square_prob,
+            sa_compact_prob=args.sa_compact_prob,
+            sa_compact_prob_end=args.sa_compact_prob_end,
+            sa_compact_scale=args.sa_compact_scale,
+            sa_compact_square_prob=args.sa_compact_square_prob,
+            sa_teleport_prob=args.sa_teleport_prob,
+            sa_teleport_prob_end=args.sa_teleport_prob_end,
+            sa_teleport_tries=args.sa_teleport_tries,
+            sa_teleport_anchor_beta=args.sa_teleport_anchor_beta,
+            sa_teleport_ring_mult=args.sa_teleport_ring_mult,
+            sa_teleport_jitter=args.sa_teleport_jitter,
+            sa_cooling=args.sa_cooling,
+            sa_cooling_power=args.sa_cooling_power,
+            sa_trans_sigma_nexp=args.sa_trans_nexp,
+            sa_rot_sigma_nexp=args.sa_rot_nexp,
+            sa_sigma_nref=args.sa_sigma_nref,
+            sa_proposal=args.sa_proposal,
+            sa_smart_prob=args.sa_smart_prob,
+            sa_smart_beta=args.sa_smart_beta,
+            sa_smart_drift=args.sa_smart_drift,
+            sa_smart_noise=args.sa_smart_noise,
+            sa_overlap_lambda=args.sa_overlap_lambda,
+            sa_allow_collisions=args.sa_allow_collisions,
+            sa_objective=args.sa_objective,
+            meta_init_model=args.meta_init_model,
+            heatmap_model=args.heatmap_model,
+            heatmap_nmax=args.heatmap_nmax,
+            heatmap_steps=args.heatmap_steps,
+            l2o_model=args.l2o_model,
+            l2o_init=args.l2o_init,
+            l2o_nmax=args.l2o_nmax,
+            l2o_steps=args.l2o_steps,
+            l2o_trans_sigma=args.l2o_trans_sigma,
+            l2o_rot_sigma=args.l2o_rot_sigma,
+            l2o_deterministic=args.l2o_deterministic,
+            refine_nmin=args.refine_nmin,
+            refine_batch_size=args.refine_batch,
+            refine_steps=args.refine_steps,
+            refine_trans_sigma=args.refine_trans_sigma,
+            refine_rot_sigma=args.refine_rot_sigma,
+            refine_rot_prob=args.refine_rot_prob,
+            refine_rot_prob_end=args.refine_rot_prob_end,
+            refine_swap_prob=args.refine_swap_prob,
+            refine_swap_prob_end=args.refine_swap_prob_end,
+            refine_push_prob=args.refine_push_prob,
+            refine_push_scale=args.refine_push_scale,
+            refine_push_square_prob=args.refine_push_square_prob,
+            refine_compact_prob=args.refine_compact_prob,
+            refine_compact_prob_end=args.refine_compact_prob_end,
+            refine_compact_scale=args.refine_compact_scale,
+            refine_compact_square_prob=args.refine_compact_square_prob,
+            refine_teleport_prob=args.refine_teleport_prob,
+            refine_teleport_prob_end=args.refine_teleport_prob_end,
+            refine_teleport_tries=args.refine_teleport_tries,
+            refine_teleport_anchor_beta=args.refine_teleport_anchor_beta,
+            refine_teleport_ring_mult=args.refine_teleport_ring_mult,
+            refine_teleport_jitter=args.refine_teleport_jitter,
+            refine_cooling=args.refine_cooling,
+            refine_cooling_power=args.refine_cooling_power,
+            refine_trans_sigma_nexp=args.refine_trans_nexp,
+            refine_rot_sigma_nexp=args.refine_rot_nexp,
+            refine_sigma_nref=args.refine_sigma_nref,
+            refine_proposal=args.refine_proposal,
+            refine_smart_prob=args.refine_smart_prob,
+            refine_smart_beta=args.refine_smart_beta,
+            refine_smart_drift=args.refine_smart_drift,
+            refine_smart_noise=args.refine_smart_noise,
+            refine_overlap_lambda=args.refine_overlap_lambda,
+            refine_allow_collisions=args.refine_allow_collisions,
+            refine_objective=args.refine_objective,
+            lns_nmax=args.lns_nmax,
+            lns_passes=args.lns_passes,
+            lns_destroy_k=args.lns_destroy_k,
+            lns_destroy_mode=args.lns_destroy_mode,
+            lns_tabu_tenure=args.lns_tabu_tenure,
+            lns_candidates=args.lns_candidates,
+            lns_angle_samples=args.lns_angle_samples,
+            lns_pad_scale=args.lns_pad_scale,
+            lns_group_moves=args.lns_group_moves,
+            lns_group_size=args.lns_group_size,
+            lns_group_trans_sigma=args.lns_group_trans_sigma,
+            lns_group_rot_sigma=args.lns_group_rot_sigma,
+            lns_t_start=args.lns_t_start,
+            lns_t_end=args.lns_t_end,
+            hc_nmax=args.hc_nmax,
+            hc_passes=args.hc_passes,
+            hc_step_xy=args.hc_step_xy,
+            hc_step_deg=args.hc_step_deg,
+            ga_nmax=args.ga_nmax,
+            ga_pop=args.ga_pop,
+            ga_gens=args.ga_gens,
+            ga_elite_frac=args.ga_elite_frac,
+            ga_crossover_prob=args.ga_crossover_prob,
+            ga_mut_sigma_xy=args.ga_mut_sigma_xy,
+            ga_mut_sigma_deg=args.ga_mut_sigma_deg,
+            ga_directed_prob=args.ga_directed_prob,
+            ga_directed_step_xy=args.ga_directed_step_xy,
+            ga_directed_k=args.ga_directed_k,
+            ga_repair_iters=args.ga_repair_iters,
+            ga_hc_passes=args.ga_hc_passes,
+            ga_hc_step_xy=args.ga_hc_step_xy,
+            ga_hc_step_deg=args.ga_hc_step_deg,
+            guided_model=args.guided_model,
+            guided_prob=args.guided_prob,
+            guided_pmax=args.guided_pmax,
+            guided_prob_end=args.guided_prob_end,
+            guided_pmax_end=args.guided_pmax_end,
+            block_nmax=args.block_nmax,
+            block_size=args.block_size,
+            block_batch_size=args.block_batch,
+            block_steps=args.block_steps,
+            block_trans_sigma=args.block_trans_sigma,
+            block_rot_sigma=args.block_rot_sigma,
+            block_rot_prob=args.block_rot_prob,
+            block_rot_prob_end=args.block_rot_prob_end,
+            block_cooling=args.block_cooling,
+            block_cooling_power=args.block_cooling_power,
+            block_trans_sigma_nexp=args.block_trans_nexp,
+            block_rot_sigma_nexp=args.block_rot_nexp,
+            block_sigma_nref=args.block_sigma_nref,
+            block_overlap_lambda=args.block_overlap_lambda,
+            block_allow_collisions=args.block_allow_collisions,
+            block_objective=args.block_objective,
+            block_init=args.block_init,
+            block_template_pattern=args.block_template_pattern,
+            block_template_margin=args.block_template_margin,
+            block_template_rotate=args.block_template_rotate,
+        )
+
+        mother = np.array(mother, dtype=float)
+        mother[:, 2] = np.mod(mother[:, 2], 360.0)
+        if args.mother_reorder == "radial":
+            mother = _radial_reorder(points, mother)
+
+        for n in range(1, args.nmax + 1):
+            poses = shift_poses_to_origin(points, mother[:n])
+            puzzles[n] = _finalize_puzzle(
+                points, poses, seed=args.seed + n, puzzle_n=n, overlap_mode=str(args.overlap_mode)
+            )
+    else:
+        for n in range(1, args.nmax + 1):
+            poses = solve_n(
+                n,
+                seed=args.seed + n,
                 lattice_pattern=args.lattice_pattern,
                 lattice_margin=args.lattice_margin,
                 lattice_rotate_deg=args.lattice_rotate,
@@ -2100,171 +2641,11 @@ def main(argv: list[str] | None = None) -> int:
                 block_template_pattern=args.block_template_pattern,
                 block_template_margin=args.block_template_margin,
                 block_template_rotate=args.block_template_rotate,
-        )
-
-        mother = np.array(mother, dtype=float)
-        mother[:, 2] = np.mod(mother[:, 2], 360.0)
-        if args.mother_reorder == "radial":
-            mother = _radial_reorder(points, mother)
-
-        for n in range(1, args.nmax + 1):
-            poses = shift_poses_to_origin(points, mother[:n])
-            puzzles[n] = _finalize_puzzle(points, poses, seed=args.seed + n, puzzle_n=n, overlap_mode=str(args.overlap_mode))
-    else:
-        for n in range(1, args.nmax + 1):
-            poses = solve_n(
-                    n,
-                    seed=args.seed + n,
-                    lattice_pattern=args.lattice_pattern,
-                    lattice_margin=args.lattice_margin,
-                    lattice_rotate_deg=args.lattice_rotate,
-                    lattice_rotate_mode=args.lattice_rotate_mode,
-                    lattice_rotate_degs=lattice_rotate_degs,
-                    lattice_post_nmax=args.lattice_post_nmax,
-                    lattice_post_steps=args.lattice_post_steps,
-                    lattice_post_step_xy=args.lattice_post_step_xy,
-                    lattice_post_step_deg=args.lattice_post_step_deg,
-                    sa_nmax=args.sa_nmax,
-                    sa_batch_size=args.sa_batch,
-                    sa_steps=args.sa_steps,
-                    sa_trans_sigma=args.sa_trans_sigma,
-                    sa_rot_sigma=args.sa_rot_sigma,
-                    sa_rot_prob=args.sa_rot_prob,
-                    sa_rot_prob_end=args.sa_rot_prob_end,
-                    sa_swap_prob=args.sa_swap_prob,
-                    sa_swap_prob_end=args.sa_swap_prob_end,
-                    sa_push_prob=args.sa_push_prob,
-                    sa_push_scale=args.sa_push_scale,
-                    sa_push_square_prob=args.sa_push_square_prob,
-                    sa_compact_prob=args.sa_compact_prob,
-                    sa_compact_prob_end=args.sa_compact_prob_end,
-                    sa_compact_scale=args.sa_compact_scale,
-                    sa_compact_square_prob=args.sa_compact_square_prob,
-                    sa_teleport_prob=args.sa_teleport_prob,
-                    sa_teleport_prob_end=args.sa_teleport_prob_end,
-                    sa_teleport_tries=args.sa_teleport_tries,
-                    sa_teleport_anchor_beta=args.sa_teleport_anchor_beta,
-                    sa_teleport_ring_mult=args.sa_teleport_ring_mult,
-                    sa_teleport_jitter=args.sa_teleport_jitter,
-                    sa_cooling=args.sa_cooling,
-                    sa_cooling_power=args.sa_cooling_power,
-                    sa_trans_sigma_nexp=args.sa_trans_nexp,
-                    sa_rot_sigma_nexp=args.sa_rot_nexp,
-                    sa_sigma_nref=args.sa_sigma_nref,
-                    sa_proposal=args.sa_proposal,
-                    sa_smart_prob=args.sa_smart_prob,
-                    sa_smart_beta=args.sa_smart_beta,
-                    sa_smart_drift=args.sa_smart_drift,
-                    sa_smart_noise=args.sa_smart_noise,
-                    sa_overlap_lambda=args.sa_overlap_lambda,
-                    sa_allow_collisions=args.sa_allow_collisions,
-                    sa_objective=args.sa_objective,
-                    meta_init_model=args.meta_init_model,
-                    heatmap_model=args.heatmap_model,
-                    heatmap_nmax=args.heatmap_nmax,
-                    heatmap_steps=args.heatmap_steps,
-                    l2o_model=args.l2o_model,
-                    l2o_init=args.l2o_init,
-                    l2o_nmax=args.l2o_nmax,
-                    l2o_steps=args.l2o_steps,
-                    l2o_trans_sigma=args.l2o_trans_sigma,
-                    l2o_rot_sigma=args.l2o_rot_sigma,
-                    l2o_deterministic=args.l2o_deterministic,
-                    refine_nmin=args.refine_nmin,
-                    refine_batch_size=args.refine_batch,
-                    refine_steps=args.refine_steps,
-                    refine_trans_sigma=args.refine_trans_sigma,
-                    refine_rot_sigma=args.refine_rot_sigma,
-                    refine_rot_prob=args.refine_rot_prob,
-                    refine_rot_prob_end=args.refine_rot_prob_end,
-                    refine_swap_prob=args.refine_swap_prob,
-                    refine_swap_prob_end=args.refine_swap_prob_end,
-                    refine_push_prob=args.refine_push_prob,
-                    refine_push_scale=args.refine_push_scale,
-                    refine_push_square_prob=args.refine_push_square_prob,
-                    refine_compact_prob=args.refine_compact_prob,
-                    refine_compact_prob_end=args.refine_compact_prob_end,
-                    refine_compact_scale=args.refine_compact_scale,
-                    refine_compact_square_prob=args.refine_compact_square_prob,
-                    refine_teleport_prob=args.refine_teleport_prob,
-                    refine_teleport_prob_end=args.refine_teleport_prob_end,
-                    refine_teleport_tries=args.refine_teleport_tries,
-                    refine_teleport_anchor_beta=args.refine_teleport_anchor_beta,
-                    refine_teleport_ring_mult=args.refine_teleport_ring_mult,
-                    refine_teleport_jitter=args.refine_teleport_jitter,
-                    refine_cooling=args.refine_cooling,
-                    refine_cooling_power=args.refine_cooling_power,
-                    refine_trans_sigma_nexp=args.refine_trans_nexp,
-                    refine_rot_sigma_nexp=args.refine_rot_nexp,
-                    refine_sigma_nref=args.refine_sigma_nref,
-                    refine_proposal=args.refine_proposal,
-                    refine_smart_prob=args.refine_smart_prob,
-                    refine_smart_beta=args.refine_smart_beta,
-                    refine_smart_drift=args.refine_smart_drift,
-                    refine_smart_noise=args.refine_smart_noise,
-                    refine_overlap_lambda=args.refine_overlap_lambda,
-                    refine_allow_collisions=args.refine_allow_collisions,
-                    refine_objective=args.refine_objective,
-                    lns_nmax=args.lns_nmax,
-                    lns_passes=args.lns_passes,
-                    lns_destroy_k=args.lns_destroy_k,
-                    lns_destroy_mode=args.lns_destroy_mode,
-                    lns_tabu_tenure=args.lns_tabu_tenure,
-                    lns_candidates=args.lns_candidates,
-                    lns_angle_samples=args.lns_angle_samples,
-                    lns_pad_scale=args.lns_pad_scale,
-                    lns_group_moves=args.lns_group_moves,
-                    lns_group_size=args.lns_group_size,
-                    lns_group_trans_sigma=args.lns_group_trans_sigma,
-                    lns_group_rot_sigma=args.lns_group_rot_sigma,
-                    lns_t_start=args.lns_t_start,
-                    lns_t_end=args.lns_t_end,
-                    hc_nmax=args.hc_nmax,
-                    hc_passes=args.hc_passes,
-                    hc_step_xy=args.hc_step_xy,
-                    hc_step_deg=args.hc_step_deg,
-                    ga_nmax=args.ga_nmax,
-                    ga_pop=args.ga_pop,
-                    ga_gens=args.ga_gens,
-                    ga_elite_frac=args.ga_elite_frac,
-                    ga_crossover_prob=args.ga_crossover_prob,
-                    ga_mut_sigma_xy=args.ga_mut_sigma_xy,
-                    ga_mut_sigma_deg=args.ga_mut_sigma_deg,
-                    ga_directed_prob=args.ga_directed_prob,
-                    ga_directed_step_xy=args.ga_directed_step_xy,
-                    ga_directed_k=args.ga_directed_k,
-                    ga_repair_iters=args.ga_repair_iters,
-                    ga_hc_passes=args.ga_hc_passes,
-                    ga_hc_step_xy=args.ga_hc_step_xy,
-                    ga_hc_step_deg=args.ga_hc_step_deg,
-                    guided_model=args.guided_model,
-                    guided_prob=args.guided_prob,
-                    guided_pmax=args.guided_pmax,
-                    guided_prob_end=args.guided_prob_end,
-                    guided_pmax_end=args.guided_pmax_end,
-                    block_nmax=args.block_nmax,
-                    block_size=args.block_size,
-                    block_batch_size=args.block_batch,
-                    block_steps=args.block_steps,
-                    block_trans_sigma=args.block_trans_sigma,
-                    block_rot_sigma=args.block_rot_sigma,
-                    block_rot_prob=args.block_rot_prob,
-                    block_rot_prob_end=args.block_rot_prob_end,
-                    block_cooling=args.block_cooling,
-                    block_cooling_power=args.block_cooling_power,
-                    block_trans_sigma_nexp=args.block_trans_nexp,
-                    block_rot_sigma_nexp=args.block_rot_nexp,
-                    block_sigma_nref=args.block_sigma_nref,
-                    block_overlap_lambda=args.block_overlap_lambda,
-                    block_allow_collisions=args.block_allow_collisions,
-                    block_objective=args.block_objective,
-                    block_init=args.block_init,
-                    block_template_pattern=args.block_template_pattern,
-                    block_template_margin=args.block_template_margin,
-                    block_template_rotate=args.block_template_rotate,
             )
 
-            puzzles[n] = _finalize_puzzle(points, poses, seed=args.seed + n, puzzle_n=n, overlap_mode=str(args.overlap_mode))
+            puzzles[n] = _finalize_puzzle(
+                points, poses, seed=args.seed + n, puzzle_n=n, overlap_mode=str(args.overlap_mode)
+            )
 
     # Write CSV (after strict validation/repair).
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -2275,7 +2656,12 @@ def main(argv: list[str] | None = None) -> int:
             poses = puzzles[n]
             for i, (x, y, deg) in enumerate(poses):
                 writer.writerow(
-                    [f"{n:03d}_{i}", format_submission_value(x), format_submission_value(y), format_submission_value(deg)]
+                    [
+                        f"{n:03d}_{i}",
+                        format_submission_value(x),
+                        format_submission_value(y),
+                        format_submission_value(deg),
+                    ]
                 )
 
     # Rule of the pipeline: always run strict validation after generating.

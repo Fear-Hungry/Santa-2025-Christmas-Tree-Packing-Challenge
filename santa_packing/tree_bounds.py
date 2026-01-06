@@ -1,3 +1,10 @@
+"""Fast conservative bounds for the tree polygon.
+
+This module precomputes per-angle axis-aligned bounding boxes (AABBs) for the
+single polygon used in the repo (the Santa 2025 tree). The SA optimizer uses
+these AABBs as a cheap broad-phase collision filter.
+"""
+
 from __future__ import annotations
 
 import jax
@@ -61,6 +68,7 @@ TREE_AABB_TABLE_PADDED = TREE_AABB_TABLE + jnp.array(
 
 
 def theta_to_aabb_bin(theta_deg: jax.Array) -> jax.Array:
+    """Map a rotation angle in degrees to the closest precomputed AABB bin."""
     idx = jnp.rint(theta_deg / TREE_AABB_STEP_DEG).astype(jnp.int32)
     return jnp.mod(idx, TREE_AABB_BINS)
 

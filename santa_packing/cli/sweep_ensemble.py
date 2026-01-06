@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+"""CLI to sweep multiple generation recipes and ensemble per puzzle size.
+
+This tool runs `generate_submission` for multiple seeds/recipes and then
+selects the best candidate per `n` (minimizing `s_n`).
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -18,6 +24,7 @@ from typing import Any
 
 import numpy as np
 
+from santa_packing.cli.config_utils import config_to_argv, default_config_path
 from santa_packing.constants import EPS
 from santa_packing.scoring import first_overlap_pair, load_submission
 from santa_packing.tree_data import TREE_POINTS
@@ -117,6 +124,13 @@ def _run(
 
 @dataclass(frozen=True)
 class Recipe:
+    """One generation recipe passed to `generate_submission`.
+
+    Attributes:
+        name: Human-readable identifier used in logs and output folders.
+        args: List of CLI tokens (excluding `--out/--seed/--nmax`, handled by the sweep).
+    """
+
     name: str
     args: list[str]
 
@@ -171,6 +185,18 @@ def _load_recipes_json(path: Path) -> list[Recipe]:
 
 @dataclass
 class Candidate:
+    """A completed (recipe, seed) run loaded from a generated `submission.csv`.
+
+    Attributes:
+        cid: Unique candidate id used in filenames/logs.
+        recipe: Recipe name.
+        seed: Seed used for generation.
+        csv_path: Path to the candidate CSV.
+        time_s: Wall-clock generation time in seconds.
+        s: Array of per-puzzle `s_n` values with shape `(nmax+1,)` (index 0 unused).
+        puzzles: Mapping `n -> poses` (each pose array shaped `(n, 3)`).
+    """
+
     cid: str
     recipe: str
     seed: int
@@ -211,7 +237,11 @@ def _write_per_n_csv(path: Path, candidate: Candidate, *, nmax: int) -> None:
 
 
 def _write_submission(path: Path, puzzles: dict[int, np.ndarray], *, nmax: int) -> None:
-    from santa_packing.submission_format import fit_xy_in_bounds, format_submission_value, quantize_for_submission  # noqa: E402
+    from santa_packing.submission_format import (  # noqa: E402
+        fit_xy_in_bounds,
+        format_submission_value,
+        quantize_for_submission,
+    )
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as f:
@@ -237,12 +267,34 @@ def _write_submission(path: Path, puzzles: dict[int, np.ndarray], *, nmax: int) 
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run a sweep and write an ensembled `submission.csv`."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    cfg_default = default_config_path("ensemble.json")
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=Path, default=None)
+    pre.add_argument("--no-config", action="store_true")
+    pre_args, _ = pre.parse_known_args(argv)
+    if pre_args.no_config and pre_args.config is not None:
+        raise SystemExit("Use either --config or --no-config, not both.")
+    config_path = None if pre_args.no_config else (pre_args.config or cfg_default)
+    config_args = (
+        config_to_argv(config_path, section_keys=("sweep_ensemble", "ensemble")) if config_path is not None else []
+    )
+
     ap = argparse.ArgumentParser(
         description=(
             "Run multiple generate_submission configurations (multi-start) and ensemble per puzzle n.\n"
             "This is the Python/JAX replacement for old C++ portfolio merge."
         )
     )
+    ap.add_argument(
+        "--config",
+        type=Path,
+        default=config_path,
+        help="JSON/YAML config file with defaults (defaults to configs/ensemble.json when present).",
+    )
+    ap.add_argument("--no-config", action="store_true", help="Disable loading the default config (if any).")
     ap.add_argument("--repo", type=Path, default=_repo_root_from_script(), help="Repo root (default: auto-detected)")
     ap.add_argument("--runs-dir", type=Path, default=None, help="Runs directory (default: <repo>/runs)")
     ap.add_argument("--tag", type=str, default="sweep_ensemble", help="Run tag (runs/<tag>_<ts>/)")
@@ -257,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--overlap-check", type=str, default="selected", choices=["selected", "none"])
     ap.add_argument("--out", type=Path, default=None, help="Optional: copy ensemble submission.csv to this path")
     ap.add_argument("--dry-run", action="store_true", help="Print planned commands and exit")
-    ns = ap.parse_args(argv)
+    ns = ap.parse_args(config_args + argv)
 
     root = ns.repo.resolve()
     runs_dir = (ns.runs_dir or (root / "runs")).resolve()
@@ -280,6 +332,8 @@ def main(argv: list[str] | None = None) -> int:
     stamp = _timestamp()
     run_dir = runs_dir / f"{_safe_name(ns.tag)}_{stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    if ns.config is not None:
+        (run_dir / f"config{ns.config.suffix}").write_text(ns.config.read_text(encoding="utf-8"), encoding="utf-8")
 
     meta: dict[str, Any] = {
         "tag": ns.tag,
@@ -291,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
         "generator": "python -m santa_packing.cli.generate_submission",
         "python": sys.version,
         "overlap_check": ns.overlap_check,
+        "config": str(ns.config) if ns.config is not None else None,
     }
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
@@ -465,12 +520,12 @@ def main(argv: list[str] | None = None) -> int:
     code_audit = (
         "# Code audit: sweep + per-n ensemble\n\n"
         "## What this script does\n"
-        "- Runs multiple calls to `scripts/submission/generate_submission.py` (multi-start) for different recipes/seeds.\n"
+        "- Runs multiple calls to `python -m santa_packing.cli.generate_submission` (multi-start) for different recipes/seeds.\n"
         "- Computes `s_n` for every candidate and every puzzle `n`.\n"
         "- Builds an ensemble submission by picking, **for each n**, the candidate with the smallest `s_n` (optionally requiring no-overlap).\n\n"
         "## Key files\n"
-        "- `scripts/submission/sweep_ensemble.py`: orchestration + ensemble selection.\n"
-        "- `scripts/submission/generate_submission.py`: single-run generator (all knobs/recipes flow through it).\n"
+        "- `santa_packing/cli/sweep_ensemble.py`: orchestration + ensemble selection.\n"
+        "- `santa_packing/cli/generate_submission.py`: single-run generator (all knobs/recipes flow through it).\n"
         "- `santa_packing/postopt_np.py:has_overlaps`: overlap checker used for selecting feasible puzzles.\n\n"
         "## Safety / correctness\n"
         "- `--overlap-check selected` verifies feasibility puzzle-by-puzzle while selecting the ensemble.\n"

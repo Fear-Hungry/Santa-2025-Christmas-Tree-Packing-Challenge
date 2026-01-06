@@ -1,3 +1,10 @@
+"""Heatmap meta-optimizer (NumPy).
+
+This module implements a simple "heatmap" policy that learns which tree indices
+to perturb more often during a local search. It is intentionally lightweight
+(NumPy-only) and is used via CLI tools for experiments.
+"""
+
 from __future__ import annotations
 
 import math
@@ -10,12 +17,13 @@ from .geom_np import packing_score, polygon_bbox, shift_poses_to_origin, transfo
 from .scoring import polygons_intersect
 from .tree_data import TREE_POINTS
 
-
 Params = Dict[str, np.ndarray]
 
 
 @dataclass(frozen=True)
 class HeatmapConfig:
+    """Configuration for the heatmap policy and the search loop."""
+
     hidden_size: int = 32
     policy: str = "gnn"  # "mlp" or "gnn"
     knn_k: int = 4
@@ -27,6 +35,17 @@ class HeatmapConfig:
 
 
 def init_params(rng: np.random.Generator, hidden_size: int = 32, policy: str = "gnn") -> Params:
+    """Initialize heatmap network parameters.
+
+    Args:
+        rng: NumPy random generator.
+        hidden_size: Hidden layer width.
+        policy: `"mlp"` or `"gnn"`.
+
+    Returns:
+        Parameter dict of NumPy arrays.
+    """
+
     def r(shape):
         return rng.normal(scale=0.1, size=shape)
 
@@ -138,6 +157,19 @@ def update_heatmap(
     step_frac: float,
     config: HeatmapConfig,
 ) -> np.ndarray:
+    """Update heatmap logits based on current state and last-step feedback.
+
+    Args:
+        params: Heatmap network parameters.
+        poses: Current poses `(N, 3)`.
+        theta: Current heatmap logits `(N,)` (higher => sampled more often).
+        last_collision: Per-index collision indicator `(N,)` from the last proposal.
+        step_frac: Progress fraction in `[0, 1]`.
+        config: Heatmap configuration.
+
+    Returns:
+        Updated heatmap logits `(N,)`.
+    """
     feats = _compute_features(poses, last_collision, step_frac)
     if config.policy == "gnn":
         delta = _gnn_update(params, feats, config.knn_k)
@@ -162,6 +194,18 @@ def heatmap_search(
     steps: int,
     rng: np.random.Generator,
 ) -> Tuple[np.ndarray, float]:
+    """Run a heatmap-guided local search starting from `poses`.
+
+    Args:
+        params: Heatmap network parameters.
+        poses: Initial poses `(N, 3)`.
+        config: Search configuration.
+        steps: Number of search steps.
+        rng: NumPy random generator.
+
+    Returns:
+        Tuple `(best_poses, best_score)`.
+    """
     points = np.array(TREE_POINTS, dtype=float)
     poses = shift_poses_to_origin(points, poses)
     theta = np.zeros((poses.shape[0],), dtype=float)
@@ -208,6 +252,7 @@ def heatmap_search(
 
 
 def save_params(path, params: Params, meta: Dict[str, object] | None = None) -> None:
+    """Save heatmap parameters to a `.npz` file."""
     payload = {k: np.array(v) for k, v in params.items()}
     if meta:
         for key, value in meta.items():
@@ -216,6 +261,7 @@ def save_params(path, params: Params, meta: Dict[str, object] | None = None) -> 
 
 
 def load_params(path) -> Tuple[Params, Dict[str, object]]:
+    """Load heatmap parameters from a `.npz` file."""
     data = np.load(path)
     params: Params = {}
     meta: Dict[str, object] = {}
