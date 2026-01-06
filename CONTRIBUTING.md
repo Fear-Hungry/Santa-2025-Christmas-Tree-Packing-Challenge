@@ -4,22 +4,15 @@ Obrigado por querer contribuir! Este repositório é um **baseline/laboratório*
 
 ## Setup do ambiente
 
-Recomendado:
+Siga `docs/setup.md` para instruções completas (setup, notebooks, estrutura e comandos).
+
+TL;DR (recomendado):
 
 ```bash
 bash scripts/setup_venv.sh
 ```
 
-Manual (se preferir):
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -U pip
-python -m pip install -U -e ".[train,notebooks]"
-python -m pip install -U -e ".[dev]"
-python scripts/build/build_fastcollide.py  # opcional
-```
+Opcional (acelera o scorer local): `make build-fastcollide`.
 
 ## Rodando testes
 

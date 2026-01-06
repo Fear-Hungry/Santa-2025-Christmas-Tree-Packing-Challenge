@@ -15,8 +15,7 @@ python -m santa_packing.cli.train_l2o --n 10 --train-steps 200 --out runs/l2o_po
 Usar no gerador:
 
 ```bash
-python -m santa_packing.cli.generate_submission \
-  --out submission.csv --nmax 200 \
+python -m santa_packing.cli.generate_submission --out submission.csv --nmax 200 \
   --l2o-model runs/l2o_policy.npz --l2o-nmax 10
 ```
 
