@@ -10,11 +10,11 @@
     },
     {
       "name": "sa_small_mixed",
-      "args": "--sa-nmax 30 --sa-steps 400 --sa-batch 64 --sa-proposal mixed --sa-objective packing"
+      "args": "--sa-nmax 30 --sa-steps 400 --sa-batch 64 --sa-proposal mixed --sa-neighborhood --sa-objective packing"
     },
     {
       "name": "sa_prefix",
-      "args": "--sa-nmax 50 --sa-steps 400 --sa-batch 64 --sa-proposal mixed --sa-objective prefix --sa-swap-prob 0.05"
+      "args": "--sa-nmax 50 --sa-steps 400 --sa-batch 64 --sa-proposal mixed --sa-neighborhood --sa-objective prefix --sa-swap-prob 0.05"
     },
     {
       "name": "ga_hc_small",
@@ -22,4 +22,3 @@
     }
   ]
 }
-

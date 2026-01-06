@@ -40,7 +40,20 @@ def _safe_fallback_layout(points: np.ndarray, n: int) -> np.ndarray:
     return poses
 
 
-def _finalize_puzzle(points: np.ndarray, poses: np.ndarray, *, seed: int, puzzle_n: int) -> np.ndarray:
+def _finalize_puzzle(
+    points: np.ndarray,
+    poses: np.ndarray,
+    *,
+    seed: int,
+    puzzle_n: int,
+    overlap_mode: str,
+) -> np.ndarray:
+    def _scale_about_center_xy(poses_xydeg: np.ndarray, scale: float) -> np.ndarray:
+        scaled = np.array(poses_xydeg, dtype=float, copy=True)
+        center = np.mean(scaled[:, 0:2], axis=0)
+        scaled[:, 0:2] = center[None, :] + (scaled[:, 0:2] - center[None, :]) * float(scale)
+        return scaled
+
     poses = np.array(poses, dtype=float, copy=True)
     if poses.shape[0] != puzzle_n:
         raise ValueError(f"Puzzle {puzzle_n}: expected {puzzle_n} poses, got {poses.shape[0]}")
@@ -57,33 +70,93 @@ def _finalize_puzzle(points: np.ndarray, poses: np.ndarray, *, seed: int, puzzle
         poses = fit_xy_in_bounds(poses)
         poses = quantize_for_submission(poses)
 
-    pair = first_overlap_pair(points, poses, eps=EPS)
+    pair = first_overlap_pair(points, poses, eps=EPS, mode=overlap_mode)
     if pair is None:
         return poses
 
-    # Try a small repair first (keeps score essentially unchanged).
-    repaired = repair_overlaps(
-        points,
-        poses,
-        seed=seed,
-        max_iters=2000,
-        step_xy=max(1e-4, 10.0 * EPS),
-        step_deg=0.0,
-    )
-    if repaired is not None:
+    # --- Cheap detouch: expand away from centroid.
+    # Kaggle's evaluator appears to treat touching as overlap; uniform expansion often fixes
+    # contact-only collisions without expensive per-tree repairs. We try a small set of scales
+    # (few overlap checks), returning the first feasible candidate.
+    def _try_scale(scale: float) -> np.ndarray | None:
+        candidate = _scale_about_center_xy(poses, scale)
+        try:
+            candidate = fit_xy_in_bounds(candidate)
+            candidate = quantize_for_submission(candidate)
+        except Exception:
+            return None
+        if first_overlap_pair(points, candidate, eps=EPS, mode=overlap_mode) is None:
+            return candidate
+        return None
+
+    for scale in (
+        1.0005,
+        1.001,
+        1.002,
+        1.003,
+        1.005,
+        1.007,
+        1.01,
+        1.015,
+        1.02,
+        1.025,
+        1.03,
+        1.035,
+        1.04,
+        1.045,
+    ):
+        candidate = _try_scale(scale)
+        if candidate is not None:
+            # Tiny safety margin to avoid borderline "touch" after CSV quantization.
+            safer = _try_scale(scale * 1.0001)
+            return safer if safer is not None else candidate
+
+    # --- Best-effort repair (small nudges first; escalate budgets before fallback).
+    step0 = max(1e-4, 10.0 * EPS)
+    for attempt in range(6):
+        repaired = repair_overlaps(
+            points,
+            poses,
+            seed=seed + 97 * attempt,
+            max_iters=2000 + 2000 * attempt,
+            step_xy=step0 * (2.0**attempt),
+            step_deg=0.0,
+        )
+        if repaired is None:
+            continue
         try:
             repaired = fit_xy_in_bounds(repaired)
             repaired = quantize_for_submission(repaired)
         except Exception:
-            repaired = None
-        if repaired is not None and first_overlap_pair(points, repaired, eps=EPS) is None:
+            continue
+        if first_overlap_pair(points, repaired, eps=EPS, mode=overlap_mode) is None:
+            return repaired
+
+    # Second pass: allow tiny angle noise (helps when trees are "interlocked" by touch).
+    for attempt in range(4):
+        repaired = repair_overlaps(
+            points,
+            poses,
+            seed=seed + 997 * attempt,
+            max_iters=8000 + 4000 * attempt,
+            step_xy=step0 * (2.0**attempt),
+            step_deg=0.5 * (2.0**attempt),
+        )
+        if repaired is None:
+            continue
+        try:
+            repaired = fit_xy_in_bounds(repaired)
+            repaired = quantize_for_submission(repaired)
+        except Exception:
+            continue
+        if first_overlap_pair(points, repaired, eps=EPS, mode=overlap_mode) is None:
             return repaired
 
     # Hard fallback: guaranteed-feasible grid.
     fallback = _safe_fallback_layout(points, puzzle_n)
     fallback = fit_xy_in_bounds(fallback)
     fallback = quantize_for_submission(fallback)
-    if first_overlap_pair(points, fallback, eps=EPS) is not None:
+    if first_overlap_pair(points, fallback, eps=EPS, mode=overlap_mode) is not None:
         raise RuntimeError(f"Puzzle {puzzle_n}: failed to produce a feasible (non-overlapping) solution")
     return fallback
 
@@ -113,6 +186,19 @@ def _run_sa(
     rot_prob_end: float,
     swap_prob: float,
     swap_prob_end: float,
+    push_prob: float,
+    push_scale: float,
+    push_square_prob: float,
+    compact_prob: float,
+    compact_prob_end: float,
+    compact_scale: float,
+    compact_square_prob: float,
+    teleport_prob: float,
+    teleport_prob_end: float,
+    teleport_tries: int,
+    teleport_anchor_beta: float,
+    teleport_ring_mult: float,
+    teleport_jitter: float,
     cooling: str,
     cooling_power: float,
     trans_sigma_nexp: float,
@@ -163,6 +249,19 @@ def _run_sa(
         rot_prob_end=rot_prob_end,
         swap_prob=swap_prob,
         swap_prob_end=swap_prob_end,
+        push_prob=push_prob,
+        push_scale=push_scale,
+        push_square_prob=push_square_prob,
+        compact_prob=compact_prob,
+        compact_prob_end=compact_prob_end,
+        compact_scale=compact_scale,
+        compact_square_prob=compact_square_prob,
+        teleport_prob=teleport_prob,
+        teleport_prob_end=teleport_prob_end,
+        teleport_tries=teleport_tries,
+        teleport_anchor_beta=teleport_anchor_beta,
+        teleport_ring_mult=teleport_ring_mult,
+        teleport_jitter=teleport_jitter,
         cooling=cooling,
         cooling_power=cooling_power,
         trans_sigma_nexp=trans_sigma_nexp,
@@ -577,6 +676,19 @@ def _run_sa_guided(
     rot_prob_end: float,
     swap_prob: float,
     swap_prob_end: float,
+    push_prob: float,
+    push_scale: float,
+    push_square_prob: float,
+    compact_prob: float,
+    compact_prob_end: float,
+    compact_scale: float,
+    compact_square_prob: float,
+    teleport_prob: float,
+    teleport_prob_end: float,
+    teleport_tries: int,
+    teleport_anchor_beta: float,
+    teleport_ring_mult: float,
+    teleport_jitter: float,
     cooling: str,
     cooling_power: float,
     trans_sigma_nexp: float,
@@ -671,6 +783,19 @@ def _run_sa_guided(
         rot_prob_end=rot_prob_end,
         swap_prob=swap_prob,
         swap_prob_end=swap_prob_end,
+        push_prob=push_prob,
+        push_scale=push_scale,
+        push_square_prob=push_square_prob,
+        compact_prob=compact_prob,
+        compact_prob_end=compact_prob_end,
+        compact_scale=compact_scale,
+        compact_square_prob=compact_square_prob,
+        teleport_prob=teleport_prob,
+        teleport_prob_end=teleport_prob_end,
+        teleport_tries=teleport_tries,
+        teleport_anchor_beta=teleport_anchor_beta,
+        teleport_ring_mult=teleport_ring_mult,
+        teleport_jitter=teleport_jitter,
         cooling=cooling,
         cooling_power=cooling_power,
         trans_sigma_nexp=trans_sigma_nexp,
@@ -937,6 +1062,19 @@ def solve_n(
     sa_rot_prob_end: float,
     sa_swap_prob: float,
     sa_swap_prob_end: float,
+    sa_push_prob: float,
+    sa_push_scale: float,
+    sa_push_square_prob: float,
+    sa_compact_prob: float,
+    sa_compact_prob_end: float,
+    sa_compact_scale: float,
+    sa_compact_square_prob: float,
+    sa_teleport_prob: float,
+    sa_teleport_prob_end: float,
+    sa_teleport_tries: int,
+    sa_teleport_anchor_beta: float,
+    sa_teleport_ring_mult: float,
+    sa_teleport_jitter: float,
     sa_cooling: str,
     sa_cooling_power: float,
     sa_trans_sigma_nexp: float,
@@ -970,6 +1108,19 @@ def solve_n(
     refine_rot_prob_end: float,
     refine_swap_prob: float,
     refine_swap_prob_end: float,
+    refine_push_prob: float,
+    refine_push_scale: float,
+    refine_push_square_prob: float,
+    refine_compact_prob: float,
+    refine_compact_prob_end: float,
+    refine_compact_scale: float,
+    refine_compact_square_prob: float,
+    refine_teleport_prob: float,
+    refine_teleport_prob_end: float,
+    refine_teleport_tries: int,
+    refine_teleport_anchor_beta: float,
+    refine_teleport_ring_mult: float,
+    refine_teleport_jitter: float,
     refine_cooling: str,
     refine_cooling_power: float,
     refine_trans_sigma_nexp: float,
@@ -1193,6 +1344,19 @@ def solve_n(
                 rot_prob_end=sa_rot_prob_end,
                 swap_prob=sa_swap_prob,
                 swap_prob_end=sa_swap_prob_end,
+                push_prob=sa_push_prob,
+                push_scale=sa_push_scale,
+                push_square_prob=sa_push_square_prob,
+                compact_prob=sa_compact_prob,
+                compact_prob_end=sa_compact_prob_end,
+                compact_scale=sa_compact_scale,
+                compact_square_prob=sa_compact_square_prob,
+                teleport_prob=sa_teleport_prob,
+                teleport_prob_end=sa_teleport_prob_end,
+                teleport_tries=sa_teleport_tries,
+                teleport_anchor_beta=sa_teleport_anchor_beta,
+                teleport_ring_mult=sa_teleport_ring_mult,
+                teleport_jitter=sa_teleport_jitter,
                 cooling=sa_cooling,
                 cooling_power=sa_cooling_power,
                 trans_sigma_nexp=sa_trans_sigma_nexp,
@@ -1224,6 +1388,19 @@ def solve_n(
                 rot_prob_end=sa_rot_prob_end,
                 swap_prob=sa_swap_prob,
                 swap_prob_end=sa_swap_prob_end,
+                push_prob=sa_push_prob,
+                push_scale=sa_push_scale,
+                push_square_prob=sa_push_square_prob,
+                compact_prob=sa_compact_prob,
+                compact_prob_end=sa_compact_prob_end,
+                compact_scale=sa_compact_scale,
+                compact_square_prob=sa_compact_square_prob,
+                teleport_prob=sa_teleport_prob,
+                teleport_prob_end=sa_teleport_prob_end,
+                teleport_tries=sa_teleport_tries,
+                teleport_anchor_beta=sa_teleport_anchor_beta,
+                teleport_ring_mult=sa_teleport_ring_mult,
+                teleport_jitter=sa_teleport_jitter,
                 cooling=sa_cooling,
                 cooling_power=sa_cooling_power,
                 trans_sigma_nexp=sa_trans_sigma_nexp,
@@ -1278,6 +1455,19 @@ def solve_n(
                 rot_prob_end=refine_rot_prob_end,
                 swap_prob=refine_swap_prob,
                 swap_prob_end=refine_swap_prob_end,
+                push_prob=refine_push_prob,
+                push_scale=refine_push_scale,
+                push_square_prob=refine_push_square_prob,
+                compact_prob=refine_compact_prob,
+                compact_prob_end=refine_compact_prob_end,
+                compact_scale=refine_compact_scale,
+                compact_square_prob=refine_compact_square_prob,
+                teleport_prob=refine_teleport_prob,
+                teleport_prob_end=refine_teleport_prob_end,
+                teleport_tries=refine_teleport_tries,
+                teleport_anchor_beta=refine_teleport_anchor_beta,
+                teleport_ring_mult=refine_teleport_ring_mult,
+                teleport_jitter=refine_teleport_jitter,
                 cooling=refine_cooling,
                 cooling_power=refine_cooling_power,
                 trans_sigma_nexp=refine_trans_sigma_nexp,
@@ -1309,6 +1499,19 @@ def solve_n(
                 rot_prob_end=refine_rot_prob_end,
                 swap_prob=refine_swap_prob,
                 swap_prob_end=refine_swap_prob_end,
+                push_prob=refine_push_prob,
+                push_scale=refine_push_scale,
+                push_square_prob=refine_push_square_prob,
+                compact_prob=refine_compact_prob,
+                compact_prob_end=refine_compact_prob_end,
+                compact_scale=refine_compact_scale,
+                compact_square_prob=refine_compact_square_prob,
+                teleport_prob=refine_teleport_prob,
+                teleport_prob_end=refine_teleport_prob_end,
+                teleport_tries=refine_teleport_tries,
+                teleport_anchor_beta=refine_teleport_anchor_beta,
+                teleport_ring_mult=refine_teleport_ring_mult,
+                teleport_jitter=refine_teleport_jitter,
                 cooling=refine_cooling,
                 cooling_power=refine_cooling_power,
                 trans_sigma_nexp=refine_trans_sigma_nexp,
@@ -1399,6 +1602,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", type=Path, default=Path("submission.csv"), help="Output CSV path")
     ap.add_argument("--nmax", type=int, default=200, help="Max puzzle n (default: 200)")
     ap.add_argument("--seed", type=int, default=1, help="Base seed for SA")
+    ap.add_argument(
+        "--from-submission",
+        type=Path,
+        default=None,
+        help="Load poses from an existing submission.csv and strictify/quantize them (skips solving).",
+    )
+    ap.add_argument(
+        "--overlap-mode",
+        type=str,
+        default="strict",
+        choices=["strict", "conservative", "kaggle"],
+        help="Overlap predicate used during finalization/validation (strict allows touching; kaggle enforces clearance).",
+    )
 
     ap.add_argument(
         "--mother-prefix",
@@ -1432,6 +1648,34 @@ def main(argv: list[str] | None = None) -> int:
         default=-1.0,
         help="Final SA swap move probability (linear schedule; -1 keeps constant).",
     )
+    ap.add_argument(
+        "--sa-neighborhood",
+        action="store_true",
+        help="Enable neighborhood moves (swap/compact/teleport) with sensible defaults (unless explicitly set).",
+    )
+    ap.add_argument("--sa-push-prob", type=float, default=0.1, help="SA deterministic push-to-center move probability (translation-only).")
+    ap.add_argument("--sa-push-scale", type=float, default=1.0, help="SA push step magnitude multiplier.")
+    ap.add_argument("--sa-push-square-prob", type=float, default=0.5, help="SA push: fraction of axis-aligned pushes.")
+    ap.add_argument("--sa-compact-prob", type=float, default=0.0, help="SA compact move probability (boundary -> center).")
+    ap.add_argument(
+        "--sa-compact-prob-end",
+        type=float,
+        default=-1.0,
+        help="Final SA compact move probability (linear schedule; -1 keeps constant).",
+    )
+    ap.add_argument("--sa-compact-scale", type=float, default=1.0, help="SA compact step magnitude multiplier.")
+    ap.add_argument("--sa-compact-square-prob", type=float, default=0.75, help="SA compact: fraction of axis-aligned moves.")
+    ap.add_argument("--sa-teleport-prob", type=float, default=0.0, help="SA teleport move probability (boundary -> interior pocket).")
+    ap.add_argument(
+        "--sa-teleport-prob-end",
+        type=float,
+        default=-1.0,
+        help="Final SA teleport move probability (linear schedule; -1 keeps constant).",
+    )
+    ap.add_argument("--sa-teleport-tries", type=int, default=4, help="SA teleport: number of candidate tries per step.")
+    ap.add_argument("--sa-teleport-anchor-beta", type=float, default=6.0, help="SA teleport: bias toward center anchors (higher=more central).")
+    ap.add_argument("--sa-teleport-ring-mult", type=float, default=1.02, help="SA teleport: radius multiplier around anchor.")
+    ap.add_argument("--sa-teleport-jitter", type=float, default=0.05, help="SA teleport: random XY jitter (in radius units).")
     ap.add_argument("--sa-cooling", type=str, default="geom", choices=["geom", "linear", "log"])
     ap.add_argument("--sa-cooling-power", type=float, default=1.0, help="Power on anneal fraction (>=1 slows early cooling).")
     ap.add_argument("--sa-trans-nexp", type=float, default=0.0, help="Scale trans_sigma by (n/nref)^nexp.")
@@ -1515,6 +1759,39 @@ def main(argv: list[str] | None = None) -> int:
         default=-1.0,
         help="Final refine swap move probability (linear schedule; -1 keeps constant).",
     )
+    ap.add_argument(
+        "--refine-neighborhood",
+        action="store_true",
+        help="Enable neighborhood moves (swap/compact/teleport) with sensible defaults (unless explicitly set).",
+    )
+    ap.add_argument("--refine-push-prob", type=float, default=0.1, help="Refine SA deterministic push-to-center move probability (translation-only).")
+    ap.add_argument("--refine-push-scale", type=float, default=1.0, help="Refine SA push step magnitude multiplier.")
+    ap.add_argument("--refine-push-square-prob", type=float, default=0.5, help="Refine SA push: fraction of axis-aligned pushes.")
+    ap.add_argument("--refine-compact-prob", type=float, default=0.0, help="Refine SA compact move probability (boundary -> center).")
+    ap.add_argument(
+        "--refine-compact-prob-end",
+        type=float,
+        default=-1.0,
+        help="Final refine compact move probability (linear schedule; -1 keeps constant).",
+    )
+    ap.add_argument("--refine-compact-scale", type=float, default=1.0, help="Refine SA compact step magnitude multiplier.")
+    ap.add_argument("--refine-compact-square-prob", type=float, default=0.75, help="Refine SA compact: fraction of axis-aligned moves.")
+    ap.add_argument("--refine-teleport-prob", type=float, default=0.0, help="Refine SA teleport move probability (boundary -> interior pocket).")
+    ap.add_argument(
+        "--refine-teleport-prob-end",
+        type=float,
+        default=-1.0,
+        help="Final refine teleport move probability (linear schedule; -1 keeps constant).",
+    )
+    ap.add_argument("--refine-teleport-tries", type=int, default=4, help="Refine SA teleport: number of candidate tries per step.")
+    ap.add_argument(
+        "--refine-teleport-anchor-beta",
+        type=float,
+        default=6.0,
+        help="Refine SA teleport: bias toward center anchors (higher=more central).",
+    )
+    ap.add_argument("--refine-teleport-ring-mult", type=float, default=1.02, help="Refine SA teleport: radius multiplier around anchor.")
+    ap.add_argument("--refine-teleport-jitter", type=float, default=0.05, help="Refine SA teleport: random XY jitter (in radius units).")
     ap.add_argument("--refine-cooling", type=str, default="geom", choices=["geom", "linear", "log"])
     ap.add_argument("--refine-cooling-power", type=float, default=1.0)
     ap.add_argument("--refine-trans-nexp", type=float, default=0.0)
@@ -1638,10 +1915,41 @@ def main(argv: list[str] | None = None) -> int:
     if args.block_objective is None:
         args.block_objective = args.sa_objective
 
+    if args.sa_neighborhood:
+        if args.sa_proposal == "random":
+            args.sa_proposal = "mixed"
+        if args.sa_objective == "prefix" and args.sa_swap_prob == 0.0:
+            args.sa_swap_prob = 0.2
+        if args.sa_compact_prob == 0.0:
+            args.sa_compact_prob = 0.1
+        if args.sa_teleport_prob == 0.0:
+            args.sa_teleport_prob = 0.03
+
+    if args.refine_neighborhood:
+        if args.refine_proposal == "random":
+            args.refine_proposal = "mixed"
+        if args.refine_objective == "prefix" and args.refine_swap_prob == 0.0:
+            args.refine_swap_prob = 0.2
+        if args.refine_compact_prob == 0.0:
+            args.refine_compact_prob = 0.1
+        if args.refine_teleport_prob == 0.0:
+            args.refine_teleport_prob = 0.03
+
     points = np.array(TREE_POINTS, dtype=float)
     puzzles: dict[int, np.ndarray] = {}
 
-    if args.mother_prefix:
+    if args.from_submission is not None:
+        from santa_packing.scoring import load_submission  # noqa: E402
+
+        loaded = load_submission(args.from_submission, nmax=int(args.nmax))
+        for n in range(1, args.nmax + 1):
+            poses = loaded.get(n)
+            if poses is None or poses.shape != (n, 3):
+                raise SystemExit(
+                    f"--from-submission: missing puzzle {n} or wrong shape (got {None if poses is None else poses.shape})"
+                )
+            puzzles[n] = _finalize_puzzle(points, poses, seed=args.seed + n, puzzle_n=n, overlap_mode=str(args.overlap_mode))
+    elif args.mother_prefix:
         mother = solve_n(
                 args.nmax,
                 seed=args.seed + args.nmax,
@@ -1663,6 +1971,19 @@ def main(argv: list[str] | None = None) -> int:
                 sa_rot_prob_end=args.sa_rot_prob_end,
                 sa_swap_prob=args.sa_swap_prob,
                 sa_swap_prob_end=args.sa_swap_prob_end,
+                sa_push_prob=args.sa_push_prob,
+                sa_push_scale=args.sa_push_scale,
+                sa_push_square_prob=args.sa_push_square_prob,
+                sa_compact_prob=args.sa_compact_prob,
+                sa_compact_prob_end=args.sa_compact_prob_end,
+                sa_compact_scale=args.sa_compact_scale,
+                sa_compact_square_prob=args.sa_compact_square_prob,
+                sa_teleport_prob=args.sa_teleport_prob,
+                sa_teleport_prob_end=args.sa_teleport_prob_end,
+                sa_teleport_tries=args.sa_teleport_tries,
+                sa_teleport_anchor_beta=args.sa_teleport_anchor_beta,
+                sa_teleport_ring_mult=args.sa_teleport_ring_mult,
+                sa_teleport_jitter=args.sa_teleport_jitter,
                 sa_cooling=args.sa_cooling,
                 sa_cooling_power=args.sa_cooling_power,
                 sa_trans_sigma_nexp=args.sa_trans_nexp,
@@ -1696,6 +2017,19 @@ def main(argv: list[str] | None = None) -> int:
                 refine_rot_prob_end=args.refine_rot_prob_end,
                 refine_swap_prob=args.refine_swap_prob,
                 refine_swap_prob_end=args.refine_swap_prob_end,
+                refine_push_prob=args.refine_push_prob,
+                refine_push_scale=args.refine_push_scale,
+                refine_push_square_prob=args.refine_push_square_prob,
+                refine_compact_prob=args.refine_compact_prob,
+                refine_compact_prob_end=args.refine_compact_prob_end,
+                refine_compact_scale=args.refine_compact_scale,
+                refine_compact_square_prob=args.refine_compact_square_prob,
+                refine_teleport_prob=args.refine_teleport_prob,
+                refine_teleport_prob_end=args.refine_teleport_prob_end,
+                refine_teleport_tries=args.refine_teleport_tries,
+                refine_teleport_anchor_beta=args.refine_teleport_anchor_beta,
+                refine_teleport_ring_mult=args.refine_teleport_ring_mult,
+                refine_teleport_jitter=args.refine_teleport_jitter,
                 refine_cooling=args.refine_cooling,
                 refine_cooling_power=args.refine_cooling_power,
                 refine_trans_sigma_nexp=args.refine_trans_nexp,
@@ -1775,7 +2109,7 @@ def main(argv: list[str] | None = None) -> int:
 
         for n in range(1, args.nmax + 1):
             poses = shift_poses_to_origin(points, mother[:n])
-            puzzles[n] = _finalize_puzzle(points, poses, seed=args.seed + n, puzzle_n=n)
+            puzzles[n] = _finalize_puzzle(points, poses, seed=args.seed + n, puzzle_n=n, overlap_mode=str(args.overlap_mode))
     else:
         for n in range(1, args.nmax + 1):
             poses = solve_n(
@@ -1799,6 +2133,19 @@ def main(argv: list[str] | None = None) -> int:
                     sa_rot_prob_end=args.sa_rot_prob_end,
                     sa_swap_prob=args.sa_swap_prob,
                     sa_swap_prob_end=args.sa_swap_prob_end,
+                    sa_push_prob=args.sa_push_prob,
+                    sa_push_scale=args.sa_push_scale,
+                    sa_push_square_prob=args.sa_push_square_prob,
+                    sa_compact_prob=args.sa_compact_prob,
+                    sa_compact_prob_end=args.sa_compact_prob_end,
+                    sa_compact_scale=args.sa_compact_scale,
+                    sa_compact_square_prob=args.sa_compact_square_prob,
+                    sa_teleport_prob=args.sa_teleport_prob,
+                    sa_teleport_prob_end=args.sa_teleport_prob_end,
+                    sa_teleport_tries=args.sa_teleport_tries,
+                    sa_teleport_anchor_beta=args.sa_teleport_anchor_beta,
+                    sa_teleport_ring_mult=args.sa_teleport_ring_mult,
+                    sa_teleport_jitter=args.sa_teleport_jitter,
                     sa_cooling=args.sa_cooling,
                     sa_cooling_power=args.sa_cooling_power,
                     sa_trans_sigma_nexp=args.sa_trans_nexp,
@@ -1832,6 +2179,19 @@ def main(argv: list[str] | None = None) -> int:
                     refine_rot_prob_end=args.refine_rot_prob_end,
                     refine_swap_prob=args.refine_swap_prob,
                     refine_swap_prob_end=args.refine_swap_prob_end,
+                    refine_push_prob=args.refine_push_prob,
+                    refine_push_scale=args.refine_push_scale,
+                    refine_push_square_prob=args.refine_push_square_prob,
+                    refine_compact_prob=args.refine_compact_prob,
+                    refine_compact_prob_end=args.refine_compact_prob_end,
+                    refine_compact_scale=args.refine_compact_scale,
+                    refine_compact_square_prob=args.refine_compact_square_prob,
+                    refine_teleport_prob=args.refine_teleport_prob,
+                    refine_teleport_prob_end=args.refine_teleport_prob_end,
+                    refine_teleport_tries=args.refine_teleport_tries,
+                    refine_teleport_anchor_beta=args.refine_teleport_anchor_beta,
+                    refine_teleport_ring_mult=args.refine_teleport_ring_mult,
+                    refine_teleport_jitter=args.refine_teleport_jitter,
                     refine_cooling=args.refine_cooling,
                     refine_cooling_power=args.refine_cooling_power,
                     refine_trans_sigma_nexp=args.refine_trans_nexp,
@@ -1904,7 +2264,7 @@ def main(argv: list[str] | None = None) -> int:
                     block_template_rotate=args.block_template_rotate,
             )
 
-            puzzles[n] = _finalize_puzzle(points, poses, seed=args.seed + n, puzzle_n=n)
+            puzzles[n] = _finalize_puzzle(points, poses, seed=args.seed + n, puzzle_n=n, overlap_mode=str(args.overlap_mode))
 
     # Write CSV (after strict validation/repair).
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -1921,7 +2281,13 @@ def main(argv: list[str] | None = None) -> int:
     # Rule of the pipeline: always run strict validation after generating.
     from santa_packing.scoring import score_submission  # noqa: E402
 
-    _ = score_submission(args.out, nmax=args.nmax, check_overlap=True, require_complete=True)
+    _ = score_submission(
+        args.out,
+        nmax=args.nmax,
+        check_overlap=True,
+        overlap_mode=str(args.overlap_mode),
+        require_complete=True,
+    )
 
     return 0
 

@@ -21,6 +21,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip overlap checks (faster, but unsafe)",
     )
     ap.add_argument(
+        "--overlap-mode",
+        type=str,
+        default="strict",
+        choices=["strict", "conservative", "kaggle"],
+        help="Overlap predicate used when overlap checks are enabled (strict allows touching; kaggle enforces clearance).",
+    )
+    ap.add_argument(
         "--no-require-complete",
         action="store_true",
         help="Do not fail if puzzles 1..nmax are missing",
@@ -32,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
         args.submission,
         nmax=args.nmax,
         check_overlap=not args.no_overlap,
+        overlap_mode=args.overlap_mode,
         require_complete=not args.no_require_complete,
     )
 

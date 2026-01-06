@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 from functools import partial
+import math
 from .packing import (
     packing_score_from_bboxes,
     prefix_packing_score_from_bboxes,
@@ -27,7 +28,7 @@ def check_collisions(poses, base_poly):
 
 @partial(
     jax.jit,
-    static_argnames=["n_steps", "n_trees", "objective", "cooling", "proposal", "allow_collisions"],
+    static_argnames=["n_steps", "n_trees", "objective", "cooling", "proposal", "allow_collisions", "teleport_tries"],
 )
 def run_sa_batch(
     random_key,
@@ -55,6 +56,16 @@ def run_sa_batch(
     push_prob=0.1,
     push_scale=1.0,
     push_square_prob=0.5,
+    compact_prob=0.0,
+    compact_prob_end=-1.0,
+    compact_scale=1.0,
+    compact_square_prob=0.75,
+    teleport_prob=0.0,
+    teleport_prob_end=-1.0,
+    teleport_tries=4,
+    teleport_anchor_beta=6.0,
+    teleport_ring_mult=1.02,
+    teleport_jitter=0.05,
     overlap_lambda=0.0,
     adapt_sigma=True,
     accept_target=0.35,
@@ -168,6 +179,15 @@ def run_sa_batch(
     push_scale_t = jnp.asarray(push_scale, dtype=initial_poses.dtype)
     push_square_prob_t = jnp.asarray(push_square_prob, dtype=initial_poses.dtype)
 
+    compact_prob_t = jnp.asarray(compact_prob, dtype=initial_poses.dtype)
+    compact_scale_t = jnp.asarray(compact_scale, dtype=initial_poses.dtype)
+    compact_square_prob_t = jnp.asarray(compact_square_prob, dtype=initial_poses.dtype)
+
+    teleport_prob_t = jnp.asarray(teleport_prob, dtype=initial_poses.dtype)
+    teleport_anchor_beta_t = jnp.asarray(teleport_anchor_beta, dtype=initial_poses.dtype)
+    teleport_ring_mult_t = jnp.asarray(teleport_ring_mult, dtype=initial_poses.dtype)
+    teleport_jitter_t = jnp.asarray(teleport_jitter, dtype=initial_poses.dtype)
+
     adapt_sigma_t = jnp.asarray(adapt_sigma, dtype=bool)
     accept_target_t = jnp.asarray(accept_target, dtype=initial_poses.dtype)
     adapt_alpha_t = jnp.asarray(adapt_alpha, dtype=initial_poses.dtype)
@@ -274,7 +294,25 @@ def run_sa_batch(
         current_swap_prob = jnp.clip(current_swap_prob, 0.0, 1.0)
         
         # 1. Propose Move
-        key, subkey_select, subkey_k, subkey_k2, subkey_swap, subkey_rot_choice, subkey_trans, subkey_rot, subkey_gate, subkey_push, subkey_push_axis = jax.random.split(key, 11)
+        (
+            key,
+            subkey_select,
+            subkey_k,
+            subkey_k2,
+            subkey_swap,
+            subkey_rot_choice,
+            subkey_trans,
+            subkey_rot,
+            subkey_gate,
+            subkey_push,
+            subkey_push_axis,
+            subkey_compact,
+            subkey_compact_axis,
+            subkey_teleport,
+            subkey_teleport_anchor,
+            subkey_teleport_phi,
+            subkey_teleport_noise,
+        ) = jax.random.split(key, 17)
         
         batch_size = poses.shape[0]
         batch_idx = jnp.arange(batch_size)
@@ -295,29 +333,29 @@ def run_sa_batch(
         trans_scale = trans_sigma_dyn * temp_eff
         rot_scale = rot_sigma_dyn * temp_eff
 
-        if proposal in {"bbox", "bbox_inward", "inward", "smart", "mixed"}:
-            keys_pick = jax.random.split(subkey_select, batch_size)
-            k_smart, centers, use_x = jax.vmap(_select_bbox_inward)(keys_pick, bboxes)
-            xy_k = poses[batch_idx, k_smart, 0:2]
-            direction = centers - xy_k
-            axis_direction = jnp.where(use_x[:, None], jnp.stack([direction[:, 0], jnp.zeros_like(direction[:, 0])], axis=1), jnp.stack([jnp.zeros_like(direction[:, 1]), direction[:, 1]], axis=1))
-            norm = jnp.linalg.norm(axis_direction, axis=1, keepdims=True)
-            unit = axis_direction / (norm + 1e-12)
-            drift = unit * (trans_scale[:, None] * jnp.asarray(smart_drift, dtype=poses.dtype))
-            noise = eps_xy * (trans_scale[:, None] * jnp.asarray(smart_noise, dtype=poses.dtype))
-            dxy_smart = drift + noise
-        else:
-            k_smart = k_rand
-            dxy_smart = eps_xy * trans_scale[:, None]
+        keys_pick = jax.random.split(subkey_select, batch_size)
+        k_boundary, pack_center, use_x = jax.vmap(_select_bbox_inward)(keys_pick, bboxes)
+        xy_k = poses[batch_idx, k_boundary, 0:2]
+        direction = pack_center - xy_k
+        axis_direction = jnp.where(
+            use_x[:, None],
+            jnp.stack([direction[:, 0], jnp.zeros_like(direction[:, 0])], axis=1),
+            jnp.stack([jnp.zeros_like(direction[:, 1]), direction[:, 1]], axis=1),
+        )
+        norm = jnp.linalg.norm(axis_direction, axis=1, keepdims=True)
+        unit_axis = axis_direction / (norm + 1e-12)
+        drift = unit_axis * (trans_scale[:, None] * jnp.asarray(smart_drift, dtype=poses.dtype))
+        noise = eps_xy * (trans_scale[:, None] * jnp.asarray(smart_noise, dtype=poses.dtype))
+        dxy_smart = drift + noise
 
         dxy_rand = eps_xy * trans_scale[:, None]
 
         if proposal in {"bbox", "bbox_inward", "inward", "smart"}:
-            k = k_smart
+            k = k_boundary
             dxy = dxy_smart
         elif proposal == "mixed":
             gate = jax.random.uniform(subkey_gate, (batch_size,)) < jnp.asarray(smart_prob, dtype=poses.dtype)
-            k = jnp.where(gate, k_smart, k_rand)
+            k = jnp.where(gate, k_boundary, k_rand)
             dxy = jnp.where(gate[:, None], dxy_smart, dxy_rand)
         else:
             k = k_rand
@@ -349,12 +387,119 @@ def run_sa_batch(
         k_move = jnp.where(do_push, k_push, k)
         dxy_move = jnp.where(do_push[:, None], push_step, dxy)
 
+        # "Compact" move: pick a boundary tree and nudge it toward the packing center.
+        compact_prob_final = jnp.where(compact_prob_end >= 0.0, compact_prob_end, compact_prob_t)
+        current_compact_prob = compact_prob_t + (compact_prob_final - compact_prob_t) * anneal
+        current_compact_prob = jnp.clip(current_compact_prob, 0.0, 1.0)
+        compact_choice = jax.random.uniform(subkey_compact, (batch_size,))
+        do_compact = (compact_choice < current_compact_prob) & (~do_swap) & (~do_push) & (~rot_mask)
+
+        xy_comp = poses[batch_idx, k_boundary, 0:2]
+        dir_comp = pack_center - xy_comp
+        norm_comp = jnp.linalg.norm(dir_comp, axis=1, keepdims=True)
+        unit_comp = dir_comp / (norm_comp + 1e-12)
+        axis_comp = jnp.where(
+            use_x[:, None],
+            jnp.stack([jnp.sign(dir_comp[:, 0]), jnp.zeros_like(dir_comp[:, 0])], axis=1),
+            jnp.stack([jnp.zeros_like(dir_comp[:, 1]), jnp.sign(dir_comp[:, 1])], axis=1),
+        )
+        compact_axis_choice = jax.random.uniform(subkey_compact_axis, (batch_size,))
+        compact_dir = jnp.where(compact_axis_choice[:, None] < compact_square_prob_t, axis_comp, unit_comp)
+        compact_step = compact_dir * (trans_scale * compact_scale_t)[:, None]
+
+        k_move = jnp.where(do_compact, k_boundary, k_move)
+        dxy_move = jnp.where(do_compact[:, None], compact_step, dxy_move)
+
         delta_xy = dxy_move * (~rot_mask)[:, None]
         delta_theta = dtheta * rot_mask
         delta = jnp.concatenate([delta_xy, delta_theta[:, None]], axis=1)
 
         candidate_poses_single = poses.at[batch_idx, k_move].add(delta)
         candidate_poses_single = candidate_poses_single.at[:, :, 2].set(jnp.mod(candidate_poses_single[:, :, 2], 360.0))
+
+        # Teleport move: move a boundary tree into a "pocket" near an interior anchor.
+        teleport_prob_final = jnp.where(teleport_prob_end >= 0.0, teleport_prob_end, teleport_prob_t)
+        current_teleport_prob = teleport_prob_t + (teleport_prob_final - teleport_prob_t) * anneal
+        current_teleport_prob = jnp.clip(current_teleport_prob, 0.0, 1.0)
+        teleport_choice = jax.random.uniform(subkey_teleport, (batch_size,))
+        do_teleport = (teleport_choice < current_teleport_prob) & (~do_swap)
+
+        # Anchor selection: bias toward trees closer to the packing center.
+        centers_all = poses[:, :, 0:2]
+        d_to_center = centers_all - pack_center[:, None, :]
+        dist2 = jnp.sum(d_to_center * d_to_center, axis=2)
+        dist = jnp.sqrt(dist2 + 1e-12)
+
+        min_x = jnp.min(bboxes[:, :, 0], axis=1)
+        min_y = jnp.min(bboxes[:, :, 1], axis=1)
+        max_x = jnp.max(bboxes[:, :, 2], axis=1)
+        max_y = jnp.max(bboxes[:, :, 3], axis=1)
+        side = jnp.maximum(max_x - min_x, max_y - min_y)
+        dist_norm = dist / (side[:, None] + 1e-6)
+        logits_anchor = -dist_norm * teleport_anchor_beta_t
+
+        keys_anchor = jax.random.split(subkey_teleport_anchor, batch_size)
+        anchor_idx = jax.vmap(lambda kk, logit: jax.random.categorical(kk, logit))(keys_anchor, logits_anchor)
+        anchor_xy = poses[batch_idx, anchor_idx, 0:2]
+
+        phi_tries = jax.random.uniform(
+            subkey_teleport_phi,
+            (teleport_tries, batch_size),
+            minval=0.0,
+            maxval=2.0 * math.pi,
+        )
+        noise_tries = jax.random.normal(subkey_teleport_noise, (teleport_tries, batch_size, 2))
+        ring_r = (2.0 * radius) * teleport_ring_mult_t
+        jitter = noise_tries * (radius * teleport_jitter_t)
+
+        def _attempt_teleport(_: None) -> tuple[jax.Array, jax.Array]:
+            found0 = (~do_teleport).astype(bool)
+            pose0 = poses[batch_idx, k_boundary]
+
+            def body_fn(t: int, carry: tuple[jax.Array, jax.Array]) -> tuple[jax.Array, jax.Array]:
+                found, pose_sel = carry
+                phi = phi_tries[t]
+                unit = jnp.stack([jnp.cos(phi), jnp.sin(phi)], axis=1)
+                cand_xy = anchor_xy + ring_r * unit + jitter[t]
+                cand_pose = pose_sel.at[:, 0:2].set(cand_xy)
+
+                pose_k = cand_pose
+                new_bbox_k_padded = jax.vmap(lambda p: _aabb_for_pose(p, padded=True))(pose_k)
+                cand_bboxes_padded = bboxes_padded.at[batch_idx, k_boundary].set(new_bbox_k_padded)
+                new_cell_k = jax.vmap(_cells_for_xy)(pose_k[:, 0:2])
+                cand_cells = cells.at[batch_idx, k_boundary].set(new_cell_k)
+                cand_poses = poses.at[batch_idx, k_boundary].set(pose_k)
+
+                do_test = do_teleport & (~found)
+
+                def _check_one(p, bbp, cc, idx, test):
+                    return jax.lax.cond(
+                        test,
+                        lambda: _check_collision_for_index_cached(p, bbp, cc, idx),
+                        lambda: jnp.array(True),
+                    )
+
+                coll = jax.vmap(_check_one)(cand_poses, cand_bboxes_padded, cand_cells, k_boundary, do_test)
+                ok = (~coll) & do_test
+                pose_sel = jnp.where(ok[:, None], cand_pose, pose_sel)
+                found = found | ok
+                return found, pose_sel
+
+            found, pose_sel = jax.lax.fori_loop(0, teleport_tries, body_fn, (found0, pose0))
+            success = do_teleport & found
+            return success, pose_sel
+
+        teleport_success, teleport_pose_k = jax.lax.cond(
+            jnp.any(do_teleport),
+            _attempt_teleport,
+            lambda _: (jnp.zeros((batch_size,), dtype=bool), poses[batch_idx, k_boundary]),
+            operand=None,
+        )
+
+        candidate_poses_teleport = poses.at[batch_idx, k_boundary].set(teleport_pose_k)
+        candidate_poses_single = jnp.where(teleport_success[:, None, None], candidate_poses_teleport, candidate_poses_single)
+        k_move = jnp.where(teleport_success, k_boundary, k_move)
+        rot_mask = rot_mask & (~teleport_success)
 
         # Swap move (k1, k2) with k2 != k1 (when n_trees > 1).
         k1 = k_rand
@@ -1014,7 +1159,16 @@ def run_sa_blocks_batch(
 
 @partial(
     jax.jit,
-    static_argnames=["n_steps", "n_trees", "objective", "policy_config", "cooling", "proposal", "allow_collisions"],
+    static_argnames=[
+        "n_steps",
+        "n_trees",
+        "objective",
+        "policy_config",
+        "cooling",
+        "proposal",
+        "allow_collisions",
+        "teleport_tries",
+    ],
 )
 def run_sa_batch_guided(
     random_key,
@@ -1044,6 +1198,16 @@ def run_sa_batch_guided(
     push_prob=0.1,
     push_scale=1.0,
     push_square_prob=0.5,
+    compact_prob=0.0,
+    compact_prob_end=-1.0,
+    compact_scale=1.0,
+    compact_square_prob=0.75,
+    teleport_prob=0.0,
+    teleport_prob_end=-1.0,
+    teleport_tries=4,
+    teleport_anchor_beta=6.0,
+    teleport_ring_mult=1.02,
+    teleport_jitter=0.05,
     overlap_lambda=0.0,
     adapt_sigma=True,
     accept_target=0.35,
@@ -1157,6 +1321,15 @@ def run_sa_batch_guided(
     push_prob_t = jnp.asarray(push_prob, dtype=initial_poses.dtype)
     push_scale_t = jnp.asarray(push_scale, dtype=initial_poses.dtype)
     push_square_prob_t = jnp.asarray(push_square_prob, dtype=initial_poses.dtype)
+
+    compact_prob_t = jnp.asarray(compact_prob, dtype=initial_poses.dtype)
+    compact_scale_t = jnp.asarray(compact_scale, dtype=initial_poses.dtype)
+    compact_square_prob_t = jnp.asarray(compact_square_prob, dtype=initial_poses.dtype)
+
+    teleport_prob_t = jnp.asarray(teleport_prob, dtype=initial_poses.dtype)
+    teleport_anchor_beta_t = jnp.asarray(teleport_anchor_beta, dtype=initial_poses.dtype)
+    teleport_ring_mult_t = jnp.asarray(teleport_ring_mult, dtype=initial_poses.dtype)
+    teleport_jitter_t = jnp.asarray(teleport_jitter, dtype=initial_poses.dtype)
 
     adapt_sigma_t = jnp.asarray(adapt_sigma, dtype=bool)
     accept_target_t = jnp.asarray(accept_target, dtype=initial_poses.dtype)
@@ -1272,7 +1445,25 @@ def run_sa_batch_guided(
         batch_idx = jnp.arange(batch_size)
 
         # --- Heuristic proposal (baseline random SA move)
-        key, subkey_select, subkey_k, subkey_k2, subkey_swap, subkey_rot_choice, subkey_trans, subkey_rot, subkey_gate, subkey_push, subkey_push_axis = jax.random.split(key, 11)
+        (
+            key,
+            subkey_select,
+            subkey_k,
+            subkey_k2,
+            subkey_swap,
+            subkey_rot_choice,
+            subkey_trans,
+            subkey_rot,
+            subkey_gate,
+            subkey_push,
+            subkey_push_axis,
+            subkey_compact,
+            subkey_compact_axis,
+            subkey_teleport,
+            subkey_teleport_anchor,
+            subkey_teleport_phi,
+            subkey_teleport_noise,
+        ) = jax.random.split(key, 17)
         k_rand = jax.random.randint(subkey_k, (batch_size,), 0, n_trees)
         swap_choice = jax.random.uniform(subkey_swap, (batch_size,))
         if n_trees > 1:
@@ -1286,29 +1477,29 @@ def run_sa_batch_guided(
         trans_scale = trans_sigma_dyn * temp_eff
         rot_scale = rot_sigma_dyn * temp_eff
 
-        if proposal in {"bbox", "bbox_inward", "inward", "smart", "mixed"}:
-            keys_pick = jax.random.split(subkey_select, batch_size)
-            k_smart, centers, use_x = jax.vmap(_select_bbox_inward)(keys_pick, bboxes)
-            xy_k = poses[batch_idx, k_smart, 0:2]
-            direction = centers - xy_k
-            axis_direction = jnp.where(use_x[:, None], jnp.stack([direction[:, 0], jnp.zeros_like(direction[:, 0])], axis=1), jnp.stack([jnp.zeros_like(direction[:, 1]), direction[:, 1]], axis=1))
-            norm = jnp.linalg.norm(axis_direction, axis=1, keepdims=True)
-            unit = axis_direction / (norm + 1e-12)
-            drift = unit * (trans_scale[:, None] * jnp.asarray(smart_drift, dtype=poses.dtype))
-            noise = eps_xy * (trans_scale[:, None] * jnp.asarray(smart_noise, dtype=poses.dtype))
-            dxy_smart = drift + noise
-        else:
-            k_smart = k_rand
-            dxy_smart = eps_xy * trans_scale[:, None]
+        keys_pick = jax.random.split(subkey_select, batch_size)
+        k_boundary, pack_center, use_x = jax.vmap(_select_bbox_inward)(keys_pick, bboxes)
+        xy_k = poses[batch_idx, k_boundary, 0:2]
+        direction = pack_center - xy_k
+        axis_direction = jnp.where(
+            use_x[:, None],
+            jnp.stack([direction[:, 0], jnp.zeros_like(direction[:, 0])], axis=1),
+            jnp.stack([jnp.zeros_like(direction[:, 1]), direction[:, 1]], axis=1),
+        )
+        norm = jnp.linalg.norm(axis_direction, axis=1, keepdims=True)
+        unit_axis = axis_direction / (norm + 1e-12)
+        drift = unit_axis * (trans_scale[:, None] * jnp.asarray(smart_drift, dtype=poses.dtype))
+        noise = eps_xy * (trans_scale[:, None] * jnp.asarray(smart_noise, dtype=poses.dtype))
+        dxy_smart = drift + noise
 
         dxy_rand = eps_xy * trans_scale[:, None]
 
         if proposal in {"bbox", "bbox_inward", "inward", "smart"}:
-            k_h = k_smart
+            k_h = k_boundary
             dxy_h = dxy_smart
         elif proposal == "mixed":
             gate = jax.random.uniform(subkey_gate, (batch_size,)) < jnp.asarray(smart_prob, dtype=poses.dtype)
-            k_h = jnp.where(gate, k_smart, k_rand)
+            k_h = jnp.where(gate, k_boundary, k_rand)
             dxy_h = jnp.where(gate[:, None], dxy_smart, dxy_rand)
         else:
             k_h = k_rand
@@ -1343,6 +1534,30 @@ def run_sa_batch_guided(
         delta_push = jnp.concatenate([push_step, jnp.zeros((batch_size, 1), dtype=poses.dtype)], axis=1)
         delta_h = jnp.where(do_push[:, None], delta_push, delta_h)
 
+        # Compact move (heuristic branch): boundary tree toward center.
+        compact_prob_final = jnp.where(compact_prob_end >= 0.0, compact_prob_end, compact_prob_t)
+        current_compact_prob = compact_prob_t + (compact_prob_final - compact_prob_t) * anneal
+        current_compact_prob = jnp.clip(current_compact_prob, 0.0, 1.0)
+        compact_choice = jax.random.uniform(subkey_compact, (batch_size,))
+        do_compact = (compact_choice < current_compact_prob) & (~do_swap) & (~do_push) & (~rot_mask)
+
+        xy_comp = poses[batch_idx, k_boundary, 0:2]
+        dir_comp = pack_center - xy_comp
+        norm_comp = jnp.linalg.norm(dir_comp, axis=1, keepdims=True)
+        unit_comp = dir_comp / (norm_comp + 1e-12)
+        axis_comp = jnp.where(
+            use_x[:, None],
+            jnp.stack([jnp.sign(dir_comp[:, 0]), jnp.zeros_like(dir_comp[:, 0])], axis=1),
+            jnp.stack([jnp.zeros_like(dir_comp[:, 1]), jnp.sign(dir_comp[:, 1])], axis=1),
+        )
+        compact_axis_choice = jax.random.uniform(subkey_compact_axis, (batch_size,))
+        compact_dir = jnp.where(compact_axis_choice[:, None] < compact_square_prob_t, axis_comp, unit_comp)
+        compact_step = compact_dir * (trans_scale * compact_scale_t)[:, None]
+
+        k_h = jnp.where(do_compact, k_boundary, k_h)
+        delta_compact = jnp.concatenate([compact_step, jnp.zeros((batch_size, 1), dtype=poses.dtype)], axis=1)
+        delta_h = jnp.where(do_compact[:, None], delta_compact, delta_h)
+
         # --- Policy proposal
         logits_b, mean_b = jax.vmap(lambda p: policy_apply(policy_params, p, policy_config))(poses)
         probs_b = jax.nn.softmax(logits_b, axis=1)
@@ -1368,6 +1583,86 @@ def run_sa_batch_guided(
 
         candidate_poses_single = poses.at[batch_idx, k].add(delta)
         candidate_poses_single = candidate_poses_single.at[:, :, 2].set(jnp.mod(candidate_poses_single[:, :, 2], 360.0))
+
+        # Teleport move (global override): boundary tree into pocket near an interior anchor.
+        teleport_prob_final = jnp.where(teleport_prob_end >= 0.0, teleport_prob_end, teleport_prob_t)
+        current_teleport_prob = teleport_prob_t + (teleport_prob_final - teleport_prob_t) * anneal
+        current_teleport_prob = jnp.clip(current_teleport_prob, 0.0, 1.0)
+        teleport_choice = jax.random.uniform(subkey_teleport, (batch_size,))
+        do_teleport = (teleport_choice < current_teleport_prob) & (~do_swap)
+
+        centers_all = poses[:, :, 0:2]
+        d_to_center = centers_all - pack_center[:, None, :]
+        dist2 = jnp.sum(d_to_center * d_to_center, axis=2)
+        dist = jnp.sqrt(dist2 + 1e-12)
+        min_x = jnp.min(bboxes[:, :, 0], axis=1)
+        min_y = jnp.min(bboxes[:, :, 1], axis=1)
+        max_x = jnp.max(bboxes[:, :, 2], axis=1)
+        max_y = jnp.max(bboxes[:, :, 3], axis=1)
+        side = jnp.maximum(max_x - min_x, max_y - min_y)
+        dist_norm = dist / (side[:, None] + 1e-6)
+        logits_anchor = -dist_norm * teleport_anchor_beta_t
+        keys_anchor = jax.random.split(subkey_teleport_anchor, batch_size)
+        anchor_idx = jax.vmap(lambda kk, logit: jax.random.categorical(kk, logit))(keys_anchor, logits_anchor)
+        anchor_xy = poses[batch_idx, anchor_idx, 0:2]
+
+        phi_tries = jax.random.uniform(
+            subkey_teleport_phi,
+            (teleport_tries, batch_size),
+            minval=0.0,
+            maxval=2.0 * math.pi,
+        )
+        noise_tries = jax.random.normal(subkey_teleport_noise, (teleport_tries, batch_size, 2))
+        ring_r = (2.0 * radius) * teleport_ring_mult_t
+        jitter = noise_tries * (radius * teleport_jitter_t)
+
+        def _attempt_teleport(_: None) -> tuple[jax.Array, jax.Array]:
+            found0 = (~do_teleport).astype(bool)
+            pose0 = poses[batch_idx, k_boundary]
+
+            def body_fn(t: int, carry: tuple[jax.Array, jax.Array]) -> tuple[jax.Array, jax.Array]:
+                found, pose_sel = carry
+                phi = phi_tries[t]
+                unit = jnp.stack([jnp.cos(phi), jnp.sin(phi)], axis=1)
+                cand_xy = anchor_xy + ring_r * unit + jitter[t]
+                cand_pose = pose_sel.at[:, 0:2].set(cand_xy)
+
+                pose_k = cand_pose
+                new_bbox_k_padded = jax.vmap(lambda p: _aabb_for_pose(p, padded=True))(pose_k)
+                cand_bboxes_padded = bboxes_padded.at[batch_idx, k_boundary].set(new_bbox_k_padded)
+                new_cell_k = jax.vmap(_cells_for_xy)(pose_k[:, 0:2])
+                cand_cells = cells.at[batch_idx, k_boundary].set(new_cell_k)
+                cand_poses = poses.at[batch_idx, k_boundary].set(pose_k)
+
+                do_test = do_teleport & (~found)
+
+                def _check_one(p, bbp, cc, idx, test):
+                    return jax.lax.cond(
+                        test,
+                        lambda: _check_collision_for_index_cached(p, bbp, cc, idx),
+                        lambda: jnp.array(True),
+                    )
+
+                coll = jax.vmap(_check_one)(cand_poses, cand_bboxes_padded, cand_cells, k_boundary, do_test)
+                ok = (~coll) & do_test
+                pose_sel = jnp.where(ok[:, None], cand_pose, pose_sel)
+                found = found | ok
+                return found, pose_sel
+
+            found, pose_sel = jax.lax.fori_loop(0, teleport_tries, body_fn, (found0, pose0))
+            success = do_teleport & found
+            return success, pose_sel
+
+        teleport_success, teleport_pose_k = jax.lax.cond(
+            jnp.any(do_teleport),
+            _attempt_teleport,
+            lambda _: (jnp.zeros((batch_size,), dtype=bool), poses[batch_idx, k_boundary]),
+            operand=None,
+        )
+        candidate_poses_teleport = poses.at[batch_idx, k_boundary].set(teleport_pose_k)
+        candidate_poses_single = jnp.where(teleport_success[:, None, None], candidate_poses_teleport, candidate_poses_single)
+        k = jnp.where(teleport_success, k_boundary, k)
+        rot_mask = rot_mask & (~teleport_success)
 
         # Swap move (useful for objective='prefix'): permutes the order without changing geometry.
         k1 = k_rand

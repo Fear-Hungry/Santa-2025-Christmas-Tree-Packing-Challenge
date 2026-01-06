@@ -31,6 +31,10 @@
 /submission*.csv
 /submissions/
 
+# Kaggle API token (never commit)
+kaggle.json
+.kaggle/
+
 # PDFs / docs (large assets)
 /Desafio Kaggle Santa 2025.pdf
 

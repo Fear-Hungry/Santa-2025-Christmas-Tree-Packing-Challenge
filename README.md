@@ -22,10 +22,9 @@
 
 ## Status atual do projeto (laboratorio)
 
-* **Score local atual (fonte: `santa_packing/cli/score_submission.py`):** `86.8115042186`
-  * **Arquivo:** `submission.csv` (baseline atual).
-  * Observacao: score acima foi calculado em modo rapido (`--no-overlap`). Para evitar perder submission por overlap, trate como regra: **gerou submission → valida strict (com overlap check)**.
-* **Pipeline atual:** versao Python/JAX com geracao via `santa_packing/cli/generate_submission.py` e registro de experimentos em `runs/`.
+* **Importante:** este repo e um **baseline/laboratorio**, nao uma “solucao final”. Ele ja tem blocos de estrategia (lattice, SA, vizinhanca, LNS/GA/hill-climb, ensembling), mas o ganho real vem de **tunar parametros + multi-start + mother-prefix + selecao por n**.
+* **Score local:** rode `python -m santa_packing.cli.score_submission submission.csv --pretty` (use `--no-overlap` so para estimativa rapida; para submeter, valide com overlap).
+* **Pipeline atual:** geracao via `santa_packing/cli/generate_submission.py` e registro de experimentos em `runs/`.
   * **Multi-start/ensemble:** `santa_packing/cli/sweep_ensemble.py` (selecao por instancia/`n`).
 
 ## O que “da score alto” aqui (na pratica)
@@ -86,6 +85,12 @@ Movimentos tipicos:
   * melhora `s_n` (ou melhora um custo suavizado)
   * ou aceita por temperatura (SA)
 
+**Neste repo, o SA ja suporta "vizinhanca" (movimentos estruturados):**
+* **swap**: permuta duas arvores (util quando `objective=prefix`/mother-prefix).
+* **teleport**: move uma arvore da borda para um "pocket" perto de uma ancora no interior.
+* **compact/push**: passos tipo greedy que empurram arvores em direcao ao centro (reduz o bbox mais rapido).
+* Atalho: no gerador, use `--sa-proposal mixed --sa-neighborhood` (e, para mother-prefix, combine com `--sa-objective prefix` + `--sa-swap-prob ...`).
+
 **Custo recomendado para SA:**
 Se voce otimizar diretamente `s_n` (max de extents) pode ser “nao suave”. Uma alternativa e usar um custo com penalidade:
 
@@ -141,7 +146,7 @@ sub.to_csv("submission.csv", index=False)
 ## Se voce quer top 5%: o plano “curto” e eficaz
 
 1. Pegar um baseline publico (tiling/greedy) e **rodar local score** (garantir que voce consegue submeter sem erro).
-2. Implementar **SA com vizinhanca** + multi-start so para `N=200`.
+2. Rodar **SA com vizinhanca** + multi-start so para `N=200` (use `--sa-neighborhood` / `--refine-neighborhood`).
 3. Definir uma boa **ordem de inclusao** (centro → borda) e gerar todos `n` por recorte.
 4. Rodar varias seeds e fazer **selecao por `n`** (ensemble por instancia). ([Kaggle][6])
 
@@ -160,7 +165,7 @@ Cole aqui:
 
 ## Implementacao base neste repositorio (Python/JAX)
 
-Este repo usa **Python/JAX** como base do solver, substituindo a base C++ anterior.
+Este repo usa **Python (NumPy)** e tem um solver acelerado em **JAX** (opcional), substituindo a base C++ anterior.
 
 ### Setup
 
@@ -174,7 +179,15 @@ Requer **Python 3.12+** (este repo fixa `3.12.3` em `.python-version`). Se prefe
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
+
+# Recomendado (JAX habilita SA/L2O):
 python -m pip install -U -e ".[train,notebooks]"
+
+# Alternativas:
+# - Minimo (so NumPy; roda lattice/pos-opt, mas sem SA/L2O):
+#   python -m pip install -U -e .
+# - Com JAX (sem notebooks):
+#   python -m pip install -U -e ".[train]"
 
 # Opcional (acelera `polygons_intersect` no score local):
 python scripts/build/build_fastcollide.py
@@ -192,7 +205,7 @@ Notebook recomendado (1 clique: gerar + score + log):
 ### Estrutura de codigo
 
 * `santa_packing/`: pacote principal (geometria, colisao, SA/L2O, scorer, etc.).
-  * `santa_packing/main.py`: runner do SA batch (gera `best_packing.png`; exemplo em `assets/best_packing.png`).
+  * `santa_packing/main.py`: runner do SA batch (requer JAX; gera `best_packing.png`; exemplo em `assets/best_packing.png`).
   * `santa_packing/cli/`: CLIs oficiais (`generate_submission`, `score_submission`, `make_submit`, `sweep_ensemble`, treino, etc.).
 * `scripts/build/`: build/compilacao (ex.: `scripts/build/build_fastcollide.py`).
 * `scripts/submission/` e `scripts/evaluation/`: shims/wrappers (delegam para `python -m santa_packing.cli...`).
@@ -219,16 +232,17 @@ make submit NAME=baseline
 Rodar SA isolado (uma instancia):
 
 ```bash
-python3 -m santa_packing.main --n_trees 25 --batch_size 128 --n_steps 1000 --rot_prob 0.3 --objective packing
+python3 -m santa_packing.main --n_trees 25 --batch_size 128 --n_steps 1000 --rot_prob 0.3 --proposal mixed --neighborhood --objective packing
 ```
 
 Notas (qualidade sem custo grande):
 * O SA usa por padrao: **push-to-center** (move deterministico leve), **adaptacao de sigma** (alvo de aceitacao) e **reheating** (se estagnar). Veja flags em `santa_packing/main.py` (ex.: `--no-adapt-sigma`, `--push_prob`, `--reheat_patience`).
+* Para “SA com vizinhanca” (swap/teleport/compact), use `--neighborhood` no runner e `--sa-neighborhood`/`--refine-neighborhood` no gerador de submission.
 
 Gerar submission (hibrido SA + lattice):
 
 ```bash
-python -m santa_packing.cli.generate_submission --out submission.csv --nmax 200 --sa-nmax 30 --sa-steps 400 --sa-batch 64 --sa-objective packing
+python -m santa_packing.cli.generate_submission --out submission.csv --nmax 200 --sa-nmax 30 --sa-steps 400 --sa-batch 64 --sa-proposal mixed --sa-neighborhood --sa-objective packing
 ```
 
 Gerar + validar strict + arquivar (make submit; recomendado):

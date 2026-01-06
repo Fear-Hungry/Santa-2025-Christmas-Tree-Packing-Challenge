@@ -1,17 +1,6 @@
 {
   "generate": {
-    "mother_prefix": true,
-    "mother_reorder": "radial",
-    "sa_nmax": 50,
-    "sa_steps": 400,
-    "sa_batch": 64,
-    "sa_proposal": "mixed",
-    "sa_swap_prob": 0.02,
-    "lattice_pattern": "hex",
-    "lattice_rotate_mode": "ring",
-    "lattice_rotations": [0, 15, 30],
-    "lattice_post_nmax": 200,
-    "lattice_post_steps": 30
+    "from_submission": "runs/hunt70_from_submission/round_000/ensemble_safe_logs/_tmp_ensemble/step_0000.csv",
+    "overlap_mode": "strict"
   }
 }
-

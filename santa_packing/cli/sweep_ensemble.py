@@ -408,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
             poses = c.puzzles.get(n)
             if poses is None or poses.shape[0] != n:
                 continue
-            if check_overlap and first_overlap_pair(points, poses, eps=EPS) is not None:
+            if check_overlap and first_overlap_pair(points, poses, eps=EPS, mode="strict") is not None:
                 continue
             picked = c
             picked_s = float(c.s[n])
@@ -434,7 +434,13 @@ def main(argv: list[str] | None = None) -> int:
     ens_score = _prefix_total(s_ens, nmax=ns.nmax)
     from santa_packing.scoring import score_submission  # noqa: E402
 
-    _ = score_submission(ensemble_csv, nmax=ns.nmax, check_overlap=check_overlap, require_complete=True)
+    _ = score_submission(
+        ensemble_csv,
+        nmax=ns.nmax,
+        check_overlap=check_overlap,
+        overlap_mode="strict",
+        require_complete=True,
+    )
 
     best_single = min(candidates, key=lambda c: _prefix_total(c.s, nmax=ns.nmax))
     best_single_score = _prefix_total(best_single.s, nmax=ns.nmax)

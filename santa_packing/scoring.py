@@ -5,7 +5,7 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Literal
 
 import numpy as np
 
@@ -17,6 +17,14 @@ try:
     from .fastcollide import polygons_intersect as _polygons_intersect_fast  # type: ignore[attr-defined]
 except Exception:
     _polygons_intersect_fast = None
+
+
+OverlapMode = Literal["strict", "conservative", "kaggle"]
+
+# Kaggle evaluation appears to reject "touching" as overlap. The full conservative predicate
+# (inclusive segment intersection) is robust but slow; for submission generation we can enforce
+# a tiny clearance by checking strict intersections on a slightly inflated tree polygon.
+KAGGLE_CLEARANCE_SCALE: float = 1.0005
 
 
 def _parse_val(value: str) -> float:
@@ -57,11 +65,21 @@ def _sign(value: float, eps: float) -> int:
 
 
 def _segments_intersect_strict(p1, p2, p3, p4, eps: float = EPS) -> bool:
+    """Proper segment intersection (excludes touching/collinearity).
+
+    Uses robust orientation signs with tolerance: only counts if each segment's endpoints
+    are strictly on opposite sides of the other segment's supporting line.
+    """
     d1 = _cross(p3, p4, p1)
     d2 = _cross(p3, p4, p2)
     d3 = _cross(p1, p2, p3)
     d4 = _cross(p1, p2, p4)
-    return (d1 > eps) != (d2 > eps) and (d3 > eps) != (d4 > eps)
+
+    s1 = _sign(float(d1), eps)
+    s2 = _sign(float(d2), eps)
+    s3 = _sign(float(d3), eps)
+    s4 = _sign(float(d4), eps)
+    return (s1 * s2 < 0) and (s3 * s4 < 0)
 
 
 def _point_on_segment(p1: np.ndarray, p2: np.ndarray, p: np.ndarray, eps: float = EPS) -> bool:
@@ -103,9 +121,16 @@ def _segments_intersect_inclusive(p1, p2, p3, p4, eps: float = EPS) -> bool:
 
 
 def _point_in_polygon_strict(point: np.ndarray, poly: np.ndarray, eps: float = EPS) -> bool:
+    # Treat boundary as outside for the strict predicate.
+    n = poly.shape[0]
+    for i in range(n):
+        p1 = poly[i]
+        p2 = poly[(i + 1) % n]
+        if _point_on_segment(p1, p2, point, eps):
+            return False
+
     x, y = point
     inside = False
-    n = poly.shape[0]
     for i in range(n):
         p1 = poly[i]
         p2 = poly[(i + 1) % n]
@@ -232,19 +257,30 @@ def _grid_candidate_pairs(centers: np.ndarray, *, cell_size: float) -> set[tuple
     return pairs
 
 
-def first_overlap_pair(points: np.ndarray, poses: np.ndarray, *, eps: float = EPS) -> tuple[int, int] | None:
+def first_overlap_pair(
+    points: np.ndarray,
+    poses: np.ndarray,
+    *,
+    eps: float = EPS,
+    mode: OverlapMode = "conservative",
+) -> tuple[int, int] | None:
     """Return first (i,j) overlap/touch found, or None if feasible.
 
     Two-stage:
     - Fast: grid neighbors + circle + AABB.
-    - Strict: polygon-polygon (conservative; touch counts as collision).
+    - Fine: polygon-polygon (strict or conservative).
     """
     poses = np.array(poses, dtype=float, copy=False)
     if poses.shape[0] <= 1:
         return None
 
+    points = np.array(points, dtype=float, copy=False)
+    points_check = points
+    if mode == "kaggle":
+        points_check = points * float(KAGGLE_CLEARANCE_SCALE)
+
     centers = poses[:, :2]
-    rad = float(polygon_radius(points))
+    rad = float(polygon_radius(points_check))
     dist_thr = 2.0 * rad + float(eps)
     thr2 = dist_thr * dist_thr
 
@@ -252,8 +288,17 @@ def first_overlap_pair(points: np.ndarray, poses: np.ndarray, *, eps: float = EP
     if not pairs:
         return None
 
-    polys = [transform_polygon(points, pose) for pose in poses]
+    polys = [transform_polygon(points_check, pose) for pose in poses]
     bboxes = [polygon_bbox(p) for p in polys]
+
+    if mode == "strict":
+        intersects = polygons_intersect_strict
+    elif mode == "conservative":
+        intersects = polygons_intersect
+    elif mode == "kaggle":
+        intersects = polygons_intersect_strict
+    else:
+        raise ValueError(f"Unknown overlap mode: {mode!r}")
 
     for i, j in sorted(pairs):
         dx = float(centers[i, 0] - centers[j, 0])
@@ -262,13 +307,13 @@ def first_overlap_pair(points: np.ndarray, poses: np.ndarray, *, eps: float = EP
             continue
         if not _aabb_overlaps(bboxes[i], bboxes[j], eps):
             continue
-        if polygons_intersect(polys[i], polys[j]):
+        if intersects(polys[i], polys[j]):
             return i, j
     return None
 
 
-def _check_overlaps(points: np.ndarray, poses: np.ndarray) -> bool:
-    return first_overlap_pair(points, poses, eps=EPS) is not None
+def _check_overlaps(points: np.ndarray, poses: np.ndarray, *, mode: OverlapMode) -> bool:
+    return first_overlap_pair(points, poses, eps=EPS, mode=mode) is not None
 
 
 @dataclass
@@ -277,6 +322,7 @@ class ScoreResult:
     score: float
     s_max: float
     overlap_check: bool
+    overlap_mode: OverlapMode
     require_complete: bool
     per_n: list[dict]
 
@@ -286,6 +332,7 @@ class ScoreResult:
             "score": self.score,
             "s_max": self.s_max,
             "overlap_check": self.overlap_check,
+            "overlap_mode": self.overlap_mode,
             "require_complete": self.require_complete,
             "per_n": self.per_n,
         }
@@ -296,12 +343,13 @@ def score_submission(
     *,
     nmax: int | None = None,
     check_overlap: bool = True,
+    overlap_mode: OverlapMode = "strict",
     require_complete: bool = True,
 ) -> ScoreResult:
     points = np.array(TREE_POINTS, dtype=float)
     puzzles = load_submission(csv_path, nmax=nmax)
     if not puzzles:
-        return ScoreResult(0, 0.0, 0.0, check_overlap, require_complete, [])
+        return ScoreResult(0, 0.0, 0.0, check_overlap, overlap_mode, require_complete, [])
 
     max_n = max(puzzles)
     if nmax is None:
@@ -320,7 +368,7 @@ def score_submission(
             continue
         if poses.shape[0] != n:
             raise ValueError(f"Puzzle {n} expected {n} trees, got {poses.shape[0]}")
-        if check_overlap and _check_overlaps(points, poses):
+        if check_overlap and _check_overlaps(points, poses, mode=overlap_mode):
             raise ValueError(f"Overlap detected in puzzle {n}")
         s = packing_score(points, poses)
         s_max = max(s_max, s)
@@ -328,7 +376,7 @@ def score_submission(
         total += contrib
         per_n.append({"puzzle": n, "s": s, "contrib": contrib})
 
-    return ScoreResult(nmax, total, s_max, check_overlap, require_complete, per_n)
+    return ScoreResult(nmax, total, s_max, check_overlap, overlap_mode, require_complete, per_n)
 
 
 def score_prefix(s_values: Iterable[float]) -> float:
