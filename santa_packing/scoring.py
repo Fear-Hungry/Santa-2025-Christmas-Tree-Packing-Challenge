@@ -32,12 +32,11 @@ except Exception:
 
 OverlapMode = Literal["strict", "conservative", "kaggle"]
 
-# Kaggle evaluation appears to reject "touching" as overlap, so we treat it as conservative
-# collision detection (touching counts as collision).
+# Kaggle evaluation appears to allow *touching* (interiors must be disjoint).
 #
-# NOTE: Some public approaches inflate polygons; scaling a concave polygon about an interior
-# point is not guaranteed to be a superset, so we keep the robust predicate instead.
-KAGGLE_CLEARANCE_SCALE: float = 1.0005
+# Note: the optional `fastcollide` accelerator can produce false positives in near-touch
+# cases; strict validation defaults to the NumPy predicate below.
+KAGGLE_CLEARANCE_SCALE: float = 1.0005  # retained for optional clearance experiments
 
 
 def _parse_val(value: str) -> float:
@@ -243,8 +242,7 @@ def polygons_intersect_strict(poly1: np.ndarray, poly2: np.ndarray) -> bool:
     Returns:
         True if the polygons strictly intersect.
     """
-    if _polygons_intersect_fast is not None:
-        return bool(_polygons_intersect_fast(poly1, poly2))
+    # Prefer the robust NumPy predicate to avoid `fastcollide` false positives on touching.
     return _polygons_intersect_strict(poly1, poly2, EPS)
 
 

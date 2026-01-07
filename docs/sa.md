@@ -42,4 +42,4 @@ Dica: para *mother-prefix*, combine `--sa-objective prefix` + probabilidade de `
 ## Notas de estabilidade/qualidade
 
 * O SA inclui heurísticas como **push-to-center**, **adaptação de sigma** (alvo de aceitação) e **reheating** (quando estagna). Veja flags em `santa_packing/main.py`.
-* Para score local, você pode usar `--no-overlap` apenas para estimativa rápida; para submissão, valide com overlap.
+* Para score local, você pode usar `--no-overlap` apenas para estimativa rápida; para submissão, valide com `--overlap-mode strict` (touching permitido) e/ou `--overlap-mode conservative` (mais “safe”, porém menos denso).

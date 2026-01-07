@@ -10,6 +10,11 @@ Como o score oficial soma contribuições para `n=1..200`, um ensemble “por in
 
 `sweep_ensemble` carrega `configs/ensemble.json` por padrão (quando existir). Para trocar/ignorar: `--config ...` ou `--no-config`.
 
+Sobre overlap-check:
+
+* `--overlap-check selected` usa a checagem *strict* (não considera “touching” como overlap).
+* Se você quiser ser super conservador (menos denso, mas mais “safe”), valide depois com `python -m santa_packing.cli.score_submission ... --overlap-mode conservative`.
+
 ## Sweep + ensemble por instância
 
 Exemplo com receitas inline:

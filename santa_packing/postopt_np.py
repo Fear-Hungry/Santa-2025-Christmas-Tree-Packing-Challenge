@@ -16,7 +16,7 @@ from typing import Sequence
 import numpy as np
 
 from .geom_np import polygon_bbox, polygon_radius, shift_poses_to_origin, transform_polygon
-from .scoring import polygons_intersect
+from .scoring import polygons_intersect_strict as polygons_intersect
 
 
 def _packing_score_from_bboxes(bboxes: np.ndarray) -> float:
