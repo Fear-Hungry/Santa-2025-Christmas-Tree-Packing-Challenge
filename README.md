@@ -22,13 +22,19 @@ python -m santa_packing.cli.improve_submission submission.csv --out submission.c
 python -m santa_packing.cli.score_submission submission.csv --nmax 200 --overlap-mode strict --pretty
 ```
 
-Reprodução do melhor run local (atingiu `~72.999` com validação *strict*):
+Reprodução do melhor run local atual (atingiu `~72.816` com validação *strict*):
 
 ```bash
-python -m santa_packing.cli.improve_submission submission.csv --out submission.csv \
-  --smooth-window 60 --improve-n200 \
-  --n200-insert-seed 33 --n200-sa-seed 33 --n200-sa-steps 6000 --n200-sa-batch 32 \
-  --overlap-mode strict
+# Requer os binários C++ em `bin/` (compact_contact + post_opt).
+# Roda vários seeds, faz ensemble por n, aplica smoothing e post-opt.
+best_csv=$(python -m santa_packing.cli.hunt_compact_contact \
+  --base submission.csv \
+  --out-dir /tmp/hunt_cc \
+  --seeds 4000..4127 --jobs 16 \
+  --smooth-window 199 --post-opt)
+
+cp "$best_csv" submission.csv
+python -m santa_packing.cli.score_submission submission.csv --nmax 200 --overlap-mode strict --pretty
 ```
 
 ## Submissão no Kaggle (CLI)
