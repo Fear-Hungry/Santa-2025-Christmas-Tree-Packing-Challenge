@@ -16,11 +16,15 @@
       "rotations": [0, 15, 30]
     },
     "sa": {
-      "nmax": 200,
+      "nmax": 0
+    },
+    "refine": {
+      "nmin": 200,
       "batch": 64,
       "steps": 6000,
       "proposal": "mixed",
       "neighborhood": true,
+      "objective": "packing",
       "trans_sigma": 0.1,
       "rot_sigma": 8.0,
       "rot_prob": 0.15,
