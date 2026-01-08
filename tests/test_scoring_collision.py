@@ -1,6 +1,8 @@
 import numpy as np
 
-from santa_packing.scoring import polygons_intersect, polygons_intersect_strict
+from santa_packing.geom_np import transform_polygon
+from santa_packing.scoring import first_overlap_pair, polygons_intersect, polygons_intersect_strict
+from santa_packing.tree_data import TREE_POINTS
 
 SQUARE = np.array(
     [
@@ -31,3 +33,27 @@ def test_separated() -> None:
     b = SQUARE + np.array([2.0, 0.0], dtype=float)
     assert not polygons_intersect_strict(a, b)
     assert not polygons_intersect(a, b)
+
+
+def test_kaggle_mode_has_no_false_negative_from_scaling() -> None:
+    points = np.array(TREE_POINTS, dtype=float)
+    poses = np.array(
+        [
+            [0.0, 0.0, 304.29219185],
+            [-0.26471355, 0.76206731, 176.13282888],
+        ],
+        dtype=float,
+    )
+
+    assert first_overlap_pair(points, poses, mode="strict") == (0, 1)
+    assert first_overlap_pair(points, poses, mode="kaggle") == (0, 1)
+
+    # Uniformly scaling the *local* polygon about the origin is not a valid way to
+    # model "clearance" for concave polygons: it can remove intersections.
+    scaled = points * 1.0005
+    a = transform_polygon(points, poses[0])
+    b = transform_polygon(points, poses[1])
+    a_scaled = transform_polygon(scaled, poses[0])
+    b_scaled = transform_polygon(scaled, poses[1])
+    assert polygons_intersect_strict(a, b)
+    assert not polygons_intersect_strict(a_scaled, b_scaled)

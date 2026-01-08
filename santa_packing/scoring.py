@@ -32,11 +32,10 @@ except Exception:
 
 OverlapMode = Literal["strict", "conservative", "kaggle"]
 
-# Kaggle overlap validity is stricter than the repo's default "strict" predicate in
-# some cases (likely due to tolerance/rounding). We model this with an optional
-# "clearance" mode that slightly inflates the tree polygon during intersection
-# checks (score is still computed on the original polygon).
-KAGGLE_CLEARANCE_SCALE: float = 1.0005
+# Some evaluators (including Kaggle kernels) are sensitive to nearly-touching
+# placements due to tolerance/rounding. We model this as a tiny clearance margin
+# used only in `OverlapMode="kaggle"` checks.
+KAGGLE_CLEARANCE: float = 1e-6
 
 
 def _parse_val(value: str) -> float:
@@ -290,6 +289,59 @@ def _grid_candidate_pairs(centers: np.ndarray, *, cell_size: float) -> set[tuple
     return pairs
 
 
+def _point_segment_distance_sq(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
+    ab = b - a
+    denom = float(ab[0] * ab[0] + ab[1] * ab[1])
+    if denom <= 0.0:
+        dx = float(p[0] - a[0])
+        dy = float(p[1] - a[1])
+        return dx * dx + dy * dy
+    ap = p - a
+    t = float((ap[0] * ab[0] + ap[1] * ab[1]) / denom)
+    if t <= 0.0:
+        dx = float(p[0] - a[0])
+        dy = float(p[1] - a[1])
+        return dx * dx + dy * dy
+    if t >= 1.0:
+        dx = float(p[0] - b[0])
+        dy = float(p[1] - b[1])
+        return dx * dx + dy * dy
+    proj = a + t * ab
+    dx = float(p[0] - proj[0])
+    dy = float(p[1] - proj[1])
+    return dx * dx + dy * dy
+
+
+def polygons_min_distance_sq(poly1: np.ndarray, poly2: np.ndarray) -> float:
+    """Return squared minimum distance between polygon boundaries.
+
+    This is used to implement a small clearance margin for `OverlapMode="kaggle"`.
+    For feasibility checks we only need a conservative bound, so we compute the
+    minimum over endpoint-to-segment distances (sufficient in 2D for segments).
+    """
+    poly1 = np.array(poly1, dtype=float, copy=False)
+    poly2 = np.array(poly2, dtype=float, copy=False)
+    n1 = int(poly1.shape[0])
+    n2 = int(poly2.shape[0])
+    if n1 <= 0 or n2 <= 0:
+        return float("inf")
+
+    best = float("inf")
+    for i in range(n1):
+        a1 = poly1[i]
+        a2 = poly1[(i + 1) % n1]
+        for j in range(n2):
+            b1 = poly2[j]
+            b2 = poly2[(j + 1) % n2]
+            best = min(best, _point_segment_distance_sq(a1, b1, b2))
+            best = min(best, _point_segment_distance_sq(a2, b1, b2))
+            best = min(best, _point_segment_distance_sq(b1, a1, a2))
+            best = min(best, _point_segment_distance_sq(b2, a1, a2))
+            if best <= 0.0:
+                return 0.0
+    return float(best)
+
+
 def first_overlap_pair(
     points: np.ndarray,
     poses: np.ndarray,
@@ -308,13 +360,11 @@ def first_overlap_pair(
         return None
 
     points = np.array(points, dtype=float, copy=False)
-    if mode == "kaggle":
-        points_check = points * float(KAGGLE_CLEARANCE_SCALE)
-    else:
-        points_check = points
+    points_check = points
+    clearance = float(KAGGLE_CLEARANCE) if mode == "kaggle" else 0.0
 
     centers = poses[:, :2]
-    rad = float(polygon_radius(points_check))
+    rad = float(polygon_radius(points_check)) + clearance
     dist_thr = 2.0 * rad + float(eps)
     thr2 = dist_thr * dist_thr
 
@@ -328,8 +378,7 @@ def first_overlap_pair(
     if mode == "strict":
         intersects = polygons_intersect_strict
     elif mode in {"conservative", "kaggle"}:
-        # Treat touching as collision for robustness; in kaggle mode we also inflate
-        # the polygon via `points_check`.
+        # Treat touching as collision for robustness.
         intersects = polygons_intersect
     else:
         raise ValueError(f"Unknown overlap mode: {mode!r}")
@@ -339,10 +388,13 @@ def first_overlap_pair(
         dy = float(centers[i, 1] - centers[j, 1])
         if dx * dx + dy * dy > thr2:
             continue
-        if not _aabb_overlaps(bboxes[i], bboxes[j], eps):
+        if not _aabb_overlaps(bboxes[i], bboxes[j], float(eps) + clearance):
             continue
         if intersects(polys[i], polys[j]):
             return i, j
+        if clearance > 0.0:
+            if polygons_min_distance_sq(polys[i], polys[j]) <= clearance * clearance:
+                return i, j
     return None
 
 

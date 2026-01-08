@@ -18,8 +18,9 @@ import numpy as np
 from .constants import EPS
 from .geom_np import polygon_bbox, polygon_radius, shift_poses_to_origin, transform_polygon
 from .scoring import (
-    KAGGLE_CLEARANCE_SCALE,
+    KAGGLE_CLEARANCE,
     OverlapMode,
+    polygons_min_distance_sq,
     polygons_intersect as polygons_intersect_conservative,
     polygons_intersect_strict,
 )
@@ -47,7 +48,18 @@ def _intersects_for_mode(mode: OverlapMode):
     if mode == "strict":
         return polygons_intersect_strict
     if mode in {"conservative", "kaggle"}:
-        return polygons_intersect_conservative
+        if mode == "conservative" or float(KAGGLE_CLEARANCE) <= 0.0:
+            return polygons_intersect_conservative
+
+        clearance = float(KAGGLE_CLEARANCE)
+        clearance2 = clearance * clearance
+
+        def _intersects_kaggle(a: np.ndarray, b: np.ndarray) -> bool:
+            if polygons_intersect_conservative(a, b):
+                return True
+            return polygons_min_distance_sq(a, b) <= clearance2
+
+        return _intersects_kaggle
     raise ValueError(f"Unknown overlap mode: {mode!r}")
 
 
@@ -58,8 +70,10 @@ def _has_overlaps(points: np.ndarray, poses: np.ndarray, *, mode: OverlapMode) -
     intersects = _intersects_for_mode(mode)
 
     centers = poses[:, :2]
-    rad = float(polygon_radius(points))
-    thr2 = (2.0 * rad) ** 2
+    clearance = float(KAGGLE_CLEARANCE) if mode == "kaggle" else 0.0
+    rad = float(polygon_radius(points)) + clearance
+    dist_thr = 2.0 * rad + float(EPS)
+    thr2 = dist_thr * dist_thr
 
     polys = [transform_polygon(points, pose) for pose in poses]
     n = poses.shape[0]
@@ -113,9 +127,6 @@ def repair_overlaps(
         Repaired poses (shifted to origin) if feasible, otherwise None.
     """
     rng = np.random.default_rng(int(seed))
-    if overlap_mode == "kaggle":
-        # Enforce a small clearance by inflating the polygon during repair.
-        points = np.array(points, dtype=float, copy=False) * float(KAGGLE_CLEARANCE_SCALE)
     return _repair_overlaps(
         points,
         poses,
@@ -143,7 +154,8 @@ def _build_state(points: np.ndarray, poses: np.ndarray) -> _PackingState:
     bboxes = np.stack([polygon_bbox(p) for p in polys], axis=0)
     score = _packing_score_from_bboxes(bboxes)
     rad = float(polygon_radius(points))
-    thr2 = (2.0 * rad) ** 2
+    dist_thr = 2.0 * rad + float(EPS)
+    thr2 = dist_thr * dist_thr
     return _PackingState(
         poses=poses,
         centers=poses[:, :2].copy(),
@@ -156,6 +168,11 @@ def _build_state(points: np.ndarray, poses: np.ndarray) -> _PackingState:
 
 def _state_has_overlaps(state: _PackingState, *, overlap_mode: OverlapMode) -> bool:
     intersects = _intersects_for_mode(overlap_mode)
+    clearance = float(KAGGLE_CLEARANCE) if overlap_mode == "kaggle" else 0.0
+    thr2 = state.thr2
+    if clearance > 0.0:
+        thr = math.sqrt(float(state.thr2))
+        thr2 = (thr + 2.0 * clearance) ** 2
     n = state.poses.shape[0]
     if n <= 1:
         return False
@@ -163,7 +180,7 @@ def _state_has_overlaps(state: _PackingState, *, overlap_mode: OverlapMode) -> b
         for j in range(i + 1, n):
             dx = float(state.centers[i, 0] - state.centers[j, 0])
             dy = float(state.centers[i, 1] - state.centers[j, 1])
-            if dx * dx + dy * dy > state.thr2:
+            if dx * dx + dy * dy > thr2:
                 continue
             if intersects(state.polys[i], state.polys[j]):
                 return True
@@ -180,15 +197,20 @@ def _collides_one_vs_all(
 ) -> bool:
     intersects = _intersects_for_mode(overlap_mode)
     cand_bbox = polygon_bbox(cand_poly)
+    clearance = float(KAGGLE_CLEARANCE) if overlap_mode == "kaggle" else 0.0
+    thr2 = state.thr2
+    if clearance > 0.0:
+        thr = math.sqrt(float(state.thr2))
+        thr2 = (thr + 2.0 * clearance) ** 2
     n = state.poses.shape[0]
     for j in range(n):
         if j == idx:
             continue
         dx = float(cand_center[0] - state.centers[j, 0])
         dy = float(cand_center[1] - state.centers[j, 1])
-        if dx * dx + dy * dy > state.thr2:
+        if dx * dx + dy * dy > thr2:
             continue
-        if not _aabb_overlaps(cand_bbox, state.bboxes[j], eps=EPS):
+        if not _aabb_overlaps(cand_bbox, state.bboxes[j], eps=float(EPS) + clearance):
             continue
         if intersects(cand_poly, state.polys[j]):
             return True
@@ -794,13 +816,18 @@ def _collides_candidate(
 ) -> bool:
     intersects = _intersects_for_mode(overlap_mode)
     cand_bbox = polygon_bbox(cand_poly)
+    clearance = float(KAGGLE_CLEARANCE) if overlap_mode == "kaggle" else 0.0
+    thr2 = state.thr2
+    if clearance > 0.0:
+        thr = math.sqrt(float(state.thr2))
+        thr2 = (thr + 2.0 * clearance) ** 2
     n = state.centers.shape[0]
     for j in range(n):
         dx = float(cand_center[0] - state.centers[j, 0])
         dy = float(cand_center[1] - state.centers[j, 1])
-        if dx * dx + dy * dy > state.thr2:
+        if dx * dx + dy * dy > thr2:
             continue
-        if not _aabb_overlaps(cand_bbox, state.bboxes[j], eps=EPS):
+        if not _aabb_overlaps(cand_bbox, state.bboxes[j], eps=float(EPS) + clearance):
             continue
         if intersects(cand_poly, state.polys[j]):
             return True
@@ -817,15 +844,20 @@ def _collides_candidate_excluding(
 ) -> bool:
     intersects = _intersects_for_mode(overlap_mode)
     cand_bbox = polygon_bbox(cand_poly)
+    clearance = float(KAGGLE_CLEARANCE) if overlap_mode == "kaggle" else 0.0
+    thr2 = state.thr2
+    if clearance > 0.0:
+        thr = math.sqrt(float(state.thr2))
+        thr2 = (thr + 2.0 * clearance) ** 2
     n = state.centers.shape[0]
     for j in range(n):
         if bool(exclude[j]):
             continue
         dx = float(cand_center[0] - state.centers[j, 0])
         dy = float(cand_center[1] - state.centers[j, 1])
-        if dx * dx + dy * dy > state.thr2:
+        if dx * dx + dy * dy > thr2:
             continue
-        if not _aabb_overlaps(cand_bbox, state.bboxes[j], eps=EPS):
+        if not _aabb_overlaps(cand_bbox, state.bboxes[j], eps=float(EPS) + clearance):
             continue
         if intersects(cand_poly, state.polys[j]):
             return True
