@@ -15,8 +15,9 @@ from typing import Sequence
 
 import numpy as np
 
+from .constants import EPS
 from .geom_np import polygon_bbox, polygon_radius, shift_poses_to_origin, transform_polygon
-from .scoring import polygons_intersect_strict as polygons_intersect
+from .scoring import OverlapMode, polygons_intersect as polygons_intersect_conservative, polygons_intersect_strict
 
 
 def _packing_score_from_bboxes(bboxes: np.ndarray) -> float:
@@ -27,10 +28,19 @@ def _packing_score_from_bboxes(bboxes: np.ndarray) -> float:
     return float(max(max_x - min_x, max_y - min_y))
 
 
-def _has_overlaps(points: np.ndarray, poses: np.ndarray) -> bool:
+def _intersects_for_mode(mode: OverlapMode):
+    if mode == "strict":
+        return polygons_intersect_strict
+    if mode in {"conservative", "kaggle"}:
+        return polygons_intersect_conservative
+    raise ValueError(f"Unknown overlap mode: {mode!r}")
+
+
+def _has_overlaps(points: np.ndarray, poses: np.ndarray, *, mode: OverlapMode) -> bool:
     poses = np.array(poses, dtype=float, copy=False)
     if poses.shape[0] <= 1:
         return False
+    intersects = _intersects_for_mode(mode)
 
     centers = poses[:, :2]
     rad = float(polygon_radius(points))
@@ -44,22 +54,23 @@ def _has_overlaps(points: np.ndarray, poses: np.ndarray) -> bool:
             dy = float(centers[i, 1] - centers[j, 1])
             if dx * dx + dy * dy > thr2:
                 continue
-            if polygons_intersect(polys[i], polys[j]):
+            if intersects(polys[i], polys[j]):
                 return True
     return False
 
 
-def has_overlaps(points: np.ndarray, poses: np.ndarray) -> bool:
+def has_overlaps(points: np.ndarray, poses: np.ndarray, *, overlap_mode: OverlapMode = "strict") -> bool:
     """Return True if any pair of polygons overlaps (NumPy predicate).
 
     Args:
         points: Local polygon vertices `(V, 2)`.
         poses: Poses `(N, 3)` as `[x, y, theta_deg]`.
+        overlap_mode: Overlap predicate (`strict` allows touching; `conservative` counts touching).
 
     Returns:
         True if any overlap is detected.
     """
-    return _has_overlaps(points, poses)
+    return _has_overlaps(points, poses, mode=overlap_mode)
 
 
 def repair_overlaps(
@@ -70,6 +81,7 @@ def repair_overlaps(
     max_iters: int = 2000,
     step_xy: float = 0.01,
     step_deg: float = 0.0,
+    overlap_mode: OverlapMode = "strict",
 ) -> np.ndarray | None:
     """Best-effort repair for colliding packings (translation nudges).
 
@@ -80,6 +92,7 @@ def repair_overlaps(
         max_iters: Repair iteration budget.
         step_xy: Translation step size.
         step_deg: Rotation step size (0 disables rotation during repair).
+        overlap_mode: Overlap predicate (`strict` allows touching; `conservative` counts touching).
 
     Returns:
         Repaired poses (shifted to origin) if feasible, otherwise None.
@@ -92,6 +105,7 @@ def repair_overlaps(
         max_iters=int(max_iters),
         step_xy=float(step_xy),
         step_deg=float(step_deg),
+        overlap_mode=overlap_mode,
     )
 
 
@@ -122,7 +136,8 @@ def _build_state(points: np.ndarray, poses: np.ndarray) -> _PackingState:
     )
 
 
-def _state_has_overlaps(state: _PackingState) -> bool:
+def _state_has_overlaps(state: _PackingState, *, overlap_mode: OverlapMode) -> bool:
+    intersects = _intersects_for_mode(overlap_mode)
     n = state.poses.shape[0]
     if n <= 1:
         return False
@@ -132,12 +147,20 @@ def _state_has_overlaps(state: _PackingState) -> bool:
             dy = float(state.centers[i, 1] - state.centers[j, 1])
             if dx * dx + dy * dy > state.thr2:
                 continue
-            if polygons_intersect(state.polys[i], state.polys[j]):
+            if intersects(state.polys[i], state.polys[j]):
                 return True
     return False
 
 
-def _collides_one_vs_all(state: _PackingState, idx: int, cand_center: np.ndarray, cand_poly: np.ndarray) -> bool:
+def _collides_one_vs_all(
+    state: _PackingState,
+    idx: int,
+    cand_center: np.ndarray,
+    cand_poly: np.ndarray,
+    *,
+    overlap_mode: OverlapMode,
+) -> bool:
+    intersects = _intersects_for_mode(overlap_mode)
     n = state.poses.shape[0]
     for j in range(n):
         if j == idx:
@@ -146,7 +169,7 @@ def _collides_one_vs_all(state: _PackingState, idx: int, cand_center: np.ndarray
         dy = float(cand_center[1] - state.centers[j, 1])
         if dx * dx + dy * dy > state.thr2:
             continue
-        if polygons_intersect(cand_poly, state.polys[j]):
+        if intersects(cand_poly, state.polys[j]):
             return True
     return False
 
@@ -210,7 +233,7 @@ def hill_climb(
 
                 cand_poly = transform_polygon(points, cand_pose)
                 cand_center = cand_pose[:2]
-                if _collides_one_vs_all(state, idx, cand_center, cand_poly):
+                if _collides_one_vs_all(state, idx, cand_center, cand_poly, overlap_mode="strict"):
                     continue
 
                 cand_bbox = polygon_bbox(cand_poly)
@@ -325,7 +348,7 @@ def hill_climb_boundary(
 
                 cand_poly = transform_polygon(points, cand_pose)
                 cand_center = cand_pose[:2]
-                if _collides_one_vs_all(state, int(idx), cand_center, cand_poly):
+                if _collides_one_vs_all(state, int(idx), cand_center, cand_poly, overlap_mode="strict"):
                     continue
 
                 cand_bbox = polygon_bbox(cand_poly)
@@ -426,6 +449,7 @@ def _repair_overlaps(
     max_iters: int = 200,
     step_xy: float = 0.01,
     step_deg: float = 0.0,
+    overlap_mode: OverlapMode = "strict",
 ) -> np.ndarray | None:
     """Try to repair overlaps by nudging colliding trees apart."""
     state = _build_state(points, poses)
@@ -433,18 +457,52 @@ def _repair_overlaps(
     if n <= 1:
         return shift_poses_to_origin(points, state.poses)
 
+    intersects = _intersects_for_mode(overlap_mode)
+    dist_thr = 2.0 * float(polygon_radius(points)) + float(EPS)
+    thr2 = float(dist_thr * dist_thr)
+
+    def _aabb_overlaps(a: np.ndarray, b: np.ndarray) -> bool:
+        return not (
+            float(a[2]) < float(b[0]) - float(EPS)
+            or float(b[2]) < float(a[0]) - float(EPS)
+            or float(a[3]) < float(b[1]) - float(EPS)
+            or float(b[3]) < float(a[1]) - float(EPS)
+        )
+
+    def _grid_candidate_pairs(centers: np.ndarray, *, cell_size: float) -> list[tuple[int, int]]:
+        grid: dict[tuple[int, int], list[int]] = {}
+        inv = 1.0 / float(max(cell_size, 1e-12))
+        for idx, (x, y) in enumerate(centers):
+            gx = int(math.floor(float(x) * inv))
+            gy = int(math.floor(float(y) * inv))
+            grid.setdefault((gx, gy), []).append(int(idx))
+
+        pairs: set[tuple[int, int]] = set()
+        for (gx, gy), idxs in grid.items():
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    other = grid.get((gx + dx, gy + dy))
+                    if not other:
+                        continue
+                    for i in idxs:
+                        for j in other:
+                            if j <= i:
+                                continue
+                            pairs.add((i, j))
+        return sorted(pairs)
+
     for _ in range(max_iters):
         pair: tuple[int, int] | None = None
-        for i in range(n):
-            for j in range(i + 1, n):
-                dx = float(state.centers[i, 0] - state.centers[j, 0])
-                dy = float(state.centers[i, 1] - state.centers[j, 1])
-                if dx * dx + dy * dy > state.thr2:
-                    continue
-                if polygons_intersect(state.polys[i], state.polys[j]):
-                    pair = (i, j)
-                    break
-            if pair is not None:
+        cand_pairs = _grid_candidate_pairs(state.centers, cell_size=dist_thr)
+        for i, j in cand_pairs:
+            dx = float(state.centers[i, 0] - state.centers[j, 0])
+            dy = float(state.centers[i, 1] - state.centers[j, 1])
+            if dx * dx + dy * dy > thr2:
+                continue
+            if not _aabb_overlaps(state.bboxes[i], state.bboxes[j]):
+                continue
+            if intersects(state.polys[i], state.polys[j]):
+                pair = (i, j)
                 break
         if pair is None:
             return shift_poses_to_origin(points, state.poses)
@@ -470,7 +528,7 @@ def _repair_overlaps(
 
         cand_poly = transform_polygon(points, cand_pose)
         cand_center = cand_pose[:2]
-        if _collides_one_vs_all(state, move, cand_center, cand_poly):
+        if _collides_one_vs_all(state, move, cand_center, cand_poly, overlap_mode=overlap_mode):
             continue
 
         state.poses[move] = cand_pose
@@ -540,7 +598,7 @@ def genetic_optimize(
 
     def _eval(p: np.ndarray) -> float:
         state = _build_state(points, p)
-        if _state_has_overlaps(state):
+        if _state_has_overlaps(state, overlap_mode="strict"):
             return float("inf")
         return state.score
 
@@ -671,7 +729,7 @@ def _collides_candidate(state: _PackingState, cand_center: np.ndarray, cand_poly
         dy = float(cand_center[1] - state.centers[j, 1])
         if dx * dx + dy * dy > state.thr2:
             continue
-        if polygons_intersect(cand_poly, state.polys[j]):
+        if polygons_intersect_strict(cand_poly, state.polys[j]):
             return True
     return False
 
@@ -687,7 +745,7 @@ def _collides_candidate_excluding(
         dy = float(cand_center[1] - state.centers[j, 1])
         if dx * dx + dy * dy > state.thr2:
             continue
-        if polygons_intersect(cand_poly, state.polys[j]):
+        if polygons_intersect_strict(cand_poly, state.polys[j]):
             return True
     return False
 

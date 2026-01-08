@@ -80,10 +80,69 @@ def _finalize_puzzle(
     if pair is None:
         return poses
 
-    # --- Cheap detouch: expand away from centroid.
-    # Kaggle's evaluator appears to treat touching as overlap; uniform expansion often fixes
-    # contact-only collisions without expensive per-tree repairs. We try a small set of scales
-    # (few overlap checks), returning the first feasible candidate.
+    # --- Fast stochastic "detouch": tiny jitter often breaks exact-touch degeneracies
+    # without meaningfully affecting the score.
+    rng = np.random.default_rng(int(seed) + 991 * int(puzzle_n))
+    for attempt in range(6):
+        jitter_xy = 2e-6 * (2.0**attempt)
+        jitter_deg = 0.05 * (2.0**attempt)
+        candidate = np.array(poses, dtype=float, copy=True)
+        candidate[:, 0:2] += rng.normal(0.0, jitter_xy, size=(puzzle_n, 2))
+        candidate[:, 2] = np.mod(candidate[:, 2] + rng.normal(0.0, jitter_deg, size=(puzzle_n,)), 360.0)
+        try:
+            candidate = fit_xy_in_bounds(candidate)
+            candidate = quantize_for_submission(candidate)
+        except Exception:
+            continue
+        if first_overlap_pair(points, candidate, eps=EPS, mode=overlap_mode) is None:
+            return candidate
+
+    # --- Best-effort repair (small nudges first; escalate budgets before fallback).
+    # When `overlap_mode` counts touching as overlap, a per-tree nudge repair is much
+    # safer than global scaling (scaling can create new collisions for concave shapes).
+    step0 = max(1e-6, 10.0 * EPS)
+    for attempt in range(5):
+        repaired = repair_overlaps(
+            points,
+            poses,
+            seed=seed + 97 * attempt,
+            max_iters=400 + 400 * attempt,
+            step_xy=step0 * (2.0**attempt),
+            step_deg=0.0,
+            overlap_mode=overlap_mode,
+        )
+        if repaired is None:
+            continue
+        try:
+            repaired = fit_xy_in_bounds(repaired)
+            repaired = quantize_for_submission(repaired)
+        except Exception:
+            continue
+        if first_overlap_pair(points, repaired, eps=EPS, mode=overlap_mode) is None:
+            return repaired
+
+    # Second pass: allow tiny angle noise (helps when trees are "interlocked" by touch).
+    for attempt in range(3):
+        repaired = repair_overlaps(
+            points,
+            poses,
+            seed=seed + 997 * attempt,
+            max_iters=2000 + 1000 * attempt,
+            step_xy=step0 * (2.0 ** (attempt + 2)),
+            step_deg=0.1 * (2.0**attempt),
+            overlap_mode=overlap_mode,
+        )
+        if repaired is None:
+            continue
+        try:
+            repaired = fit_xy_in_bounds(repaired)
+            repaired = quantize_for_submission(repaired)
+        except Exception:
+            continue
+        if first_overlap_pair(points, repaired, eps=EPS, mode=overlap_mode) is None:
+            return repaired
+
+    # --- Cheap detouch: expand away from centroid (last resort).
     def _try_scale(scale: float) -> np.ndarray | None:
         candidate = _scale_about_center_xy(poses, scale)
         try:
@@ -95,6 +154,8 @@ def _finalize_puzzle(
             return candidate
         return None
 
+    # Keep the scale list conservative; large scales are score-destructive and can
+    # still fail to resolve some concave "interlock" touch cases.
     for scale in (
         1.0005,
         1.001,
@@ -110,69 +171,17 @@ def _finalize_puzzle(
         1.035,
         1.04,
         1.045,
-        # Some externally-generated packings can have small but widespread overlaps; a
-        # modest global detouch is vastly cheaper than per-tree repairs.
         1.05,
         1.06,
         1.07,
         1.08,
         1.09,
         1.10,
-        1.12,
-        1.14,
-        1.16,
-        1.18,
-        1.20,
-        1.22,
-        1.25,
-        1.30,
     ):
         candidate = _try_scale(scale)
         if candidate is not None:
-            # Tiny safety margin to avoid borderline "touch" after CSV quantization.
             safer = _try_scale(scale * 1.0001)
             return safer if safer is not None else candidate
-
-    # --- Best-effort repair (small nudges first; escalate budgets before fallback).
-    step0 = max(1e-4, 10.0 * EPS)
-    for attempt in range(6):
-        repaired = repair_overlaps(
-            points,
-            poses,
-            seed=seed + 97 * attempt,
-            max_iters=2000 + 2000 * attempt,
-            step_xy=step0 * (2.0**attempt),
-            step_deg=0.0,
-        )
-        if repaired is None:
-            continue
-        try:
-            repaired = fit_xy_in_bounds(repaired)
-            repaired = quantize_for_submission(repaired)
-        except Exception:
-            continue
-        if first_overlap_pair(points, repaired, eps=EPS, mode=overlap_mode) is None:
-            return repaired
-
-    # Second pass: allow tiny angle noise (helps when trees are "interlocked" by touch).
-    for attempt in range(4):
-        repaired = repair_overlaps(
-            points,
-            poses,
-            seed=seed + 997 * attempt,
-            max_iters=8000 + 4000 * attempt,
-            step_xy=step0 * (2.0**attempt),
-            step_deg=0.5 * (2.0**attempt),
-        )
-        if repaired is None:
-            continue
-        try:
-            repaired = fit_xy_in_bounds(repaired)
-            repaired = quantize_for_submission(repaired)
-        except Exception:
-            continue
-        if first_overlap_pair(points, repaired, eps=EPS, mode=overlap_mode) is None:
-            return repaired
 
     # Hard fallback: guaranteed-feasible grid.
     fallback = _safe_fallback_layout(points, puzzle_n)
