@@ -32,11 +32,11 @@ except Exception:
 
 OverlapMode = Literal["strict", "conservative", "kaggle"]
 
-# Kaggle evaluation appears to allow *touching* (interiors must be disjoint).
-#
-# Note: the optional `fastcollide` accelerator can produce false positives in near-touch
-# cases; strict validation defaults to the NumPy predicate below.
-KAGGLE_CLEARANCE_SCALE: float = 1.0005  # retained for optional clearance experiments
+# Kaggle overlap validity is stricter than the repo's default "strict" predicate in
+# some cases (likely due to tolerance/rounding). We model this with an optional
+# "clearance" mode that slightly inflates the tree polygon during intersection
+# checks (score is still computed on the original polygon).
+KAGGLE_CLEARANCE_SCALE: float = 1.0005
 
 
 def _parse_val(value: str) -> float:
@@ -308,7 +308,10 @@ def first_overlap_pair(
         return None
 
     points = np.array(points, dtype=float, copy=False)
-    points_check = points
+    if mode == "kaggle":
+        points_check = points * float(KAGGLE_CLEARANCE_SCALE)
+    else:
+        points_check = points
 
     centers = poses[:, :2]
     rad = float(polygon_radius(points_check))
@@ -324,9 +327,9 @@ def first_overlap_pair(
 
     if mode == "strict":
         intersects = polygons_intersect_strict
-    elif mode == "conservative":
-        intersects = polygons_intersect
-    elif mode == "kaggle":
+    elif mode in {"conservative", "kaggle"}:
+        # Treat touching as collision for robustness; in kaggle mode we also inflate
+        # the polygon via `points_check`.
         intersects = polygons_intersect
     else:
         raise ValueError(f"Unknown overlap mode: {mode!r}")

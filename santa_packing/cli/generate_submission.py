@@ -80,9 +80,57 @@ def _finalize_puzzle(
     if pair is None:
         return poses
 
+    rng = np.random.default_rng(int(seed) + 991 * int(puzzle_n))
+
     # --- Fast stochastic "detouch": tiny jitter often breaks exact-touch degeneracies
     # without meaningfully affecting the score.
-    rng = np.random.default_rng(int(seed) + 991 * int(puzzle_n))
+    #
+    # For conservative/kaggle modes, do a cheap "expand + repair" early: a small
+    # expansion creates slack, and then `repair_overlaps` can break long chains of
+    # sliding touches without needing large global scaling.
+    if overlap_mode != "strict":
+        for attempt in range(4):
+            jitter_xy = 2e-6 * (2.0**attempt)
+            jitter_deg = 0.05 * (2.0**attempt)
+            candidate = np.array(poses, dtype=float, copy=True)
+            candidate[:, 0:2] += rng.normal(0.0, jitter_xy, size=(puzzle_n, 2))
+            candidate[:, 2] = np.mod(candidate[:, 2] + rng.normal(0.0, jitter_deg, size=(puzzle_n,)), 360.0)
+            try:
+                candidate = fit_xy_in_bounds(candidate)
+                candidate = quantize_for_submission(candidate)
+            except Exception:
+                continue
+            if first_overlap_pair(points, candidate, eps=EPS, mode=overlap_mode) is None:
+                return candidate
+
+        for scale in (1.005, 1.01, 1.02):
+            scaled = _scale_about_center_xy(poses, float(scale))
+            try:
+                scaled = fit_xy_in_bounds(scaled)
+                scaled = quantize_for_submission(scaled)
+            except Exception:
+                continue
+
+            for max_iters in (800, 2000, 6000):
+                repaired = repair_overlaps(
+                    points,
+                    scaled,
+                    seed=seed + int(scale * 1e6) + int(max_iters),
+                    max_iters=max_iters,
+                    step_xy=8e-4 if max_iters <= 2000 else 5e-4,
+                    step_deg=0.2,
+                    overlap_mode=overlap_mode,
+                )
+                if repaired is None:
+                    continue
+                try:
+                    repaired = fit_xy_in_bounds(repaired)
+                    repaired = quantize_for_submission(repaired)
+                except Exception:
+                    continue
+                if first_overlap_pair(points, repaired, eps=EPS, mode=overlap_mode) is None:
+                    return repaired
+
     for attempt in range(6):
         jitter_xy = 2e-6 * (2.0**attempt)
         jitter_deg = 0.05 * (2.0**attempt)
@@ -100,8 +148,20 @@ def _finalize_puzzle(
     # --- Best-effort repair (small nudges first; escalate budgets before fallback).
     # When `overlap_mode` counts touching as overlap, a per-tree nudge repair is much
     # safer than global scaling (scaling can create new collisions for concave shapes).
-    step0 = max(1e-6, 10.0 * EPS)
-    for attempt in range(5):
+    if overlap_mode == "strict":
+        step0 = max(1e-6, 10.0 * EPS)
+    else:
+        # Larger default step helps break "sliding touch" chains quickly.
+        step0 = max(2e-5, 50.0 * EPS)
+    if overlap_mode == "strict":
+        pass1_attempts = 5
+        pass2_attempts = 3
+    else:
+        # Keep conservative/kaggle repairs bounded; prefer scaling fallback over long repair loops.
+        pass1_attempts = 2
+        pass2_attempts = 1
+
+    for attempt in range(pass1_attempts):
         repaired = repair_overlaps(
             points,
             poses,
@@ -122,7 +182,7 @@ def _finalize_puzzle(
             return repaired
 
     # Second pass: allow tiny angle noise (helps when trees are "interlocked" by touch).
-    for attempt in range(3):
+    for attempt in range(pass2_attempts):
         repaired = repair_overlaps(
             points,
             poses,
@@ -156,28 +216,60 @@ def _finalize_puzzle(
 
     # Keep the scale list conservative; large scales are score-destructive and can
     # still fail to resolve some concave "interlock" touch cases.
-    for scale in (
-        1.0005,
-        1.001,
-        1.002,
-        1.003,
-        1.005,
-        1.007,
-        1.01,
-        1.015,
-        1.02,
-        1.025,
-        1.03,
-        1.035,
-        1.04,
-        1.045,
-        1.05,
-        1.06,
-        1.07,
-        1.08,
-        1.09,
-        1.10,
-    ):
+    if overlap_mode == "strict":
+        scales = (
+            1.0005,
+            1.001,
+            1.002,
+            1.003,
+            1.005,
+            1.007,
+            1.01,
+            1.015,
+            1.02,
+            1.025,
+            1.03,
+            1.035,
+            1.04,
+            1.045,
+            1.05,
+            1.06,
+            1.07,
+            1.08,
+            1.09,
+            1.10,
+        )
+    else:
+        # Allow a wider range for non-strict modes; this is a last resort and only
+        # used when all cheaper detouch/repair attempts failed.
+        scales = (
+            1.0005,
+            1.001,
+            1.002,
+            1.003,
+            1.005,
+            1.007,
+            1.01,
+            1.015,
+            1.02,
+            1.025,
+            1.03,
+            1.035,
+            1.04,
+            1.045,
+            1.05,
+            1.06,
+            1.07,
+            1.08,
+            1.09,
+            1.10,
+            1.12,
+            1.15,
+            1.18,
+            1.20,
+        )
+
+    for scale in scales:
         candidate = _try_scale(scale)
         if candidate is not None:
             safer = _try_scale(scale * 1.0001)
@@ -1017,6 +1109,7 @@ def solve_n(
     n: int,
     *,
     seed: int,
+    overlap_mode: str = "strict",
     lattice_pattern: str,
     lattice_margin: float,
     lattice_rotate_deg: float,
@@ -1424,6 +1517,7 @@ def solve_n(
                 step_xy=lattice_post_step_xy,
                 step_deg=lattice_post_step_deg,
                 seed=seed,
+                overlap_mode=str(overlap_mode),
             )
 
     points = np.array(TREE_POINTS, dtype=float)
@@ -1432,6 +1526,7 @@ def solve_n(
         base,
         n=n,
         seed=seed,
+        overlap_mode=overlap_mode,
         refine_nmin=refine_nmin,
         refine_batch_size=refine_batch_size,
         refine_steps=refine_steps,
@@ -1514,6 +1609,7 @@ def _post_optimize(
     *,
     n: int,
     seed: int,
+    overlap_mode: str,
     refine_nmin: int,
     refine_batch_size: int,
     refine_steps: int,
@@ -1698,6 +1794,7 @@ def _post_optimize(
             group_rot_sigma=lns_group_rot_sigma,
             t_start=lns_t_start,
             t_end=lns_t_end,
+            overlap_mode=str(overlap_mode),
         )
 
     if ga_gens > 0 and ga_nmax > 0 and n <= ga_nmax:
@@ -1720,6 +1817,7 @@ def _post_optimize(
             hill_climb_passes=ga_hc_passes,
             hill_climb_step_xy=ga_hc_step_xy,
             hill_climb_step_deg=ga_hc_step_deg,
+            overlap_mode=str(overlap_mode),
         )
 
     if hc_passes > 0 and hc_nmax > 0 and n <= hc_nmax:
@@ -1731,6 +1829,7 @@ def _post_optimize(
             step_xy=hc_step_xy,
             step_deg=hc_step_deg,
             max_passes=hc_passes,
+            overlap_mode=str(overlap_mode),
         )
 
     return base
@@ -2255,6 +2354,7 @@ def main(argv: list[str] | None = None) -> int:
                 base,
                 n=n,
                 seed=args.seed + n,
+                overlap_mode=str(args.overlap_mode),
                 refine_nmin=args.refine_nmin,
                 refine_batch_size=args.refine_batch,
                 refine_steps=args.refine_steps,
@@ -2339,6 +2439,7 @@ def main(argv: list[str] | None = None) -> int:
         mother = solve_n(
             args.nmax,
             seed=args.seed + args.nmax,
+            overlap_mode=str(args.overlap_mode),
             lattice_pattern=args.lattice_pattern,
             lattice_margin=args.lattice_margin,
             lattice_rotate_deg=args.lattice_rotate,
@@ -2503,6 +2604,7 @@ def main(argv: list[str] | None = None) -> int:
             poses = solve_n(
                 n,
                 seed=args.seed + n,
+                overlap_mode=str(args.overlap_mode),
                 lattice_pattern=args.lattice_pattern,
                 lattice_margin=args.lattice_margin,
                 lattice_rotate_deg=args.lattice_rotate,

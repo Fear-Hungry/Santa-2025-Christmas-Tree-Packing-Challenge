@@ -17,7 +17,12 @@ import numpy as np
 
 from .constants import EPS
 from .geom_np import polygon_bbox, polygon_radius, shift_poses_to_origin, transform_polygon
-from .scoring import OverlapMode, polygons_intersect as polygons_intersect_conservative, polygons_intersect_strict
+from .scoring import (
+    KAGGLE_CLEARANCE_SCALE,
+    OverlapMode,
+    polygons_intersect as polygons_intersect_conservative,
+    polygons_intersect_strict,
+)
 
 
 def _packing_score_from_bboxes(bboxes: np.ndarray) -> float:
@@ -26,6 +31,16 @@ def _packing_score_from_bboxes(bboxes: np.ndarray) -> float:
     max_x = float(np.max(bboxes[:, 2]))
     max_y = float(np.max(bboxes[:, 3]))
     return float(max(max_x - min_x, max_y - min_y))
+
+
+def _aabb_overlaps(a: np.ndarray, b: np.ndarray, *, eps: float = EPS) -> bool:
+    """Return True if AABBs overlap (treating touch within eps as overlap candidate)."""
+    return not (
+        float(a[2]) < float(b[0]) - float(eps)
+        or float(b[2]) < float(a[0]) - float(eps)
+        or float(a[3]) < float(b[1]) - float(eps)
+        or float(b[3]) < float(a[1]) - float(eps)
+    )
 
 
 def _intersects_for_mode(mode: OverlapMode):
@@ -98,6 +113,9 @@ def repair_overlaps(
         Repaired poses (shifted to origin) if feasible, otherwise None.
     """
     rng = np.random.default_rng(int(seed))
+    if overlap_mode == "kaggle":
+        # Enforce a small clearance by inflating the polygon during repair.
+        points = np.array(points, dtype=float, copy=False) * float(KAGGLE_CLEARANCE_SCALE)
     return _repair_overlaps(
         points,
         poses,
@@ -161,6 +179,7 @@ def _collides_one_vs_all(
     overlap_mode: OverlapMode,
 ) -> bool:
     intersects = _intersects_for_mode(overlap_mode)
+    cand_bbox = polygon_bbox(cand_poly)
     n = state.poses.shape[0]
     for j in range(n):
         if j == idx:
@@ -168,6 +187,8 @@ def _collides_one_vs_all(
         dx = float(cand_center[0] - state.centers[j, 0])
         dy = float(cand_center[1] - state.centers[j, 1])
         if dx * dx + dy * dy > state.thr2:
+            continue
+        if not _aabb_overlaps(cand_bbox, state.bboxes[j], eps=EPS):
             continue
         if intersects(cand_poly, state.polys[j]):
             return True
@@ -181,6 +202,7 @@ def hill_climb(
     step_xy: float = 0.01,
     step_deg: float = 2.0,
     max_passes: int = 2,
+    overlap_mode: OverlapMode = "strict",
     tol: float = 1e-12,
 ) -> np.ndarray:
     """Deterministic local search over single-tree moves.
@@ -233,7 +255,7 @@ def hill_climb(
 
                 cand_poly = transform_polygon(points, cand_pose)
                 cand_center = cand_pose[:2]
-                if _collides_one_vs_all(state, idx, cand_center, cand_poly, overlap_mode="strict"):
+                if _collides_one_vs_all(state, idx, cand_center, cand_poly, overlap_mode=overlap_mode):
                     continue
 
                 cand_bbox = polygon_bbox(cand_poly)
@@ -270,6 +292,7 @@ def hill_climb_boundary(
     step_deg: float = 0.0,
     seed: int = 1,
     candidates: int = 8,
+    overlap_mode: OverlapMode = "strict",
     tol: float = 1e-12,
 ) -> np.ndarray:
     """Short boundary-focused hill-climb to reduce the packing bounding square.
@@ -348,7 +371,7 @@ def hill_climb_boundary(
 
                 cand_poly = transform_polygon(points, cand_pose)
                 cand_center = cand_pose[:2]
-                if _collides_one_vs_all(state, int(idx), cand_center, cand_poly, overlap_mode="strict"):
+                if _collides_one_vs_all(state, int(idx), cand_center, cand_poly, overlap_mode=overlap_mode):
                     continue
 
                 cand_bbox = polygon_bbox(cand_poly)
@@ -508,33 +531,56 @@ def _repair_overlaps(
             return shift_poses_to_origin(points, state.poses)
 
         i, j = pair
-        move = i if rng.random() < 0.5 else j
-        other = j if move == i else i
-        direction = state.centers[move] - state.centers[other]
-        norm = float(np.linalg.norm(direction))
-        if norm < 1e-12:
-            ang = float(rng.uniform(0.0, 2.0 * math.pi))
-            direction = np.array([math.cos(ang), math.sin(ang)], dtype=float)
-            norm = 1.0
-        unit = direction / norm
-        delta_xy = unit * float(step_xy)
-        noise = rng.normal(0.0, float(step_xy) * 0.25, size=(2,))
-        cand_pose = state.poses[move].copy()
-        cand_pose[0:2] = cand_pose[0:2] + delta_xy + noise
-        if step_deg != 0.0:
-            cand_pose[2] = float(math.fmod(cand_pose[2] + rng.normal(0.0, float(step_deg)), 360.0))
-            if cand_pose[2] < 0.0:
-                cand_pose[2] += 360.0
 
-        cand_poly = transform_polygon(points, cand_pose)
-        cand_center = cand_pose[:2]
-        if _collides_one_vs_all(state, move, cand_center, cand_poly, overlap_mode=overlap_mode):
+        moved = False
+        for _try in range(16):
+            move = i if rng.random() < 0.5 else j
+            other = j if move == i else i
+
+            direction = state.centers[move] - state.centers[other]
+            norm = float(np.linalg.norm(direction))
+            if norm < 1e-12:
+                ang = float(rng.uniform(0.0, 2.0 * math.pi))
+                direction = np.array([math.cos(ang), math.sin(ang)], dtype=float)
+                norm = 1.0
+            unit = direction / norm
+            perp = np.array([-unit[1], unit[0]], dtype=float)
+
+            # Mix in a perpendicular component to break "sliding" edge contacts.
+            perp_scale = float(rng.normal(0.0, 0.75))
+            d = unit + perp * perp_scale
+            d_norm = float(np.linalg.norm(d))
+            if d_norm < 1e-12:
+                d = unit
+                d_norm = 1.0
+            d = d / d_norm
+
+            # Try a small set of step scales (helps escape local dead-ends).
+            step_scale = (0.5, 1.0, 2.0, 4.0)[int(rng.integers(0, 4))]
+            step = float(step_xy) * float(step_scale)
+
+            noise = rng.normal(0.0, step * 0.10, size=(2,))
+            cand_pose = state.poses[move].copy()
+            cand_pose[0:2] = cand_pose[0:2] + d * step + noise
+            if step_deg != 0.0:
+                cand_pose[2] = float(math.fmod(cand_pose[2] + rng.normal(0.0, float(step_deg)), 360.0))
+                if cand_pose[2] < 0.0:
+                    cand_pose[2] += 360.0
+
+            cand_poly = transform_polygon(points, cand_pose)
+            cand_center = cand_pose[:2]
+            if _collides_one_vs_all(state, move, cand_center, cand_poly, overlap_mode=overlap_mode):
+                continue
+
+            state.poses[move] = cand_pose
+            state.centers[move] = cand_center
+            state.polys[move] = cand_poly
+            state.bboxes[move] = polygon_bbox(cand_poly)
+            moved = True
+            break
+
+        if not moved:
             continue
-
-        state.poses[move] = cand_pose
-        state.centers[move] = cand_center
-        state.polys[move] = cand_poly
-        state.bboxes[move] = polygon_bbox(cand_poly)
 
     return None
 
@@ -557,6 +603,7 @@ def genetic_optimize(
     hill_climb_passes: int = 0,
     hill_climb_step_xy: float = 0.01,
     hill_climb_step_deg: float = 2.0,
+    overlap_mode: OverlapMode = "strict",
     max_child_attempts: int = 50,
 ) -> np.ndarray:
     """Simple GA for 1 instance: selection + (optional) crossover + mutations (+ optional hill-climb).
@@ -598,7 +645,7 @@ def genetic_optimize(
 
     def _eval(p: np.ndarray) -> float:
         state = _build_state(points, p)
-        if _state_has_overlaps(state, overlap_mode="strict"):
+        if _state_has_overlaps(state, overlap_mode=overlap_mode):
             return float("inf")
         return state.score
 
@@ -655,7 +702,14 @@ def genetic_optimize(
     base = population[0]
     while len(population) < pop_size:
         cand = _mutate_directed(base) if rng.random() < directed_mut_prob else _mutate_random(base)
-        repaired = _repair_overlaps(points, cand, rng=rng, max_iters=repair_iters, step_xy=mutation_sigma_xy)
+        repaired = _repair_overlaps(
+            points,
+            cand,
+            rng=rng,
+            max_iters=repair_iters,
+            step_xy=mutation_sigma_xy,
+            overlap_mode=overlap_mode,
+        )
         if repaired is None:
             continue
         population.append(repaired)
@@ -686,7 +740,14 @@ def genetic_optimize(
 
             for _attempt in range(max_child_attempts):
                 cand = _mutate_directed(child) if rng.random() < directed_mut_prob else _mutate_random(child)
-                repaired = _repair_overlaps(points, cand, rng=rng, max_iters=repair_iters, step_xy=mutation_sigma_xy)
+                repaired = _repair_overlaps(
+                    points,
+                    cand,
+                    rng=rng,
+                    max_iters=repair_iters,
+                    step_xy=mutation_sigma_xy,
+                    overlap_mode=overlap_mode,
+                )
                 if repaired is None:
                     continue
                 cand = repaired
@@ -697,6 +758,7 @@ def genetic_optimize(
                         step_xy=hill_climb_step_xy,
                         step_deg=hill_climb_step_deg,
                         max_passes=hill_climb_passes,
+                        overlap_mode=overlap_mode,
                     )
                 child = cand
                 break
@@ -718,25 +780,43 @@ def genetic_optimize(
             step_xy=hill_climb_step_xy,
             step_deg=hill_climb_step_deg,
             max_passes=hill_climb_passes,
+            overlap_mode=overlap_mode,
         )
     return shift_poses_to_origin(points, best_pose)
 
 
-def _collides_candidate(state: _PackingState, cand_center: np.ndarray, cand_poly: np.ndarray) -> bool:
+def _collides_candidate(
+    state: _PackingState,
+    cand_center: np.ndarray,
+    cand_poly: np.ndarray,
+    *,
+    overlap_mode: OverlapMode,
+) -> bool:
+    intersects = _intersects_for_mode(overlap_mode)
+    cand_bbox = polygon_bbox(cand_poly)
     n = state.centers.shape[0]
     for j in range(n):
         dx = float(cand_center[0] - state.centers[j, 0])
         dy = float(cand_center[1] - state.centers[j, 1])
         if dx * dx + dy * dy > state.thr2:
             continue
-        if polygons_intersect_strict(cand_poly, state.polys[j]):
+        if not _aabb_overlaps(cand_bbox, state.bboxes[j], eps=EPS):
+            continue
+        if intersects(cand_poly, state.polys[j]):
             return True
     return False
 
 
 def _collides_candidate_excluding(
-    state: _PackingState, cand_center: np.ndarray, cand_poly: np.ndarray, exclude: np.ndarray
+    state: _PackingState,
+    cand_center: np.ndarray,
+    cand_poly: np.ndarray,
+    exclude: np.ndarray,
+    *,
+    overlap_mode: OverlapMode,
 ) -> bool:
+    intersects = _intersects_for_mode(overlap_mode)
+    cand_bbox = polygon_bbox(cand_poly)
     n = state.centers.shape[0]
     for j in range(n):
         if bool(exclude[j]):
@@ -745,7 +825,9 @@ def _collides_candidate_excluding(
         dy = float(cand_center[1] - state.centers[j, 1])
         if dx * dx + dy * dy > state.thr2:
             continue
-        if polygons_intersect_strict(cand_poly, state.polys[j]):
+        if not _aabb_overlaps(cand_bbox, state.bboxes[j], eps=EPS):
+            continue
+        if intersects(cand_poly, state.polys[j]):
             return True
     return False
 
@@ -855,6 +937,7 @@ def large_neighborhood_search(
     group_rot_sigma: float = 20.0,
     t_start: float = 0.0,
     t_end: float = 0.0,
+    overlap_mode: OverlapMode = "strict",
 ) -> np.ndarray:
     """Large Neighborhood Search / (simplified) ALNS-style loop.
 
@@ -972,7 +1055,13 @@ def large_neighborhood_search(
                 for idx in group:
                     cand_poly = transform_polygon(points, cand[idx])
                     cand_center = cand[idx, 0:2]
-                    if _collides_candidate_excluding(base_state, cand_center, cand_poly, exclude=exclude):
+                    if _collides_candidate_excluding(
+                        base_state,
+                        cand_center,
+                        cand_poly,
+                        exclude=exclude,
+                        overlap_mode=overlap_mode,
+                    ):
                         ok = False
                         break
                     cand_bboxes[idx] = polygon_bbox(cand_poly)
@@ -1043,7 +1132,7 @@ def large_neighborhood_search(
                         cand_pose = np.array([float(cxy[0]), float(cxy[1]), float(ang)], dtype=float)
                         cand_poly = transform_polygon(points, cand_pose)
                         cand_center = cand_pose[0:2]
-                        if _collides_candidate(keep_state, cand_center, cand_poly):
+                        if _collides_candidate(keep_state, cand_center, cand_poly, overlap_mode=overlap_mode):
                             continue
                         cand_bbox = polygon_bbox(cand_poly)
                         new_min_x = min(min_x, float(cand_bbox[0]))
