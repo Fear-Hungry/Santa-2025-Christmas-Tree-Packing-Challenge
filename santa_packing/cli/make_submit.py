@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     config_path = None if pre_args.no_config else (pre_args.config or cfg_default)
     config_args = config_to_argv(config_path, section_keys=("make_submit", "submit")) if config_path is not None else []
 
-    ap = argparse.ArgumentParser(description="Generate + strict-score a submission and archive it under submissions/…")
+    ap = argparse.ArgumentParser(description="Generate + validate/score a submission and archive it under submissions/…")
     ap.add_argument(
         "--config",
         type=Path,
@@ -85,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--overlap-mode",
         type=str,
-        default="strict",
+        default="kaggle",
         choices=["strict", "conservative", "kaggle"],
         help="Overlap predicate used for scoring/validation (strict allows touching; kaggle enforces clearance).",
     )

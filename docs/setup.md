@@ -76,10 +76,10 @@ Scorar um submission:
 python -m santa_packing.cli.score_submission submission.csv --pretty
 ```
 
-Dica: para estimativa rápida use `--no-overlap`; para validação antes de submeter use `--overlap-mode strict` (permite “touching”, não conta encostar como overlap).
+Dica: para estimativa rápida use `--no-overlap`; para validação antes de submeter use `--overlap-mode kaggle` (mais conservador, evita ERROR por “touching”/tolerância).
 
 ```bash
-python -m santa_packing.cli.score_submission submission.csv --overlap-mode strict
+python -m santa_packing.cli.score_submission submission.csv --overlap-mode kaggle
 ```
 
 Melhorar um submission existente (subset-smoothing + melhora do `n=200` via insert+SA + reparo/validação):

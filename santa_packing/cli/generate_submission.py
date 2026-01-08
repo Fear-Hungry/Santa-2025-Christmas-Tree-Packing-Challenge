@@ -1905,7 +1905,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--overlap-mode",
         type=str,
-        default="strict",
+        default="kaggle",
         choices=["strict", "conservative", "kaggle"],
         help="Overlap predicate used during finalization/validation (strict allows touching; kaggle enforces clearance).",
     )

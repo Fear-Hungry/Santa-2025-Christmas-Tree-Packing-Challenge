@@ -40,19 +40,20 @@ python -m santa_packing.cli.score_submission submission.csv --nmax 200 --overlap
 ## Submissão no Kaggle (CLI)
 
 ```bash
-.venv/bin/kaggle competitions submit -c santa-2025 -f submission.csv -m "strict ~73 (improve_submission)"
+.venv/bin/kaggle competitions submit -c santa-2025 -f submission.csv -m "kaggle-valid (improve_submission)"
 ```
 
 ## Kaggle: “ERROR” (overlap/touch)
 
-Algumas soluções passam no `--overlap-mode strict` local mas dão **ERROR** no Kaggle (tipicamente por encostar/overlap).
+Algumas soluções passam no `--overlap-mode strict` local mas dão **ERROR** no Kaggle (tipicamente por encostar/overlap).  
+Para submissão, a validação padrão do repo agora é `--overlap-mode kaggle` (mais conservadora).
 
 Para “auto-fixar” um CSV existente, use:
 
 ```bash
 python -m santa_packing.cli.autofix_submission submission.csv \
-  --out submission_kaggle.csv --overlap-mode conservative
-python -m santa_packing.cli.score_submission submission_kaggle.csv --nmax 200 --overlap-mode conservative --pretty
+  --out submission_kaggle.csv --overlap-mode kaggle
+python -m santa_packing.cli.score_submission submission_kaggle.csv --nmax 200 --overlap-mode kaggle --pretty
 ```
 
 ## Configuração (reprodutibilidade)

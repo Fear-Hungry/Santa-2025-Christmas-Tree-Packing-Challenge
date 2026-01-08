@@ -1,12 +1,12 @@
 {
   "make_submit": {
     "nmax": 200,
-    "overlap_mode": "strict",
+    "overlap_mode": "kaggle",
     "submissions_dir": "submissions",
     "name": "strong"
   },
   "generate": {
-    "overlap_mode": "strict",
+    "overlap_mode": "kaggle",
     "mother_prefix": true,
     "mother_reorder": "radial",
     "lattice": {
