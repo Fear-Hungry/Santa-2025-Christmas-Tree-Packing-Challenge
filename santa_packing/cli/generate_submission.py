@@ -89,7 +89,7 @@ def _finalize_puzzle(
     # expansion creates slack, and then `repair_overlaps` can break long chains of
     # sliding touches without needing large global scaling.
     if overlap_mode != "strict":
-        for attempt in range(4):
+        for attempt in range(3):
             jitter_xy = 2e-6 * (2.0**attempt)
             jitter_deg = 0.05 * (2.0**attempt)
             candidate = np.array(poses, dtype=float, copy=True)
@@ -103,7 +103,40 @@ def _finalize_puzzle(
             if first_overlap_pair(points, candidate, eps=EPS, mode=overlap_mode) is None:
                 return candidate
 
-        for scale in (1.005, 1.01, 1.02):
+        # Scaling is cheap and monotone for feasibility; find a feasible scale first
+        # (this avoids spending minutes in doomed repair loops on very tight packings).
+        for scale in (
+            1.0005,
+            1.001,
+            1.002,
+            1.003,
+            1.005,
+            1.007,
+            1.01,
+            1.015,
+            1.02,
+            1.03,
+            1.05,
+            1.08,
+            1.10,
+            1.12,
+            1.15,
+            1.18,
+            1.20,
+            1.25,
+        ):
+            candidate = _scale_about_center_xy(poses, float(scale))
+            try:
+                candidate = fit_xy_in_bounds(candidate)
+                candidate = quantize_for_submission(candidate)
+            except Exception:
+                continue
+            if first_overlap_pair(points, candidate, eps=EPS, mode=overlap_mode) is None:
+                return candidate
+
+        # If we still couldn't detouch via scaling, try repair on a few moderately
+        # expanded states (gives the nudge solver slack to break "sliding" chains).
+        for scale in (1.05, 1.10, 1.15, 1.20):
             scaled = _scale_about_center_xy(poses, float(scale))
             try:
                 scaled = fit_xy_in_bounds(scaled)
@@ -111,25 +144,24 @@ def _finalize_puzzle(
             except Exception:
                 continue
 
-            for max_iters in (800, 2000, 6000):
-                repaired = repair_overlaps(
-                    points,
-                    scaled,
-                    seed=seed + int(scale * 1e6) + int(max_iters),
-                    max_iters=max_iters,
-                    step_xy=8e-4 if max_iters <= 2000 else 5e-4,
-                    step_deg=0.2,
-                    overlap_mode=overlap_mode,
-                )
-                if repaired is None:
-                    continue
-                try:
-                    repaired = fit_xy_in_bounds(repaired)
-                    repaired = quantize_for_submission(repaired)
-                except Exception:
-                    continue
-                if first_overlap_pair(points, repaired, eps=EPS, mode=overlap_mode) is None:
-                    return repaired
+            repaired = repair_overlaps(
+                points,
+                scaled,
+                seed=seed + int(scale * 1e6),
+                max_iters=6000,
+                step_xy=8e-4,
+                step_deg=0.2,
+                overlap_mode=overlap_mode,
+            )
+            if repaired is None:
+                continue
+            try:
+                repaired = fit_xy_in_bounds(repaired)
+                repaired = quantize_for_submission(repaired)
+            except Exception:
+                continue
+            if first_overlap_pair(points, repaired, eps=EPS, mode=overlap_mode) is None:
+                return repaired
 
     for attempt in range(6):
         jitter_xy = 2e-6 * (2.0**attempt)
