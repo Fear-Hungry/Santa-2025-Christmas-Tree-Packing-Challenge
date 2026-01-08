@@ -534,11 +534,17 @@ def _repair_overlaps(
                             if j <= i:
                                 continue
                             pairs.add((i, j))
-        return sorted(pairs)
+        # Do not sort: sorting is O(P log P) and can be pathological when the
+        # first colliding pair is late in lexicographic order (we'd scan many
+        # non-colliding pairs every iteration). Randomized order finds a
+        # colliding pair quickly on dense/touch-heavy packings.
+        return list(pairs)
 
     for _ in range(max_iters):
         pair: tuple[int, int] | None = None
         cand_pairs = _grid_candidate_pairs(state.centers, cell_size=dist_thr)
+        if len(cand_pairs) > 1:
+            rng.shuffle(cand_pairs)
         for i, j in cand_pairs:
             dx = float(state.centers[i, 0] - state.centers[j, 0])
             dy = float(state.centers[i, 1] - state.centers[j, 1])
