@@ -107,7 +107,7 @@ def solve(
         scoring:
         - `strict`: touching is allowed (boundary contact is not considered overlap).
         - `conservative`: touching counts as overlap (more robust, less dense).
-        - `kaggle`: conservative + tiny clearance margin (safest for submission kernels).
+        - `kaggle`: same as `strict` (touching allowed); kept as a convenience alias.
     """
     root = repo_root_from_cwd()
 
@@ -566,7 +566,7 @@ def cli_main(argv: list[str] | None = None) -> int:
         type=str,
         default="kaggle",
         choices=["strict", "conservative", "kaggle"],
-        help="Overlap predicate used for validation/scoring (strict allows touching; kaggle is more conservative).",
+        help="Overlap predicate used for validation/scoring (strict/kaggle allow touching; conservative counts touching).",
     )
     ap.add_argument("--name", type=str, default=None)
     ap.add_argument("--submissions-dir", type=Path, default=Path("submissions"))

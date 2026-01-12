@@ -17,7 +17,7 @@ Via Python (script/notebook): `from santa_packing.workflow import solve`
 ## Melhorar o score (pipeline atual)
 
 O pipeline padrão (`python -m santa_packing`) já roda pós-processamento (subset-smoothing + polish do `n=200`)
-e valida em `--overlap-mode kaggle` (mais conservador; evita ERROR por “touching”/tolerância no Kaggle).
+e valida em `--overlap-mode kaggle` (mesma semântica do Kaggle: “touching” é permitido).
 
 Reprodução do melhor run local atual (atingiu `~72.816` com validação *strict*):
 
@@ -42,8 +42,8 @@ python -m santa_packing.cli.score_submission submission.csv --nmax 200 --overlap
 
 ## Kaggle: “ERROR” (overlap/touch)
 
-Algumas soluções passam no `--overlap-mode strict` local mas dão **ERROR** no Kaggle (tipicamente por encostar/overlap).  
-Para submissão, a validação padrão do repo agora é `--overlap-mode kaggle` (mais conservadora).
+O Kaggle permite encostar (touching), então `--overlap-mode kaggle` é equivalente a `strict` (touching permitido).  
+Se você quiser uma validação mais conservadora (às custas de densidade/score), use `--overlap-mode conservative`.
 
 Para “auto-fixar” um CSV existente, use:
 

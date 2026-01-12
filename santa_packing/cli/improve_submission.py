@@ -259,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
         type=str,
         default="strict",
         choices=["strict", "conservative", "kaggle"],
-        help="Overlap predicate used for final validation/repair (strict allows touching; conservative counts touching).",
+        help="Overlap predicate used for final validation/repair (strict/kaggle allow touching; conservative counts touching).",
     )
 
     ap.add_argument("--improve-n200", action="store_true", help="Try to improve puzzle 200 via insert+SA from puzzle 199.")

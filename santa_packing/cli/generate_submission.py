@@ -76,6 +76,8 @@ def _finalize_puzzle(
         poses = fit_xy_in_bounds(poses)
         poses = quantize_for_submission(poses)
 
+    strict_touch_ok = overlap_mode in {"strict", "kaggle"}
+
     pair = first_overlap_pair(points, poses, eps=EPS, mode=overlap_mode)
     if pair is None:
         return poses
@@ -84,9 +86,9 @@ def _finalize_puzzle(
 
     # --- Fast stochastic "detouch": tiny jitter often breaks exact-touch degeneracies
     # without meaningfully affecting the score.
-    # For conservative/kaggle modes, prefer minimal per-tree nudges (repair) over
+    # For conservative mode, prefer minimal per-tree nudges (repair) over
     # global scaling to preserve score.
-    if overlap_mode != "strict":
+    if not strict_touch_ok:
         for attempt in range(3):
             jitter_xy = 2e-6 * (2.0**attempt)
             jitter_deg = 0.05 * (2.0**attempt)
@@ -158,16 +160,16 @@ def _finalize_puzzle(
     # --- Best-effort repair (small nudges first; escalate budgets before fallback).
     # When `overlap_mode` counts touching as overlap, a per-tree nudge repair is much
     # safer than global scaling (scaling can create new collisions for concave shapes).
-    if overlap_mode == "strict":
+    if strict_touch_ok:
         step0 = max(1e-6, 10.0 * EPS)
     else:
         # Larger default step helps break "sliding touch" chains quickly.
         step0 = max(2e-5, 50.0 * EPS)
-    if overlap_mode == "strict":
+    if strict_touch_ok:
         pass1_attempts = 5
         pass2_attempts = 3
     else:
-        # Keep conservative/kaggle repairs bounded; prefer scaling fallback over long repair loops.
+        # Keep conservative repairs bounded; prefer scaling fallback over long repair loops.
         pass1_attempts = 2
         pass2_attempts = 1
 
@@ -226,7 +228,7 @@ def _finalize_puzzle(
 
     # Keep the scale list conservative; large scales are score-destructive and can
     # still fail to resolve some concave "interlock" touch cases.
-    if overlap_mode == "strict":
+    if strict_touch_ok:
         scales = (
             1.0005,
             1.001,
@@ -1885,7 +1887,7 @@ def main(argv: list[str] | None = None) -> int:
         type=str,
         default="kaggle",
         choices=["strict", "conservative", "kaggle"],
-        help="Overlap predicate used during finalization/validation (strict allows touching; kaggle enforces clearance).",
+        help="Overlap predicate used during finalization/validation (strict/kaggle allow touching; conservative counts touching).",
     )
 
     ap.add_argument(

@@ -20,7 +20,6 @@ from .geom_np import polygon_bbox, polygon_radius, shift_poses_to_origin, transf
 from .scoring import (
     KAGGLE_CLEARANCE,
     OverlapMode,
-    polygons_min_distance_sq,
     polygons_intersect as polygons_intersect_conservative,
     polygons_intersect_strict,
 )
@@ -45,21 +44,10 @@ def _aabb_overlaps(a: np.ndarray, b: np.ndarray, *, eps: float = EPS) -> bool:
 
 
 def _intersects_for_mode(mode: OverlapMode):
-    if mode == "strict":
+    if mode in {"strict", "kaggle"}:
         return polygons_intersect_strict
-    if mode in {"conservative", "kaggle"}:
-        if mode == "conservative" or float(KAGGLE_CLEARANCE) <= 0.0:
-            return polygons_intersect_conservative
-
-        clearance = float(KAGGLE_CLEARANCE)
-        clearance2 = clearance * clearance
-
-        def _intersects_kaggle(a: np.ndarray, b: np.ndarray) -> bool:
-            if polygons_intersect_conservative(a, b):
-                return True
-            return polygons_min_distance_sq(a, b) <= clearance2
-
-        return _intersects_kaggle
+    if mode == "conservative":
+        return polygons_intersect_conservative
     raise ValueError(f"Unknown overlap mode: {mode!r}")
 
 
@@ -744,7 +732,7 @@ def _repair_overlaps(
         # Last resort for non-strict modes: allow touching with *other* trees while
         # breaking the current pair, as long as we stay strict-feasible (no area
         # overlaps). This helps unlock highly constrained local configurations.
-        if not moved and overlap_mode != "strict":
+        if not moved and overlap_mode == "conservative":
             for move in move_order:
                 other = j if move == i else i
                 base_pose = state.poses[move].copy()

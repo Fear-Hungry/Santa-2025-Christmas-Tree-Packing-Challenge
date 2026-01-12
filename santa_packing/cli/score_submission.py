@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
         type=str,
         default="kaggle",
         choices=["strict", "conservative", "kaggle"],
-        help="Overlap predicate used when overlap checks are enabled (strict allows touching; kaggle enforces clearance).",
+        help="Overlap predicate used when overlap checks are enabled (strict/kaggle allow touching; conservative counts touching).",
     )
     ap.add_argument(
         "--no-require-complete",

@@ -80,3 +80,4 @@ def test_strict_does_not_flag_concave_touch() -> None:
 
     # Therefore, strict mode should not report an overlap pair here.
     assert first_overlap_pair(points, poses, mode="strict") is None
+    assert first_overlap_pair(points, poses, mode="kaggle") is None

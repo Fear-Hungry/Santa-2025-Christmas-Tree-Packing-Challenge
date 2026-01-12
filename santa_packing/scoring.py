@@ -3,7 +3,7 @@
 This module implements:
 - CSV parsing (including the `s`-prefixed numeric format)
 - packing score computation (`s_n` per puzzle and the official prefix objective)
-- robust overlap detection modes (strict / conservative / kaggle-like)
+- robust overlap detection modes (strict / conservative / kaggle)
 
 The scoring code is intentionally NumPy-based to match typical Kaggle
 implementations and to keep CLI tools lightweight.
@@ -35,12 +35,12 @@ OverlapMode = Literal["strict", "conservative", "kaggle"]
 # Semantics:
 # - strict: touching is allowed (boundary contact is NOT overlap)
 # - conservative: touching counts as overlap (more robust, less dense)
-# - kaggle: conservative + small clearance margin (avoid evaluator tolerance issues)
+# - kaggle: same as strict (touching allowed); named for parity with the Kaggle evaluator
 #
-# Some evaluators (including Kaggle kernels) are sensitive to nearly-touching
-# placements due to tolerance/rounding. We model this as a tiny clearance margin
-# used only in `OverlapMode="kaggle"` checks.
-KAGGLE_CLEARANCE: float = 1e-6
+# Historical note: previous versions used a small "clearance" margin for kaggle
+# to be extra conservative. The official evaluator allows touching, so the
+# margin is disabled by default but kept as a knob for experimentation.
+KAGGLE_CLEARANCE: float = 0.0
 
 
 def _parse_val(value: str) -> float:
@@ -330,8 +330,8 @@ def _point_segment_distance_sq(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> f
 def polygons_min_distance_sq(poly1: np.ndarray, poly2: np.ndarray) -> float:
     """Return squared minimum distance between polygon boundaries.
 
-    This is used to implement a small clearance margin for `OverlapMode="kaggle"`.
-    For feasibility checks we only need a conservative bound, so we compute the
+    This can be used to implement a small clearance margin (optional). For
+    feasibility checks we only need a conservative bound, so we compute the
     minimum over endpoint-to-segment distances (sufficient in 2D for segments).
     """
     poly1 = np.array(poly1, dtype=float, copy=False)
@@ -390,9 +390,9 @@ def first_overlap_pair(
     polys = [transform_polygon(points_check, pose) for pose in poses]
     bboxes = [polygon_bbox(p) for p in polys]
 
-    if mode == "strict":
+    if mode in {"strict", "kaggle"}:
         intersects = polygons_intersect_strict
-    elif mode in {"conservative", "kaggle"}:
+    elif mode == "conservative":
         # Treat touching as collision for robustness.
         intersects = polygons_intersect
     else:
