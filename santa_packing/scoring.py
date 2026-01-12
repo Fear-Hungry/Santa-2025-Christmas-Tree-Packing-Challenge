@@ -32,6 +32,11 @@ except Exception:
 
 OverlapMode = Literal["strict", "conservative", "kaggle"]
 
+# Semantics:
+# - strict: touching is allowed (boundary contact is NOT overlap)
+# - conservative: touching counts as overlap (more robust, less dense)
+# - kaggle: conservative + small clearance margin (avoid evaluator tolerance issues)
+#
 # Some evaluators (including Kaggle kernels) are sensitive to nearly-touching
 # placements due to tolerance/rounding. We model this as a tiny clearance margin
 # used only in `OverlapMode="kaggle"` checks.

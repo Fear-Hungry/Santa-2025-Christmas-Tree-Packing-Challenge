@@ -342,7 +342,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         if refined is None:
             raise SystemExit("SA refinement returned None (is JAX installed for this Python?)")
-        # Finalize/repair to guarantee a strict non-overlapping submission (post-quantization).
+        # Finalize/repair to guarantee a non-overlapping submission (post-quantization)
+        # under the chosen overlap_mode.
         overlap_mode: OverlapMode = str(ns.overlap_mode)  # type: ignore[assignment]
         improved[200] = _finalize_puzzle(
             points,
@@ -354,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
 
     _write_submission(ns.out, improved, nmax=nmax)
 
-    # Report local score (no overlap check by default; strict overlap check is available in score_submission CLI).
+    # Report local score (no overlap check by default; validate via score_submission CLI + --overlap-mode).
     res = score_submission(ns.out, nmax=nmax, check_overlap=False)
     print(f"wrote: {ns.out}")
     print(f"score(no-overlap): {res.score:.12f}")

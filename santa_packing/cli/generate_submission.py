@@ -2768,7 +2768,7 @@ def main(argv: list[str] | None = None) -> int:
                 points, poses, seed=args.seed + n, puzzle_n=n, overlap_mode=str(args.overlap_mode)
             )
 
-    # Write CSV (after strict validation/repair).
+    # Write CSV (after overlap validation/repair).
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", newline="") as f:
         writer = csv.writer(f)
@@ -2785,7 +2785,7 @@ def main(argv: list[str] | None = None) -> int:
                     ]
                 )
 
-    # Rule of the pipeline: always run strict validation after generating.
+    # Rule of the pipeline: always run overlap validation after generating.
     from santa_packing.scoring import score_submission  # noqa: E402
 
     _ = score_submission(

@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
 
     _write_submission(args.out, fixed, nmax=nmax)
 
-    # Report score (without overlap check; use score_submission CLI for strict validation).
+    # Report score (without overlap check; validate via score_submission CLI + --overlap-mode).
     res = score_submission(args.out, nmax=nmax, check_overlap=False)
     print(f"wrote: {args.out}")
     print(f"score(no-overlap): {res.score:.12f}")
@@ -63,4 +63,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

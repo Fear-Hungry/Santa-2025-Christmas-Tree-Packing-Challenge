@@ -101,6 +101,13 @@ def solve(
     """Run the end-to-end pipeline and return artifacts + score.
 
     This is the preferred API entrypoint (no CLI/argparse required).
+
+    Note:
+        `overlap_mode` controls how "overlap" is defined during finalization and
+        scoring:
+        - `strict`: touching is allowed (boundary contact is not considered overlap).
+        - `conservative`: touching counts as overlap (more robust, less dense).
+        - `kaggle`: conservative + tiny clearance margin (safest for submission kernels).
     """
     root = repo_root_from_cwd()
 
@@ -554,7 +561,13 @@ def cli_main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-config", action="store_true", help="Disable loading the default config (if any).")
     ap.add_argument("--nmax", type=int, default=200)
     ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--overlap-mode", type=str, default="kaggle", choices=["strict", "conservative", "kaggle"])
+    ap.add_argument(
+        "--overlap-mode",
+        type=str,
+        default="kaggle",
+        choices=["strict", "conservative", "kaggle"],
+        help="Overlap predicate used for validation/scoring (strict allows touching; kaggle is more conservative).",
+    )
     ap.add_argument("--name", type=str, default=None)
     ap.add_argument("--submissions-dir", type=Path, default=Path("submissions"))
     ap.add_argument("--improve", default=True, action=argparse.BooleanOptionalAction)
