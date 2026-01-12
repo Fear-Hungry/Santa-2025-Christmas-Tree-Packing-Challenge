@@ -25,6 +25,7 @@ def test_overlap() -> None:
 def test_touch_counts_as_intersection() -> None:
     a = SQUARE
     b = SQUARE + np.array([1.0, 0.0], dtype=float)
+    assert not polygons_intersect_strict(a, b)
     assert polygons_intersect(a, b)
 
 
@@ -57,3 +58,25 @@ def test_kaggle_mode_has_no_false_negative_from_scaling() -> None:
     b_scaled = transform_polygon(scaled, poses[1])
     assert polygons_intersect_strict(a, b)
     assert not polygons_intersect_strict(a_scaled, b_scaled)
+
+
+def test_strict_does_not_flag_concave_touch() -> None:
+    # Regression: some concave touch configurations used to be reported as strict
+    # intersections when the optional fast collider was enabled.
+    points = np.array(TREE_POINTS, dtype=float)
+    poses = np.array(
+        [
+            [0.64562313, 0.84968406, 203.62937773],
+            [0.33742899, 0.32676555, 23.62937773],
+        ],
+        dtype=float,
+    )
+
+    # Touching counts as collision for the conservative predicate.
+    a = transform_polygon(points, poses[0])
+    b = transform_polygon(points, poses[1])
+    assert not polygons_intersect_strict(a, b)
+    assert polygons_intersect(a, b)
+
+    # Therefore, strict mode should not report an overlap pair here.
+    assert first_overlap_pair(points, poses, mode="strict") is None

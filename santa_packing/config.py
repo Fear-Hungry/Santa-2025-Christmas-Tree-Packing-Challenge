@@ -1,4 +1,4 @@
-"""Shared helpers for loading CLI configuration files.
+"""Shared helpers for loading configuration files.
 
 Config files are expected to live under `configs/` at the repository root and
 be committed to version control to improve reproducibility.

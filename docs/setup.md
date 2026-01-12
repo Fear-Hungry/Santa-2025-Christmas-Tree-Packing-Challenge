@@ -31,14 +31,27 @@ Se você tiver GPU/CUDA, instale o pacote JAX adequado ao seu ambiente.
 
 Depois do setup, selecione o interpretador/kernel da `.venv` (assim o `ipykernel` instalado via `.[notebooks]` será usado).
 
-Notebook recomendado (gerar + score + log):
-* `notebooks/01_generate_and_score.ipynb`
+Notebooks recomendados:
+* `notebooks/01_generate_and_score.ipynb` (gerar + score + log)
+* `notebooks/02_optimization_hunt.ipynb` (hunt/otimização para melhores resultados)
+
+### Otimizar a partir de um CSV existente (ex: score 70.78)
+
+No `notebooks/02_optimization_hunt.ipynb`:
+* aponte `BASE_SUBMISSION` para o seu arquivo (`Path("/caminho/para/submission.csv")`)
+* ajuste `TARGET_SCORE = 69.0` (ou `None` para não parar cedo)
+* rode em `MODE="full"` e aumente seeds/iters conforme quiser
+
+O notebook valida em `OVERLAP_MODE="kaggle"` e faz repair automático quando necessário, então o `submission.csv` final fica sem overlap.
 
 ## Estrutura do código
 
 * `santa_packing/`: pacote principal (geometria, colisão, SA/L2O, scorer, etc.).
+  * `santa_packing/workflow.py`: workflow de alto nível (generate → improve → validar/scorar → archive) e CLI único (`python -m santa_packing`).
+  * `santa_packing/cli/`: CLIs menores/internas (`generate_submission`, `improve_submission`, `autofix_submission`, `score_submission`).
+  * `santa_packing/_tools/`: ferramentas pesadas de experimento (hunt, sweep/ensemble, treino, bench, etc.).
   * `santa_packing/main.py`: runner de SA batch (JAX; gera `best_packing.png`).
-  * `santa_packing/cli/`: CLIs (`generate_submission`, `score_submission`, `make_submit`, `sweep_ensemble`, treino, etc.).
+* `bin/`: binaries C++ (solvers e pós-otimização).
 * `scripts/`: wrappers e rotinas auxiliares (build, training, submission, etc.).
 * `configs/`: configs JSON para evitar flags longas.
 * `runs/`: logs/artefatos de treino/experimentos.
@@ -46,9 +59,10 @@ Notebook recomendado (gerar + score + log):
 
 ## Configs (JSON/YAML)
 
-As CLIs principais carregam configs por padrão (quando presentes):
+Os comandos principais carregam configs por padrão (quando presentes):
 
-* `generate_submission` / `make_submit`: `configs/submit.json`
+* `python -m santa_packing`: `configs/submit_strong.json` (fallback `configs/submit.json`)
+* `generate_submission`: `configs/submit.json`
 * `sweep_ensemble`: `configs/ensemble.json`
 
 Para sobrescrever, passe flags normalmente; para trocar/ignorar config: `--config ...` ou `--no-config`.
@@ -67,32 +81,15 @@ make format
 Gerar um submission (baseline):
 
 ```bash
-python -m santa_packing.cli.generate_submission --out submission.csv --nmax 200
+python -m santa_packing
 ```
 
-Scorar um submission:
+O comando acima já gera, melhora, valida/scora e exporta um `submission.csv` pronto para enviar ao Kaggle (além de arquivar artefatos em `submissions/`).
+
+Opcional: re-scorar um CSV manualmente (útil para checar outros arquivos):
 
 ```bash
-python -m santa_packing.cli.score_submission submission.csv --pretty
-```
-
-Dica: para estimativa rápida use `--no-overlap`; para validação antes de submeter use `--overlap-mode kaggle` (mais conservador, evita ERROR por “touching”/tolerância).
-
-```bash
-python -m santa_packing.cli.score_submission submission.csv --overlap-mode kaggle
-```
-
-Melhorar um submission existente (subset-smoothing + melhora do `n=200` via insert+SA + reparo/validação):
-
-```bash
-python -m santa_packing.cli.improve_submission submission.csv --out submission.csv --smooth-window 60 --improve-n200
-```
-
-Gerar + validar + arquivar (recomendado para “submeter” com rastreabilidade):
-
-```bash
-python -m santa_packing.cli.make_submit --name baseline
-# -> submissions/<timestamp>_<sha>.../{submission.csv,score.json,meta.json,*.log}
+python -m santa_packing.cli.score_submission submission.csv --overlap-mode kaggle --pretty
 ```
 
 Para detalhes de SA, veja `docs/sa.md`. Para ensemble/sweep, veja `docs/ensemble.md`. Para treino (L2O/meta-init/heatmap), veja `docs/l2o.md`.

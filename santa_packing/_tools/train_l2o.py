@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""CLI to train an L2O policy (REINFORCE) for packing refinement."""
+"""Tool to train an L2O policy (REINFORCE) for packing refinement."""
 
 from __future__ import annotations
 

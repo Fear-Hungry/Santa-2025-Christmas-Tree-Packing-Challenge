@@ -11,9 +11,7 @@ requires-python = ">=3.10"
 dependencies = ["numpy"]
 
 [project.scripts]
-santa-generate-submission = "santa_packing.cli.generate_submission:main"
-santa-score-submission = "santa_packing.cli.score_submission:main"
-santa-make-submit = "santa_packing.cli.make_submit:main"
+santa-solve = "santa_packing.workflow:cli_main"
 
 [project.optional-dependencies]
 train = ["jax[cpu]", "matplotlib"]

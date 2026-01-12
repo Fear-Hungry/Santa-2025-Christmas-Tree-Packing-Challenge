@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 import santa_packing.lattice as lattice_mod
-from santa_packing.cli.config_utils import config_to_argv, default_config_path
+from santa_packing.config import config_to_argv, default_config_path
 from santa_packing.constants import EPS
 from santa_packing.geom_np import (
     packing_bbox,
@@ -84,10 +84,8 @@ def _finalize_puzzle(
 
     # --- Fast stochastic "detouch": tiny jitter often breaks exact-touch degeneracies
     # without meaningfully affecting the score.
-    #
-    # For conservative/kaggle modes, do a cheap "expand + repair" early: a small
-    # expansion creates slack, and then `repair_overlaps` can break long chains of
-    # sliding touches without needing large global scaling.
+    # For conservative/kaggle modes, prefer minimal per-tree nudges (repair) over
+    # global scaling to preserve score.
     if overlap_mode != "strict":
         for attempt in range(3):
             jitter_xy = 2e-6 * (2.0**attempt)
@@ -103,65 +101,45 @@ def _finalize_puzzle(
             if first_overlap_pair(points, candidate, eps=EPS, mode=overlap_mode) is None:
                 return candidate
 
-        # Scaling is cheap and monotone for feasibility; find a feasible scale first
-        # (this avoids spending minutes in doomed repair loops on very tight packings).
-        for scale in (
-            1.0005,
-            1.001,
-            1.002,
-            1.003,
-            1.005,
-            1.007,
-            1.01,
-            1.015,
-            1.02,
-            1.03,
-            1.05,
-            1.08,
-            1.10,
-            1.12,
-            1.15,
-            1.18,
-            1.20,
-            1.25,
-        ):
+        # Monotone "detouch": increasing a uniform expansion about the centroid
+        # can only increase inter-tree distances. Search the minimal scale that
+        # becomes overlap-free *after quantization* to preserve score.
+        def _try_scale(scale: float) -> np.ndarray | None:
             candidate = _scale_about_center_xy(poses, float(scale))
             try:
                 candidate = fit_xy_in_bounds(candidate)
                 candidate = quantize_for_submission(candidate)
             except Exception:
-                continue
+                return None
             if first_overlap_pair(points, candidate, eps=EPS, mode=overlap_mode) is None:
                 return candidate
+            return None
 
-        # If we still couldn't detouch via scaling, try repair on a few moderately
-        # expanded states (gives the nudge solver slack to break "sliding" chains).
-        for scale in (1.05, 1.10, 1.15, 1.20):
-            scaled = _scale_about_center_xy(poses, float(scale))
-            try:
-                scaled = fit_xy_in_bounds(scaled)
-                scaled = quantize_for_submission(scaled)
-            except Exception:
-                continue
+        # Find the minimal uniform scale (monotone) that becomes overlap-free
+        # *after quantization*. This is typically faster and more reliable than
+        # long repair loops for touch-heavy packings.
+        lo = 1.0
+        hi = 1.0005
+        scaled = _try_scale(hi)
+        # Allow large scales as last-resort to avoid pathological slow repairs
+        # on severely overlapping inputs (autofix use-case).
+        while scaled is None and hi < 10.0:
+            hi *= 1.05
+            scaled = _try_scale(hi)
 
-            repaired = repair_overlaps(
-                points,
-                scaled,
-                seed=seed + int(scale * 1e6),
-                max_iters=6000,
-                step_xy=8e-4,
-                step_deg=0.2,
-                overlap_mode=overlap_mode,
-            )
-            if repaired is None:
-                continue
-            try:
-                repaired = fit_xy_in_bounds(repaired)
-                repaired = quantize_for_submission(repaired)
-            except Exception:
-                continue
-            if first_overlap_pair(points, repaired, eps=EPS, mode=overlap_mode) is None:
-                return repaired
+        if scaled is not None:
+            best = hi
+            for _ in range(24):
+                mid = 0.5 * (lo + best)
+                if _try_scale(mid) is not None:
+                    best = mid
+                else:
+                    lo = mid
+            out = _try_scale(best)
+            if out is None:
+                out = scaled
+            safer = _try_scale(best * 1.0001)
+            return safer if safer is not None else out
 
     for attempt in range(6):
         jitter_xy = 2e-6 * (2.0**attempt)

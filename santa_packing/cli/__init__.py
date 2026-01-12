@@ -1,4 +1,6 @@
-"""CLI entrypoints for santa_packing.
+"""Internal CLI tools.
 
-Prefer invoking via console scripts (after install) or `python -m santa_packing.cli.<cmd>`.
+Public entrypoints:
+- `python -m santa_packing`
+- `from santa_packing.workflow import solve`
 """

@@ -2,7 +2,7 @@
 
 """Run many `bin/compact_contact` jobs and ensemble the best per puzzle `n`.
 
-This CLI is intended for massive local experiments:
+This tool is intended for massive local experiments:
 - spawn many `compact_contact` runs with different seeds (parallel)
 - parse per-`n` side lengths from each log (fast)
 - build a strict per-`n` ensemble submission
@@ -23,7 +23,8 @@ import numpy as np
 
 from santa_packing.cli.improve_submission import _write_submission
 from santa_packing.geom_np import packing_score
-from santa_packing.scoring import load_submission
+from santa_packing.scoring import first_overlap_pair, load_submission
+from santa_packing.submission_format import fit_xy_in_bounds, quantize_for_submission
 from santa_packing.tree_data import TREE_POINTS
 
 
@@ -215,6 +216,74 @@ def _write_ensemble_csv(
                 f.write(f"{n},{c.seed},{c.score:.12f},{c.side[n]:.17f}\n")
 
 
+def _canonicalize_poses(poses: np.ndarray) -> np.ndarray:
+    poses = np.array(poses, dtype=float, copy=True)
+    if poses.shape[0] == 0:
+        return poses
+    poses[:, 2] = np.mod(poses[:, 2], 360.0)
+    poses = fit_xy_in_bounds(poses)
+    poses = quantize_for_submission(poses)
+    return poses
+
+
+def _blend_safe_per_puzzle(
+    *,
+    base_csv: Path,
+    candidate_csv: Path,
+    out_csv: Path,
+    nmax: int,
+    overlap_mode: str,
+) -> tuple[Path, dict]:
+    base = load_submission(base_csv, nmax=nmax)
+    cand = load_submission(candidate_csv, nmax=nmax)
+
+    chosen: dict[int, np.ndarray] = {}
+    used_candidate = 0
+    candidate_overlaps = 0
+    candidate_worse_or_equal = 0
+
+    for n in range(1, nmax + 1):
+        base_poses = base.get(n)
+        cand_poses = cand.get(n)
+        if base_poses is None or base_poses.shape != (n, 3):
+            raise RuntimeError(f"Base CSV missing puzzle {n} or wrong shape.")
+        if cand_poses is None or cand_poses.shape != (n, 3):
+            raise RuntimeError(f"Candidate CSV missing puzzle {n} or wrong shape.")
+
+        base_q = _canonicalize_poses(base_poses)
+        cand_q = _canonicalize_poses(cand_poses)
+
+        if first_overlap_pair(_POINTS_NP, base_q, mode=overlap_mode) is not None:
+            raise RuntimeError(f"Base CSV has overlap in puzzle {n} (mode={overlap_mode}).")
+
+        if first_overlap_pair(_POINTS_NP, cand_q, mode=overlap_mode) is not None:
+            candidate_overlaps += 1
+            chosen[n] = base_q
+            continue
+
+        s_base = float(packing_score(_POINTS_NP, base_q))
+        s_cand = float(packing_score(_POINTS_NP, cand_q))
+        if s_cand + 1e-12 < s_base:
+            chosen[n] = cand_q
+            used_candidate += 1
+        else:
+            chosen[n] = base_q
+            candidate_worse_or_equal += 1
+
+    _write_submission(out_csv, chosen, nmax=nmax)
+    meta = {
+        "used_candidate": int(used_candidate),
+        "candidate_overlaps": int(candidate_overlaps),
+        "candidate_worse_or_equal": int(candidate_worse_or_equal),
+        "nmax": int(nmax),
+        "overlap_mode": str(overlap_mode),
+        "base_csv": str(base_csv),
+        "candidate_csv": str(candidate_csv),
+        "out_csv": str(out_csv),
+    }
+    return out_csv, meta
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     ap = argparse.ArgumentParser(description="Run many compact_contact seeds + strict per-n ensemble.")
@@ -250,6 +319,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--post-restarts", type=int, default=4)
     ap.add_argument("--post-seed", type=int, default=1)
     ap.add_argument("--post-threads", type=int, default=0)
+    ap.add_argument(
+        "--post-overlap-mode",
+        type=str,
+        default="strict",
+        choices=["strict", "conservative", "kaggle"],
+        help="Overlap mode enforced after post_opt (default: strict).",
+    )
 
     ns = ap.parse_args(argv)
 
@@ -343,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
     current_path = ensemble_out
 
     if int(ns.smooth_window) > 0:
+        prev = current_path
         smooth_out = out_dir / f"ensemble_smooth{int(ns.smooth_window)}.csv"
         cmd = [
             sys.executable,
@@ -358,20 +435,26 @@ def main(argv: list[str] | None = None) -> int:
         ]
         _eprint(f"Running smoothing: {' '.join(cmd)}")
         subprocess.run(cmd, check=True, cwd=str(root))
-        current_path = smooth_out
         from santa_packing.scoring import score_submission  # noqa: E402
 
-        res = score_submission(current_path, nmax=int(ns.nmax), overlap_mode="strict")
-        _eprint(f"Smoothed score (strict): {res.score:.12f}")
+        try:
+            res = score_submission(smooth_out, nmax=int(ns.nmax), overlap_mode="strict")
+            _eprint(f"Smoothed score (strict): {res.score:.12f}")
+            current_path = smooth_out
+        except Exception as exc:
+            _eprint(f"[warn] Smoothing produced overlap; keeping previous ({prev}): {exc}")
+            current_path = prev
 
     if bool(ns.post_opt):
+        prev = current_path
+        post_raw = out_dir / "ensemble_postopt_raw.csv"
         post_out = out_dir / "ensemble_postopt.csv"
         cmd = [
             str((root / "bin" / "post_opt").resolve()),
             "--input",
             str(current_path),
             "--output",
-            str(post_out),
+            str(post_raw),
             "--iters",
             str(int(ns.post_iters)),
             "--restarts",
@@ -383,11 +466,41 @@ def main(argv: list[str] | None = None) -> int:
         ]
         _eprint(f"Running post_opt: {' '.join(cmd)}")
         subprocess.run(cmd, check=True, cwd=str(root))
-        current_path = post_out
         from santa_packing.scoring import score_submission  # noqa: E402
 
-        res = score_submission(current_path, nmax=int(ns.nmax), overlap_mode="strict")
-        _eprint(f"Post-opt score (strict): {res.score:.12f}")
+        # post_opt is not guaranteed to preserve feasibility. Enforce it by blending per puzzle:
+        # keep post_opt only when it's overlap-free (in the requested mode) and better.
+        try:
+            blended, meta = _blend_safe_per_puzzle(
+                base_csv=prev,
+                candidate_csv=post_raw,
+                out_csv=post_out,
+                nmax=int(ns.nmax),
+                overlap_mode=str(ns.post_overlap_mode),
+            )
+            _eprint(
+                "Post-opt blend:",
+                f"used_candidate={meta['used_candidate']}",
+                f"candidate_overlaps={meta['candidate_overlaps']}",
+                f"candidate_worse_or_equal={meta['candidate_worse_or_equal']}",
+            )
+            current_path = blended
+        except Exception as exc:
+            _eprint(f"[warn] Post-opt blend failed; keeping previous ({prev}): {exc}")
+            current_path = prev
+
+        try:
+            res = score_submission(current_path, nmax=int(ns.nmax), overlap_mode=str(ns.post_overlap_mode))
+            _eprint(f"Post-opt score ({ns.post_overlap_mode}, safe): {res.score:.12f}")
+        except Exception as exc:
+            _eprint(f"[warn] Post-opt output still overlaps ({ns.post_overlap_mode}): {exc}")
+            res = score_submission(
+                current_path,
+                nmax=int(ns.nmax),
+                check_overlap=False,
+                overlap_mode=str(ns.post_overlap_mode),
+            )
+            _eprint(f"Post-opt score ({ns.post_overlap_mode}, no-overlap): {res.score:.12f}")
 
     print(str(current_path))
     return 0

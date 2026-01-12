@@ -6,7 +6,7 @@ This script targets the older "independent puzzles" workflow (solve each `n`
 separately) and merges multiple candidate submissions puzzle-by-puzzle.
 
 Note: for the current Python pipeline (generate + multi-start + per-n ensemble),
-prefer `python -m santa_packing.cli.sweep_ensemble` with `scripts/submission/portfolios/*.json`.
+prefer `python -m santa_packing._tools.sweep_ensemble` with `scripts/submission/portfolios/*.json`.
 """
 
 from __future__ import annotations

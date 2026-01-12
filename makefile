@@ -79,34 +79,34 @@ generate-submission:
 	$(PY) -m santa_packing.cli.generate_submission --config $(CONFIG) --nmax $(NMAX) --seed $(SEED) --overlap-mode $(OVERLAP_MODE) --out $(OUT) $(GEN_ARGS)
 
 submit:
-	$(PY) -m santa_packing.cli.make_submit --config $(CONFIG) --nmax $(NMAX) --name $(NAME) --submissions-dir $(SUBMISSIONS_DIR) -- $(GEN_ARGS)
+	$(PY) -m santa_packing --config $(CONFIG) --nmax $(NMAX) --name $(NAME) --submissions-dir $(SUBMISSIONS_DIR) -- $(GEN_ARGS)
 
 score:
 	$(PY) -m santa_packing.cli.score_submission $(SUB) --pretty
 
 sweep-ensemble:
-	$(PY) -m santa_packing.cli.sweep_ensemble --config $(ENSEMBLE_CONFIG) --nmax $(NMAX) --seeds $(SEEDS) --jobs $(JOBS) --out $(OUT) $(SWEEP_ARGS)
+	$(PY) -m santa_packing._tools.sweep_ensemble --config $(ENSEMBLE_CONFIG) --nmax $(NMAX) --seeds $(SEEDS) --jobs $(JOBS) --out $(OUT) $(SWEEP_ARGS)
 
 detouch-submission:
-	$(PY) -m santa_packing.cli.detouch_submission $(DET_IN) --out $(DET_OUT) --scale $(DET_SCALE) --nmax $(NMAX)
+	$(PY) -m santa_packing._tools.detouch_submission $(DET_IN) --out $(DET_OUT) --scale $(DET_SCALE) --nmax $(NMAX)
 
 train-meta:
-	$(PY) -m santa_packing.cli.train_meta_init $(TRAIN_META_ARGS)
+	$(PY) -m santa_packing._tools.train_meta_init $(TRAIN_META_ARGS)
 
 train-heatmap:
-	$(PY) -m santa_packing.cli.train_heatmap_meta $(TRAIN_HEATMAP_ARGS)
+	$(PY) -m santa_packing._tools.train_heatmap_meta $(TRAIN_HEATMAP_ARGS)
 
 train-l2o:
-	$(PY) -m santa_packing.cli.train_l2o $(TRAIN_L2O_ARGS)
+	$(PY) -m santa_packing._tools.train_l2o $(TRAIN_L2O_ARGS)
 
 train-l2o-bc:
-	$(PY) -m santa_packing.cli.train_l2o_bc $(TRAIN_L2O_BC_ARGS)
+	$(PY) -m santa_packing._tools.train_l2o_bc $(TRAIN_L2O_BC_ARGS)
 
 collect-sa-dataset:
-	$(PY) -m santa_packing.cli.collect_sa_dataset $(SA_DATASET_ARGS)
+	$(PY) -m santa_packing._tools.collect_sa_dataset $(SA_DATASET_ARGS)
 
 bench-fastcollide:
-	$(PY) -m santa_packing.cli.bench_fastcollide
+	$(PY) -m santa_packing._tools.bench_fastcollide
 
 pre-commit:
 	pre-commit run -a

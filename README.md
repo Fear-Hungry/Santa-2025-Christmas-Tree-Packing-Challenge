@@ -8,26 +8,23 @@ Este repositório é um **baseline/laboratório** para o desafio de *packing* 2D
 
 ```bash
 bash scripts/setup_venv.sh
-python -m santa_packing.cli.generate_submission --out submission.csv --nmax 200
-python -m santa_packing.cli.score_submission submission.csv --pretty
+python -m santa_packing
+# -> escreve ./submission.csv e arquiva o run em ./submissions/<timestamp>...
 ```
+
+Via Python (script/notebook): `from santa_packing.workflow import solve`
 
 ## Melhorar o score (pipeline atual)
 
-O gerador acima é **baseline**. Para resultados bem melhores, use o pós-processamento:
-
-```bash
-python -m santa_packing.cli.improve_submission submission.csv --out submission.csv \
-  --smooth-window 60 --improve-n200 --overlap-mode strict
-python -m santa_packing.cli.score_submission submission.csv --nmax 200 --overlap-mode strict --pretty
-```
+O pipeline padrão (`python -m santa_packing`) já roda pós-processamento (subset-smoothing + polish do `n=200`)
+e valida em `--overlap-mode kaggle` (mais conservador; evita ERROR por “touching”/tolerância no Kaggle).
 
 Reprodução do melhor run local atual (atingiu `~72.816` com validação *strict*):
 
 ```bash
 # Requer os binários C++ em `bin/` (compact_contact + post_opt).
 # Roda vários seeds, faz ensemble por n, aplica smoothing e post-opt.
-best_csv=$(python -m santa_packing.cli.hunt_compact_contact \
+best_csv=$(python -m santa_packing._tools.hunt_compact_contact \
   --base submission.csv \
   --out-dir /tmp/hunt_cc \
   --seeds 4000..4127 --jobs 16 \
@@ -58,10 +55,10 @@ python -m santa_packing.cli.score_submission submission_kaggle.csv --nmax 200 --
 
 ## Configuração (reprodutibilidade)
 
-Os defaults das CLIs ficam centralizados em `configs/`:
+O workflow (`python -m santa_packing`) carrega config por padrão (quando existir):
 
-* `configs/submit.json` (default para `generate_submission` e `make_submit`)
-* `configs/submit_strong.json` (preset “pesado”: `--mother-prefix` + SA com vizinhança; use via `--config`)
+* `configs/submit_strong.json` (default do workflow; preset “pesado”)
+* `configs/submit.json` (preset mais leve; use via `--config`)
 * `configs/ensemble.json` (default para `sweep_ensemble`)
 
 Para sobrescrever, passe flags normalmente; para trocar/ignorar config: use `--config ...` ou `--no-config`.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Wrapper script for `santa_packing.cli.train_l2o_bc`."""
+"""Wrapper script for `santa_packing._tools.train_l2o_bc`."""
 
 from __future__ import annotations
 
@@ -19,9 +19,9 @@ def _repo_root() -> Path:
 
 
 def main() -> int:
-    """Execute `python -m santa_packing.cli.train_l2o_bc` in the repo root."""
+    """Execute `python -m santa_packing._tools.train_l2o_bc` in the repo root."""
     root = _repo_root()
-    cmd = [sys.executable, "-m", "santa_packing.cli.train_l2o_bc", *sys.argv[1:]]
+    cmd = [sys.executable, "-m", "santa_packing._tools.train_l2o_bc", *sys.argv[1:]]
     return int(subprocess.call(cmd, cwd=str(root)))
 
 

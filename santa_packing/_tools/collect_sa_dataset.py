@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""CLI to collect SA trajectories as a behavior cloning dataset."""
+"""Tool to collect SA trajectories as a behavior cloning dataset."""
 
 from __future__ import annotations
 

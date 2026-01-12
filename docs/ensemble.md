@@ -20,7 +20,7 @@ Sobre overlap-check:
 Exemplo com receitas inline:
 
 ```bash
-python -m santa_packing.cli.sweep_ensemble --nmax 200 --seeds 1,2,3 \
+python -m santa_packing._tools.sweep_ensemble --nmax 200 --seeds 1,2,3 \
   --recipe hex:"--lattice-pattern hex --lattice-rotations 0,15,30" \
   --recipe square:"--lattice-pattern square --lattice-rotations 0,15,30" \
   --out submission_ensemble.csv
@@ -29,7 +29,7 @@ python -m santa_packing.cli.sweep_ensemble --nmax 200 --seeds 1,2,3 \
 Exemplo usando um portfólio JSON:
 
 ```bash
-python -m santa_packing.cli.sweep_ensemble --nmax 200 --seeds 1..3 --jobs 3 \
+python -m santa_packing._tools.sweep_ensemble --nmax 200 --seeds 1..3 --jobs 3 \
   --recipes-json scripts/submission/portfolios/mixed.json \
   --out submission_ensemble.csv
 ```

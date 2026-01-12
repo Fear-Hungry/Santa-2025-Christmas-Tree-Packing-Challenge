@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""CLI to train a meta-initialization policy with ES + fixed SA steps."""
+"""Tool to train a meta-initialization policy with ES + fixed SA steps."""
 
 from __future__ import annotations
 

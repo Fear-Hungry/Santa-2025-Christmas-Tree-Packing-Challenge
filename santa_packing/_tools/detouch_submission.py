@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""CLI to post-process a submission by "detouching" each puzzle.
+"""Tool to post-process a submission by "detouching" each puzzle.
 
 Some evaluators treat boundary touching as overlap; a small uniform expansion of
 each puzzle around its centroid can resolve contact-only collisions.

@@ -561,9 +561,13 @@ def _repair_overlaps(
         i, j = pair
 
         moved = False
-        for _try in range(16):
-            move = i if rng.random() < 0.5 else j
+        move_order = [i, j]
+        if rng.random() < 0.5:
+            move_order.reverse()
+
+        for move in move_order:
             other = j if move == i else i
+            base_pose = state.poses[move].copy()
 
             direction = state.centers[move] - state.centers[other]
             norm = float(np.linalg.norm(direction))
@@ -574,38 +578,251 @@ def _repair_overlaps(
             unit = direction / norm
             perp = np.array([-unit[1], unit[0]], dtype=float)
 
-            # Mix in a perpendicular component to break "sliding" edge contacts.
-            perp_scale = float(rng.normal(0.0, 0.75))
-            d = unit + perp * perp_scale
-            d_norm = float(np.linalg.norm(d))
-            if d_norm < 1e-12:
-                d = unit
-                d_norm = 1.0
-            d = d / d_norm
+            # Prefer a small deterministic move set first: more reliable for
+            # "sliding touch" edge contacts than pure random jitter, while still
+            # keeping the per-iteration budget bounded.
+            dirs: list[np.ndarray] = [
+                unit,
+                perp,
+                -perp,
+                unit + perp,
+                unit - perp,
+            ]
+            normed_dirs: list[np.ndarray] = []
+            for d in dirs:
+                d_norm = float(np.linalg.norm(d))
+                if d_norm < 1e-12:
+                    continue
+                normed_dirs.append(d / d_norm)
 
-            # Try a small set of step scales (helps escape local dead-ends).
-            step_scale = (0.5, 1.0, 2.0, 4.0)[int(rng.integers(0, 4))]
-            step = float(step_xy) * float(step_scale)
-
-            noise = rng.normal(0.0, step * 0.10, size=(2,))
-            cand_pose = state.poses[move].copy()
-            cand_pose[0:2] = cand_pose[0:2] + d * step + noise
             if step_deg != 0.0:
-                cand_pose[2] = float(math.fmod(cand_pose[2] + rng.normal(0.0, float(step_deg)), 360.0))
-                if cand_pose[2] < 0.0:
-                    cand_pose[2] += 360.0
+                rot = float(step_deg)
+                # Rotation-only tries first: often breaks collinear contacts
+                # without expanding the packing.
+                for ddeg in (rot, -rot):
+                    cand_pose = base_pose.copy()
+                    cand_pose[2] = float(math.fmod(cand_pose[2] + ddeg, 360.0))
+                    if cand_pose[2] < 0.0:
+                        cand_pose[2] += 360.0
+                    cand_poly = transform_polygon(points, cand_pose)
+                    cand_center = cand_pose[:2]
+                    if _collides_one_vs_all(state, move, cand_center, cand_poly, overlap_mode=overlap_mode):
+                        continue
+                    state.poses[move] = cand_pose
+                    state.centers[move] = cand_center
+                    state.polys[move] = cand_poly
+                    state.bboxes[move] = polygon_bbox(cand_poly)
+                    moved = True
+                    break
+                if moved:
+                    break
 
-            cand_poly = transform_polygon(points, cand_pose)
-            cand_center = cand_pose[:2]
-            if _collides_one_vs_all(state, move, cand_center, cand_poly, overlap_mode=overlap_mode):
-                continue
+            # Escalate step scales deterministically (small -> larger).
+            for step_scale in (1.0, 2.0, 4.0, 8.0):
+                step = float(step_xy) * float(step_scale)
+                if step <= 0.0:
+                    continue
+                for d in normed_dirs:
+                    cand_pose = base_pose.copy()
+                    cand_pose[0:2] = cand_pose[0:2] + d * step
+                    cand_poly = transform_polygon(points, cand_pose)
+                    cand_center = cand_pose[:2]
+                    if _collides_one_vs_all(state, move, cand_center, cand_poly, overlap_mode=overlap_mode):
+                        continue
 
-            state.poses[move] = cand_pose
-            state.centers[move] = cand_center
-            state.polys[move] = cand_poly
-            state.bboxes[move] = polygon_bbox(cand_poly)
-            moved = True
-            break
+                    state.poses[move] = cand_pose
+                    state.centers[move] = cand_center
+                    state.polys[move] = cand_poly
+                    state.bboxes[move] = polygon_bbox(cand_poly)
+                    moved = True
+                    break
+                if moved:
+                    break
+            if moved:
+                break
+
+            # Fallback: a small random budget helps escape local dead-ends.
+            for _try in range(12):
+                perp_scale = float(rng.normal(0.0, 0.75))
+                d = unit + perp * perp_scale
+                d_norm = float(np.linalg.norm(d))
+                if d_norm < 1e-12:
+                    d = unit
+                    d_norm = 1.0
+                d = d / d_norm
+
+                step_scale = (0.5, 1.0, 2.0, 4.0, 8.0)[int(rng.integers(0, 5))]
+                step = float(step_xy) * float(step_scale)
+                noise = rng.normal(0.0, step * 0.10, size=(2,))
+
+                cand_pose = base_pose.copy()
+                cand_pose[0:2] = cand_pose[0:2] + d * step + noise
+                if step_deg != 0.0:
+                    cand_pose[2] = float(math.fmod(cand_pose[2] + rng.normal(0.0, float(step_deg)), 360.0))
+                    if cand_pose[2] < 0.0:
+                        cand_pose[2] += 360.0
+
+                cand_poly = transform_polygon(points, cand_pose)
+                cand_center = cand_pose[:2]
+                if _collides_one_vs_all(state, move, cand_center, cand_poly, overlap_mode=overlap_mode):
+                    continue
+
+                state.poses[move] = cand_pose
+                state.centers[move] = cand_center
+                state.polys[move] = cand_poly
+                state.bboxes[move] = polygon_bbox(cand_poly)
+                moved = True
+                break
+            if moved:
+                break
+
+        # If neither tree can move alone, try a symmetric "pair nudge" that moves
+        # both trees by half-steps in opposite directions (often succeeds in very
+        # tight local configurations).
+        if not moved and n >= 2:
+            base_i = state.poses[i].copy()
+            base_j = state.poses[j].copy()
+
+            direction = state.centers[i] - state.centers[j]
+            norm = float(np.linalg.norm(direction))
+            if norm < 1e-12:
+                ang = float(rng.uniform(0.0, 2.0 * math.pi))
+                direction = np.array([math.cos(ang), math.sin(ang)], dtype=float)
+                norm = 1.0
+            unit = direction / norm
+            perp = np.array([-unit[1], unit[0]], dtype=float)
+
+            dirs: list[np.ndarray] = [unit, perp, -perp, unit + perp, unit - perp]
+            normed_dirs: list[np.ndarray] = []
+            for d in dirs:
+                d_norm = float(np.linalg.norm(d))
+                if d_norm < 1e-12:
+                    continue
+                normed_dirs.append(d / d_norm)
+
+            exclude = np.zeros((n,), dtype=bool)
+            exclude[i] = True
+            exclude[j] = True
+
+            for step_scale in (1.0, 2.0, 4.0, 8.0):
+                step = float(step_xy) * float(step_scale)
+                if step <= 0.0:
+                    continue
+                for d in normed_dirs:
+                    cand_i = base_i.copy()
+                    cand_j = base_j.copy()
+                    cand_i[0:2] = cand_i[0:2] + d * step
+                    cand_j[0:2] = cand_j[0:2] - d * step
+
+                    poly_i = transform_polygon(points, cand_i)
+                    poly_j = transform_polygon(points, cand_j)
+                    center_i = cand_i[:2]
+                    center_j = cand_j[:2]
+
+                    if intersects(poly_i, poly_j):
+                        continue
+                    if _collides_candidate_excluding(state, center_i, poly_i, exclude=exclude, overlap_mode=overlap_mode):
+                        continue
+                    if _collides_candidate_excluding(state, center_j, poly_j, exclude=exclude, overlap_mode=overlap_mode):
+                        continue
+
+                    state.poses[i] = cand_i
+                    state.centers[i] = center_i
+                    state.polys[i] = poly_i
+                    state.bboxes[i] = polygon_bbox(poly_i)
+
+                    state.poses[j] = cand_j
+                    state.centers[j] = center_j
+                    state.polys[j] = poly_j
+                    state.bboxes[j] = polygon_bbox(poly_j)
+
+                    moved = True
+                    break
+                if moved:
+                    break
+
+        # Last resort for non-strict modes: allow touching with *other* trees while
+        # breaking the current pair, as long as we stay strict-feasible (no area
+        # overlaps). This helps unlock highly constrained local configurations.
+        if not moved and overlap_mode != "strict":
+            for move in move_order:
+                other = j if move == i else i
+                base_pose = state.poses[move].copy()
+
+                direction = state.centers[move] - state.centers[other]
+                norm = float(np.linalg.norm(direction))
+                if norm < 1e-12:
+                    ang = float(rng.uniform(0.0, 2.0 * math.pi))
+                    direction = np.array([math.cos(ang), math.sin(ang)], dtype=float)
+                    norm = 1.0
+                unit = direction / norm
+                perp = np.array([-unit[1], unit[0]], dtype=float)
+
+                dirs: list[np.ndarray] = [unit, perp, -perp, unit + perp, unit - perp]
+                normed_dirs = []
+                for d in dirs:
+                    d_norm = float(np.linalg.norm(d))
+                    if d_norm < 1e-12:
+                        continue
+                    normed_dirs.append(d / d_norm)
+
+                rot_deltas: tuple[float, ...] = (0.0,)
+                if step_deg != 0.0:
+                    rot = float(step_deg)
+                    rot_deltas = (0.0, rot, -rot)
+
+                    # Rotation-only first.
+                    for ddeg in (rot, -rot):
+                        cand_pose = base_pose.copy()
+                        cand_pose[2] = float(math.fmod(cand_pose[2] + ddeg, 360.0))
+                        if cand_pose[2] < 0.0:
+                            cand_pose[2] += 360.0
+                        cand_poly = transform_polygon(points, cand_pose)
+                        cand_center = cand_pose[:2]
+                        if _collides_one_vs_all(state, move, cand_center, cand_poly, overlap_mode="strict"):
+                            continue
+                        if intersects(cand_poly, state.polys[other]):
+                            continue
+                        state.poses[move] = cand_pose
+                        state.centers[move] = cand_center
+                        state.polys[move] = cand_poly
+                        state.bboxes[move] = polygon_bbox(cand_poly)
+                        moved = True
+                        break
+                    if moved:
+                        break
+
+                for step_scale in (1.0, 2.0, 4.0, 8.0):
+                    step = float(step_xy) * float(step_scale)
+                    if step <= 0.0:
+                        continue
+                    for d in normed_dirs:
+                        for ddeg in rot_deltas:
+                            cand_pose = base_pose.copy()
+                            cand_pose[0:2] = cand_pose[0:2] + d * step
+                            if ddeg != 0.0:
+                                cand_pose[2] = float(math.fmod(cand_pose[2] + ddeg, 360.0))
+                                if cand_pose[2] < 0.0:
+                                    cand_pose[2] += 360.0
+                            cand_poly = transform_polygon(points, cand_pose)
+                            cand_center = cand_pose[:2]
+                            if _collides_one_vs_all(state, move, cand_center, cand_poly, overlap_mode="strict"):
+                                continue
+                            if intersects(cand_poly, state.polys[other]):
+                                continue
+
+                            state.poses[move] = cand_pose
+                            state.centers[move] = cand_center
+                            state.polys[move] = cand_poly
+                            state.bboxes[move] = polygon_bbox(cand_poly)
+                            moved = True
+                            break
+                        if moved:
+                            break
+                    if moved:
+                        break
+                if moved:
+                    break
 
         if not moved:
             continue

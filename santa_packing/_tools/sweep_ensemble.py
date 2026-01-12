@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""CLI to sweep multiple generation recipes and ensemble per puzzle size.
+"""Tool to sweep multiple generation recipes and ensemble per puzzle size.
 
 This tool runs `generate_submission` for multiple seeds/recipes and then
 selects the best candidate per `n` (minimizing `s_n`).
@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 
-from santa_packing.cli.config_utils import config_to_argv, default_config_path
+from santa_packing.config import config_to_argv, default_config_path
 from santa_packing.constants import EPS
 from santa_packing.scoring import first_overlap_pair, load_submission
 from santa_packing.tree_data import TREE_POINTS

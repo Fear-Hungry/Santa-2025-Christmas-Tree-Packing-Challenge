@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""CLI to train an L2O policy via behavior cloning from an SA dataset."""
+"""Tool to train an L2O policy via behavior cloning from an SA dataset."""
 
 from __future__ import annotations
 

@@ -241,15 +241,25 @@ def polygons_intersect_strict(poly1: np.ndarray, poly2: np.ndarray) -> bool:
     Returns:
         True if the polygons strictly intersect.
     """
-    # Prefer the robust NumPy predicate to avoid `fastcollide` false positives on touching.
+    # Prefer the optional C++ extension (when available) in hot paths like lattice
+    # spacing search and insertion heuristics.
+    #
+    # Note: the C++ predicate is intentionally conservative (it may classify some
+    # boundary-touch cases as intersections for concave polygons). For "strict"
+    # semantics (touching is allowed), we confirm positive hits with the pure
+    # NumPy predicate to avoid false positives.
+    if _polygons_intersect_fast is not None:
+        if not bool(_polygons_intersect_fast(poly1, poly2)):
+            return False
+        return _polygons_intersect_strict(poly1, poly2, EPS)
     return _polygons_intersect_strict(poly1, poly2, EPS)
 
 
 def polygons_intersect(poly1: np.ndarray, poly2: np.ndarray) -> bool:
     """Conservative intersection check: counts touching as collision (robustness > density)."""
-    # Fast path for obvious intersections (does NOT catch "touch" cases).
-    if polygons_intersect_strict(poly1, poly2):
-        return True
+    # For touch-heavy packings, doing a strict pre-check can double the work
+    # (strict -> false, then inclusive -> true/false). The inclusive predicate
+    # already detects strict intersections, so we directly use it here.
     return _polygons_intersect_conservative(poly1, poly2, EPS)
 
 

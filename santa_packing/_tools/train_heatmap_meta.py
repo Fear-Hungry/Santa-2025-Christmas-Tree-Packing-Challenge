@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""CLI to train a heatmap meta-optimizer with evolution strategies (ES)."""
+"""Tool to train a heatmap meta-optimizer with evolution strategies (ES)."""
 
 from __future__ import annotations
 

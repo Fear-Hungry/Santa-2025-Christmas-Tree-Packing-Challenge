@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""CLI to benchmark the optional `fastcollide` C++ extension."""
+"""Tool to benchmark the optional `fastcollide` C++ extension."""
 
 from __future__ import annotations
 

@@ -12,6 +12,6 @@ Arquivos em `configs/` existem para reduzir a quantidade de flags nas CLIs e fac
 
 ## Arquivos padrão
 
-* `configs/submit.json` — defaults para `make_submit` e `generate_submission`
+* `configs/submit.json` — defaults para `generate_submission` (e fallback do workflow `python -m santa_packing`)
+* `configs/submit_strong.json` — defaults para o workflow `python -m santa_packing` (quando existir)
 * `configs/ensemble.json` — defaults para `sweep_ensemble`
-
