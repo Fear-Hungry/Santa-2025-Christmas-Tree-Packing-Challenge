@@ -16,6 +16,7 @@ santa-solve = "santa_packing.workflow:cli_main"
 [project.optional-dependencies]
 train = ["jax[cpu]", "matplotlib"]
 notebooks = ["ipykernel"]
+milp = ["ortools"]
 dev = ["ruff", "pre-commit", "pytest"]
 
 [tool.setuptools.packages.find]

@@ -326,6 +326,43 @@ def main(argv: list[str] | None = None) -> int:
         choices=["strict", "conservative", "kaggle"],
         help="Overlap mode enforced after post_opt (default: strict).",
     )
+    ap.add_argument(
+        "--post-repair-mode",
+        type=str,
+        default="none",
+        choices=["none", "finalize"],
+        help="If set, attempt bounded repairs for overlapping-but-promising post_opt puzzles (default: none).",
+    )
+    ap.add_argument(
+        "--post-repair-max-puzzles",
+        type=int,
+        default=0,
+        help="Max number of overlapping puzzles to try repairing (default: 0).",
+    )
+    ap.add_argument(
+        "--post-repair-min-gain",
+        type=float,
+        default=0.0,
+        help="Min estimated gain in (s^2/n) to attempt repair (default: 0.0).",
+    )
+    ap.add_argument(
+        "--post-repair-seed",
+        type=int,
+        default=123,
+        help="Seed base used by repair attempts (default: 123).",
+    )
+    ap.add_argument(
+        "--post-repair-n-min",
+        type=int,
+        default=1,
+        help="Only attempt repair for puzzles with n >= this value (default: 1).",
+    )
+    ap.add_argument(
+        "--post-repair-n-max",
+        type=int,
+        default=0,
+        help="Only attempt repair for puzzles with n <= this value (0 disables; default: 0).",
+    )
 
     ns = ap.parse_args(argv)
 
@@ -471,19 +508,49 @@ def main(argv: list[str] | None = None) -> int:
         # post_opt is not guaranteed to preserve feasibility. Enforce it by blending per puzzle:
         # keep post_opt only when it's overlap-free (in the requested mode) and better.
         try:
-            blended, meta = _blend_safe_per_puzzle(
-                base_csv=prev,
-                candidate_csv=post_raw,
-                out_csv=post_out,
-                nmax=int(ns.nmax),
-                overlap_mode=str(ns.post_overlap_mode),
-            )
-            _eprint(
-                "Post-opt blend:",
-                f"used_candidate={meta['used_candidate']}",
-                f"candidate_overlaps={meta['candidate_overlaps']}",
-                f"candidate_worse_or_equal={meta['candidate_worse_or_equal']}",
-            )
+            if str(ns.post_repair_mode).lower().strip() != "none" and int(ns.post_repair_max_puzzles) > 0:
+                from santa_packing.blend import blend_submissions  # noqa: E402
+
+                repair_n_max = None if int(ns.post_repair_n_max) <= 0 else int(ns.post_repair_n_max)
+                blended, meta = blend_submissions(
+                    base_csv=prev,
+                    candidate_csv=post_raw,
+                    out_csv=post_out,
+                    nmax=int(ns.nmax),
+                    overlap_mode=str(ns.post_overlap_mode),
+                    repair_mode=str(ns.post_repair_mode).lower().strip(),
+                    repair_seed=int(ns.post_repair_seed),
+                    repair_max_puzzles=int(ns.post_repair_max_puzzles),
+                    repair_min_gain=float(ns.post_repair_min_gain),
+                    repair_n_min=int(ns.post_repair_n_min),
+                    repair_n_max=repair_n_max,
+                    tol=1e-12,
+                )
+                _eprint(
+                    "Post-opt blend+repair:",
+                    f"used_candidate={meta['used_candidate']}",
+                    f"used_candidate_direct={meta['used_candidate_direct']}",
+                    f"candidate_overlaps={meta['candidate_overlaps']}",
+                    f"candidate_worse_or_equal={meta['candidate_worse_or_equal']}",
+                    f"repair_attempted={meta['repair_attempted']}",
+                    f"repair_used={meta['repair_used']}",
+                    f"repair_failed={meta['repair_failed']}",
+                    f"repair_not_improved={meta['repair_not_improved']}",
+                )
+            else:
+                blended, meta = _blend_safe_per_puzzle(
+                    base_csv=prev,
+                    candidate_csv=post_raw,
+                    out_csv=post_out,
+                    nmax=int(ns.nmax),
+                    overlap_mode=str(ns.post_overlap_mode),
+                )
+                _eprint(
+                    "Post-opt blend:",
+                    f"used_candidate={meta['used_candidate']}",
+                    f"candidate_overlaps={meta['candidate_overlaps']}",
+                    f"candidate_worse_or_equal={meta['candidate_worse_or_equal']}",
+                )
             current_path = blended
         except Exception as exc:
             _eprint(f"[warn] Post-opt blend failed; keeping previous ({prev}): {exc}")

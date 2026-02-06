@@ -69,3 +69,8 @@ env/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Agent/tool state
+/.serena/
+
+!submission.csv

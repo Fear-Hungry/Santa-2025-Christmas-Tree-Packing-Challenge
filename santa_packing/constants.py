@@ -7,6 +7,9 @@ competition constraints used throughout the codebase.
 from __future__ import annotations
 
 # Numerical tolerance used across collision/formatting/validation.
+# Numerical epsilon used by collision/quantization helpers. Keep this large
+# enough to avoid false positives on strict "touching" edge cases, but small
+# enough to not mask real overlaps.
 EPS: float = 1e-9
 
 # Submission formatting.
